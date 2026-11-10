@@ -83,3 +83,11 @@ and small markup adjustments in the render functions.
 - `go test ./...` still passes with no test changes other than class name
   assertions.
 - `./.hooks/pre-push` passes.
+
+## Follow-ups
+
+- The attach control from task 016 is a `<label>` around a `hidden` file
+  input, so it cannot be reached or activated from the keyboard. Make it
+  focusable and operable (for example a visually hidden but focusable input
+  with a `:focus-visible` style on the label).
+- The upload ring never sets `aria-valuenow`. Set it where `--upload` is set.
