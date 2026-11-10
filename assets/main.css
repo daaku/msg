@@ -303,3 +303,11 @@ select {
   font-size: var(--step--2);
   white-space: pre-wrap;
 }
+
+.form-error {
+  color: var(--color-danger);
+
+  &:empty {
+    display: none;
+  }
+}

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 )
 
 const chatStatsAdd = `-- name: ChatStatsAdd :exec
@@ -89,6 +90,305 @@ func (q *Queries) ConfigSetDefault(ctx context.Context, arg ConfigSetDefaultPara
 	return err
 }
 
+const credentialByCredentialID = `-- name: CredentialByCredentialID :one
+SELECT id, user_id, credential_id, credential, label, created_at, last_used_at FROM credentials WHERE credential_id = ?
+`
+
+func (q *Queries) CredentialByCredentialID(ctx context.Context, credentialID []byte) (Credential, error) {
+	row := q.db.QueryRowContext(ctx, credentialByCredentialID, credentialID)
+	var i Credential
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.CredentialID,
+		&i.Credential,
+		&i.Label,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
+const credentialCreate = `-- name: CredentialCreate :one
+INSERT INTO credentials (user_id, credential_id, credential, label, created_at, last_used_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+RETURNING id, user_id, credential_id, credential, label, created_at, last_used_at
+`
+
+type CredentialCreateParams struct {
+	UserID       int64
+	CredentialID []byte
+	Credential   []byte
+	Label        string
+	CreatedAt    int64
+	LastUsedAt   int64
+}
+
+func (q *Queries) CredentialCreate(ctx context.Context, arg CredentialCreateParams) (Credential, error) {
+	row := q.db.QueryRowContext(ctx, credentialCreate,
+		arg.UserID,
+		arg.CredentialID,
+		arg.Credential,
+		arg.Label,
+		arg.CreatedAt,
+		arg.LastUsedAt,
+	)
+	var i Credential
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.CredentialID,
+		&i.Credential,
+		&i.Label,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
+const credentialUpdate = `-- name: CredentialUpdate :exec
+UPDATE credentials SET credential = ?1, last_used_at = ?2
+WHERE id = ?3
+`
+
+type CredentialUpdateParams struct {
+	Credential []byte
+	LastUsedAt int64
+	ID         int64
+}
+
+func (q *Queries) CredentialUpdate(ctx context.Context, arg CredentialUpdateParams) error {
+	_, err := q.db.ExecContext(ctx, credentialUpdate, arg.Credential, arg.LastUsedAt, arg.ID)
+	return err
+}
+
+const credentialsByUser = `-- name: CredentialsByUser :many
+SELECT id, user_id, credential_id, credential, label, created_at, last_used_at FROM credentials WHERE user_id = ? ORDER BY id
+`
+
+func (q *Queries) CredentialsByUser(ctx context.Context, userID int64) ([]Credential, error) {
+	rows, err := q.db.QueryContext(ctx, credentialsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Credential
+	for rows.Next() {
+		var i Credential
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.CredentialID,
+			&i.Credential,
+			&i.Label,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const inviteByToken = `-- name: InviteByToken :one
+SELECT id, token, username, handle, user_id, perm_admin, created_by, created_at, expires_at FROM invites WHERE token = ?1 AND expires_at > ?2
+`
+
+type InviteByTokenParams struct {
+	Token string
+	Now   int64
+}
+
+func (q *Queries) InviteByToken(ctx context.Context, arg InviteByTokenParams) (Invite, error) {
+	row := q.db.QueryRowContext(ctx, inviteByToken, arg.Token, arg.Now)
+	var i Invite
+	err := row.Scan(
+		&i.ID,
+		&i.Token,
+		&i.Username,
+		&i.Handle,
+		&i.UserID,
+		&i.PermAdmin,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const inviteCreate = `-- name: InviteCreate :one
+INSERT INTO invites (token, username, handle, user_id, perm_admin, created_by, created_at, expires_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+RETURNING id, token, username, handle, user_id, perm_admin, created_by, created_at, expires_at
+`
+
+type InviteCreateParams struct {
+	Token     string
+	Username  string
+	Handle    []byte
+	UserID    sql.NullInt64
+	PermAdmin bool
+	CreatedBy sql.NullInt64
+	CreatedAt int64
+	ExpiresAt int64
+}
+
+func (q *Queries) InviteCreate(ctx context.Context, arg InviteCreateParams) (Invite, error) {
+	row := q.db.QueryRowContext(ctx, inviteCreate,
+		arg.Token,
+		arg.Username,
+		arg.Handle,
+		arg.UserID,
+		arg.PermAdmin,
+		arg.CreatedBy,
+		arg.CreatedAt,
+		arg.ExpiresAt,
+	)
+	var i Invite
+	err := row.Scan(
+		&i.ID,
+		&i.Token,
+		&i.Username,
+		&i.Handle,
+		&i.UserID,
+		&i.PermAdmin,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const inviteDeleteBootstrap = `-- name: InviteDeleteBootstrap :exec
+DELETE FROM invites WHERE created_by IS NULL AND user_id IS NULL
+`
+
+func (q *Queries) InviteDeleteBootstrap(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, inviteDeleteBootstrap)
+	return err
+}
+
+const inviteUse = `-- name: InviteUse :one
+DELETE FROM invites WHERE token = ?1 AND expires_at > ?2
+RETURNING id, token, username, handle, user_id, perm_admin, created_by, created_at, expires_at
+`
+
+type InviteUseParams struct {
+	Token string
+	Now   int64
+}
+
+func (q *Queries) InviteUse(ctx context.Context, arg InviteUseParams) (Invite, error) {
+	row := q.db.QueryRowContext(ctx, inviteUse, arg.Token, arg.Now)
+	var i Invite
+	err := row.Scan(
+		&i.ID,
+		&i.Token,
+		&i.Username,
+		&i.Handle,
+		&i.UserID,
+		&i.PermAdmin,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const userByHandle = `-- name: UserByHandle :one
+SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at FROM users WHERE handle = ?
+`
+
+func (q *Queries) UserByHandle(ctx context.Context, handle []byte) (User, error) {
+	row := q.db.QueryRowContext(ctx, userByHandle, handle)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Handle,
+		&i.PermAdmin,
+		&i.PermInvite,
+		&i.PermGroup,
+		&i.InvitedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const userByID = `-- name: UserByID :one
+SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at FROM users WHERE id = ?
+`
+
+func (q *Queries) UserByID(ctx context.Context, id int64) (User, error) {
+	row := q.db.QueryRowContext(ctx, userByID, id)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Handle,
+		&i.PermAdmin,
+		&i.PermInvite,
+		&i.PermGroup,
+		&i.InvitedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const userBySession = `-- name: UserBySession :one
+SELECT users.id, users.username, users.handle, users.perm_admin, users.perm_invite, users.perm_group, users.invited_by, users.created_at FROM users
+JOIN credentials ON credentials.user_id = users.id
+WHERE users.id = ?1 AND credentials.id = ?2
+`
+
+type UserBySessionParams struct {
+	UserID       int64
+	CredentialID int64
+}
+
+func (q *Queries) UserBySession(ctx context.Context, arg UserBySessionParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, userBySession, arg.UserID, arg.CredentialID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Handle,
+		&i.PermAdmin,
+		&i.PermInvite,
+		&i.PermGroup,
+		&i.InvitedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const userByUsername = `-- name: UserByUsername :one
+SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at FROM users WHERE username = ?
+`
+
+func (q *Queries) UserByUsername(ctx context.Context, username string) (User, error) {
+	row := q.db.QueryRowContext(ctx, userByUsername, username)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Handle,
+		&i.PermAdmin,
+		&i.PermInvite,
+		&i.PermGroup,
+		&i.InvitedBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const userCount = `-- name: UserCount :one
 SELECT count(*) FROM users
 `
@@ -98,6 +398,42 @@ func (q *Queries) UserCount(ctx context.Context) (int64, error) {
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const userCreate = `-- name: UserCreate :one
+INSERT INTO users (username, handle, perm_admin, invited_by, created_at)
+VALUES (?1, ?2, ?3, ?4, ?5)
+RETURNING id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at
+`
+
+type UserCreateParams struct {
+	Username  string
+	Handle    []byte
+	PermAdmin bool
+	InvitedBy sql.NullInt64
+	CreatedAt int64
+}
+
+func (q *Queries) UserCreate(ctx context.Context, arg UserCreateParams) (User, error) {
+	row := q.db.QueryRowContext(ctx, userCreate,
+		arg.Username,
+		arg.Handle,
+		arg.PermAdmin,
+		arg.InvitedBy,
+		arg.CreatedAt,
+	)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.Handle,
+		&i.PermAdmin,
+		&i.PermInvite,
+		&i.PermGroup,
+		&i.InvitedBy,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const userStatsAdd = `-- name: UserStatsAdd :exec

@@ -32,6 +32,7 @@ import (
 	"github.com/daaku/serr"
 	"github.com/daaku/sookie"
 	"github.com/daaku/sqlmig"
+	"github.com/go-webauthn/webauthn/webauthn"
 	g "maragu.dev/gomponents"
 	h "maragu.dev/gomponents/html"
 
@@ -40,12 +41,15 @@ import (
 )
 
 const (
-	pAssets       = "/assets/"
-	pHome         = "/"
-	pLivereload   = "/livereload"
-	pLivereloadJS = "/livereload.js"
-	pRobotsTxt    = "/robots.txt"
-	pSignIn       = "/sign-in"
+	pAssets        = "/assets/"
+	pHome          = "/"
+	pInvite        = "/invite/"
+	pLivereload    = "/livereload"
+	pLivereloadJS  = "/livereload.js"
+	pRobotsTxt     = "/robots.txt"
+	pSignIn        = "/sign-in"
+	pSignInOptions = "/sign-in/options"
+	pSignOut       = "/sign-out"
 )
 
 const defaultAddr = "localhost:8080"
@@ -289,6 +293,7 @@ type app struct {
 	now func() time.Time
 	db  *sql.DB
 	q   *Queries
+	wa  *webauthn.WebAuthn
 
 	master    []byte
 	secretsMu sync.Mutex
@@ -301,6 +306,10 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return nil, serr.Wrap(err)
 	}
+	wa, err := newWebAuthn(cfg)
+	if err != nil {
+		return nil, err
+	}
 	db, err := openDB(ctx, filepath.Join(cfg.StateDir, "msg.db"))
 	if err != nil {
 		return nil, err
@@ -311,6 +320,7 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		now:     time.Now,
 		db:      db,
 		q:       New(db),
+		wa:      wa,
 		secrets: map[string][]byte{},
 	}
 	if err := a.loadMaster(ctx); err != nil {
@@ -471,13 +481,21 @@ type handler func(w http.ResponseWriter, r *http.Request) error
 // wrap enforces the access level and turns a returned error into a response.
 func (a *app) wrap(acc access, f handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// There are no users yet, so every request is signed out.
-		if acc != accPublic {
-			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		r, err := a.withSession(w, r)
+		if err != nil {
+			a.renderError(w, r, err)
+			return
+		}
+		if user := userFrom(r.Context()); !allowed(user, acc) {
+			switch {
+			case user != nil:
+				// Signed in without the permission: do not reveal the page.
+				a.renderError(w, r, httpErr(http.StatusNotFound, "Not found."))
+			case r.Method == http.MethodGet || r.Method == http.MethodHead:
 				http.Redirect(w, r, pSignIn, http.StatusSeeOther)
-				return
+			default:
+				a.renderError(w, r, httpErr(http.StatusUnauthorized, "Please sign in."))
 			}
-			a.renderError(w, r, httpErr(http.StatusUnauthorized, "Please sign in."))
 			return
 		}
 		if err := f(w, r); err != nil {
@@ -585,15 +603,13 @@ func (a *app) livereloadJS(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (a *app) home(w http.ResponseWriter, r *http.Request) error {
+	user := userFrom(r.Context())
 	return a.page(w, r, "Home",
 		h.Section(h.Class("stack"),
 			h.H1(g.Text(a.cfg.AppName)),
-			h.P(g.Text("Chats will appear here.")))).Render(w)
-}
-
-func (a *app) signIn(w http.ResponseWriter, r *http.Request) error {
-	return a.pageSimple(w, r, "Sign in", nil,
-		h.P(g.Text("Passkey sign in is coming soon."))).Render(w)
+			h.P(g.Text("Signed in as "+user.Username+".")),
+			h.Form(h.Method("post"), h.Action(pSignOut),
+				h.Button(h.Class("btn secondary"), g.Text("Sign out"))))).Render(w)
 }
 
 // handler builds the complete HTTP handler.
@@ -602,6 +618,12 @@ func (a *app) handler() http.Handler {
 	mux.Handle("GET "+pAssets, hashfs.FileServer(assets))
 	mux.HandleFunc("GET "+pRobotsTxt, a.wrap(accPublic, a.static("robots.txt")))
 	mux.HandleFunc("GET "+pSignIn, a.wrap(accPublic, a.signIn))
+	mux.HandleFunc("GET "+pSignInOptions, a.wrap(accPublic, a.signInOptions))
+	mux.HandleFunc("POST "+pSignIn, a.wrap(accPublic, a.signInPost))
+	mux.HandleFunc("POST "+pSignOut, a.wrap(accUser, a.signOut))
+	mux.HandleFunc("GET "+pInvite+"{token}", a.wrap(accPublic, a.invite))
+	mux.HandleFunc("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
+	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
 	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
 	if a.cfg.Dev {
 		mux.HandleFunc("GET "+pLivereload, livereload.Handler)
@@ -619,6 +641,10 @@ func run(ctx context.Context) error {
 	defer cancel()
 	a, err := newApp(ctx, cfg)
 	if err != nil {
+		return err
+	}
+	if err := a.bootstrap(ctx); err != nil {
+		_ = a.close()
 		return err
 	}
 	serveErr := lands.ListenAndServe(a.ctx, defaultAddr, a.handler())

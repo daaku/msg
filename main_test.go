@@ -14,6 +14,7 @@ import (
 
 	"github.com/daaku/ensure"
 	"github.com/daaku/serr"
+	"github.com/descope/virtualwebauthn"
 )
 
 var testNow = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -433,4 +434,123 @@ func TestForeignKeysEnforced(t *testing.T) {
 	_, err = ta.app.db.ExecContext(ctx,
 		"INSERT INTO members (chat_id, user_id, added_by, created_at) VALUES (99, 1, 1, 1)")
 	ensure.Err(t, err, regexp.MustCompile("FOREIGN KEY"))
+}
+
+// auth harness
+
+var testRP = virtualwebauthn.RelyingParty{
+	ID:     "localhost",
+	Name:   "msg",
+	Origin: "http://localhost:8080",
+}
+
+// testUser is a user with a real passkey on a virtual authenticator and a
+// session made with it.
+type testUser struct {
+	User
+	auth   *virtualwebauthn.Authenticator
+	cred   virtualwebauthn.Credential
+	credID int64 // credentials row id
+	cookie *http.Cookie
+}
+
+// withCookies carries the cookies set by an earlier response.
+func withCookies(w *httptest.ResponseRecorder) reqOpt {
+	return func(r *http.Request) {
+		for _, c := range w.Result().Cookies() {
+			if c.MaxAge >= 0 {
+				r.AddCookie(c)
+			}
+		}
+	}
+}
+
+func findCookie(w *httptest.ResponseRecorder, name string) *http.Cookie {
+	for _, c := range w.Result().Cookies() {
+		if c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+// as makes the request as the given user.
+func (ta *testApp) as(u *testUser) reqOpt {
+	return func(r *http.Request) { r.AddCookie(u.cookie) }
+}
+
+// register runs a passkey registration against an options and a post path
+// and returns the response to the post.
+func (ta *testApp) register(optionsPath, postPath string, auth *virtualwebauthn.Authenticator, cred virtualwebauthn.Credential, opts ...reqOpt) *httptest.ResponseRecorder {
+	ta.t.Helper()
+	wo := ta.get(optionsPath, opts...)
+	if wo.Code != http.StatusOK {
+		return wo
+	}
+	ao, err := virtualwebauthn.ParseAttestationOptions(wo.Body.String())
+	ensure.Nil(ta.t, err)
+	resp := virtualwebauthn.CreateAttestationResponse(testRP, *auth, cred, *ao)
+	return ta.post(postPath, url.Values{"json": {resp}},
+		append([]reqOpt{withCookies(wo)}, opts...)...)
+}
+
+// acceptInvite registers a new passkey through an invite link.
+func (ta *testApp) acceptInvite(inv Invite) (*httptest.ResponseRecorder, *virtualwebauthn.Authenticator, virtualwebauthn.Credential) {
+	ta.t.Helper()
+	auth := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{
+		UserHandle: inv.Handle,
+	})
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+	path := invitePath(inv.Token)
+	w := ta.register(path+"/options", path, &auth, cred)
+	auth.AddCredential(cred)
+	return w, &auth, cred
+}
+
+// newInvite stores a new user invite created by nobody.
+func (ta *testApp) newInvite(username string, admin bool) Invite {
+	ta.t.Helper()
+	inv, err := ta.app.createInvite(ta.t.Context(), ta.app.q, inviteParams{
+		Username: username,
+		Admin:    admin,
+		TTL:      time.Hour,
+	})
+	ensure.Nil(ta.t, err)
+	return inv
+}
+
+// newUser creates a user through the real invite flow and then grants the
+// named permissions ("admin", "invite", "group").
+func (ta *testApp) newUser(username string, perms ...string) *testUser {
+	ta.t.Helper()
+	t := ta.t
+	w, auth, cred := ta.acceptInvite(ta.newInvite(username, false))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther, w.Body.String())
+	for _, p := range perms {
+		_, err := ta.app.db.ExecContext(t.Context(),
+			"UPDATE users SET perm_"+p+" = TRUE WHERE username = ?", username)
+		ensure.Nil(t, err)
+	}
+	user, err := ta.app.q.UserByUsername(t.Context(), username)
+	ensure.Nil(t, err)
+	row, err := ta.app.q.CredentialByCredentialID(t.Context(), cred.ID)
+	ensure.Nil(t, err)
+	return &testUser{
+		User:   user,
+		auth:   auth,
+		cred:   cred,
+		credID: row.ID,
+		cookie: findCookie(w, "s"),
+	}
+}
+
+// signIn runs a full discoverable passkey sign in.
+func (ta *testApp) signIn(auth *virtualwebauthn.Authenticator, cred virtualwebauthn.Credential) *httptest.ResponseRecorder {
+	ta.t.Helper()
+	wo := ta.get(pSignInOptions)
+	ensure.DeepEqual(ta.t, wo.Code, http.StatusOK)
+	ao, err := virtualwebauthn.ParseAssertionOptions(wo.Body.String())
+	ensure.Nil(ta.t, err)
+	resp := virtualwebauthn.CreateAssertionResponse(testRP, *auth, cred, *ao)
+	return ta.post(pSignIn, url.Values{"json": {resp}}, withCookies(wo))
 }
