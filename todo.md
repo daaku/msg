@@ -1,0 +1,63 @@
+# msg
+
+- A web based chat application
+- Mobile & Desktop friendly
+- Passkey based authentication only
+- Bootstrap initial Admin account via URL in logs
+- User with admin permission can do everything
+- User with invite permission can send invites and allow creation of new users
+- User with group create permission can create groups and add existing users to them
+- Invites require specifying a unique Username
+- Invites are single use sign up URLs which register a passkey
+- Multiple passkeys for any username can exist
+- WebPush notifications: https://github.com/daaku/webpush
+- Multiple push subscriptions for each username can exist
+- Installable on iOS home screen
+- Minimal JavaScript, prefer HTML/CSS based. Use JavaScript only when absolutely necessary like chunked file uploads, push notifications etc
+- Written in Go
+- See ~/workspace/bento for inspiration
+- https://pkg.go.dev/modernc.org/sqlite for storage
+- CGO free builds
+- S3 backed file uploads
+- Converted Media also stored in S3
+- Media loaded directly from S3 using signed URLs (ideally also sends 1 year cache headers for browsers)
+- Media uploaded directly to S3 using signed URLs
+- Message Reactions (emoji based)
+- Exec out for Image Conversion to imagemagick
+- Exec out for Video Conversion to ffmpeg
+- Stats are collected per user (visible to admin, and the self user)
+  - Number of messages sent
+  - Number of images, videos, other files uploaded
+  - Amount of bytes uploaded
+  - Amount of bytes downloaded
+  - Number of push notifications sent
+  - Number of push notifications opened
+  - Number of invites sent
+- Stats are collected per group (visible to admin, and group members)
+  - Number of images, videos, other files uploaded
+  - Amount of bytes uploaded
+  - Amount of bytes downloaded
+- Link Previews
+- Background Chunked uploading in JS. Show subtle circular progressbar on top right.
+- Expected to be run behind a TLS enabled proxy
+- Use SSE to ping when a chat has new messages
+- Do a full page render via fetch, and use https://github.com/bigskysoftware/paxi to update the page. The rendering path is then just the full page render for a chat. Introduce IDs on elements to make the paxi morph well
+- All images in chat should have lazyload
+- Prefer larger files and less files
+- Prefer less modules separation
+
+- No email or any other contact information
+- No Read Reciepts
+- No Online Presence
+- No Status
+- No unspecified features
+- No data encryption
+
+# Configuration
+
+- Max File Upload Size (100MB)
+- Default Image Format (webp)
+- Default Image Resolution (4k)
+- Default Video Format (av1)
+- Default Video Resolution (1080p)
+- Default S3 Signed URL Validity (30d)
