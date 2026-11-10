@@ -75,6 +75,7 @@ video {
   --color-text: #1d1d1b;
   --color-text-muted: #66665f;
   --color-on-accent: #ffffff;
+  --color-ring-track: rgb(0 0 0 / 0.12);
 
   --radius: 0.5rem;
   --shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 2px 8px rgb(0 0 0 / 0.04);
@@ -93,6 +94,7 @@ video {
     --color-text: #ececea;
     --color-text-muted: #a3a39c;
     --color-on-accent: #0d0d0c;
+    --color-ring-track: rgb(255 255 255 / 0.18);
 
     --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
   }
@@ -992,4 +994,48 @@ button.chip {
   flex: none;
   color: var(--color-muted);
   font-size: var(--step--1);
+}
+
+/* uploads: the ring reads --upload (0 to 100) and the uploading class from
+   <html>, both set by main.js */
+.upload-ring {
+  display: none;
+  position: fixed;
+  inset-block-start: calc(env(safe-area-inset-top) + var(--space-2xs));
+  inset-inline-end: calc(env(safe-area-inset-right) + var(--space-2xs));
+  z-index: 20;
+  inline-size: 1.75rem;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--color-accent) calc(var(--upload, 0) * 1%),
+    var(--color-ring-track) 0
+  );
+  mask: radial-gradient(farthest-side, transparent calc(100% - 0.3rem), #000 calc(100% - 0.3rem + 1px));
+  pointer-events: none;
+
+  .uploading & {
+    display: block;
+  }
+}
+
+.upload-error {
+  position: fixed;
+  inset-block-start: calc(env(safe-area-inset-top) + var(--space-2xs));
+  inset-inline: var(--space-s);
+  z-index: 10;
+  max-width: 32rem;
+  margin-inline: auto;
+  padding: var(--space-2xs) var(--space-xs);
+  background-color: var(--color-surface);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  white-space: pre-line;
+  pointer-events: none;
+
+  &:empty {
+    display: none;
+  }
 }

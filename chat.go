@@ -401,7 +401,12 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 	}
 	sidebar := h.Nav(h.ID("sidebar"), head, list)
 	return a.shell(w, r, title, "chat", appAttrs, sidebar,
-		h.Section(h.ID("pane"), pane)).Render(w)
+		h.Section(h.ID("pane"), pane),
+		// Upload progress and errors, driven by main.js. The ring draws from
+		// state on <html>, which the morph never touches.
+		h.Div(h.ID("upload-ring"), h.Class("upload-ring"), h.Role("progressbar"),
+			h.Aria("label", "Uploading"), h.Aria("valuemin", "0"), h.Aria("valuemax", "100")),
+		h.Div(h.ID("upload-error"), h.Class("upload-error"), h.Role("alert"))).Render(w)
 }
 
 // archivedLink is the last row of the main chat list. It is always
@@ -651,6 +656,11 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	if v.Member {
 		composer = h.Form(h.ID("composer"), h.Method("post"), h.Action(base+"/send"),
 			g.Attr("data-morph"),
+			h.Label(h.ID("composer-attach"), h.Class("btn ghost icon-btn"), h.Aria("label", "Attach files"),
+				icon("paperclip"),
+				h.Input(h.ID("composer-files"), h.Type("file"), h.Multiple(), h.Hidden(""),
+					h.Data("upload", strconv.FormatInt(v.Chat.ID, 10)),
+					h.Data("max", strconv.FormatInt(a.cfg.MaxUploadSize, 10)))),
 			h.Textarea(h.ID("composer-body"), h.Name("body"), h.Rows("1"), h.Required(),
 				h.MaxLength(strconv.Itoa(maxMessageBody)), h.Placeholder("Message"),
 				h.AutoComplete("off"), h.Aria("label", "Message")),

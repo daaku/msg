@@ -587,6 +587,26 @@ func TestSend(t *testing.T) {
 	ensure.StringContains(t, body, `id="composer-send"`)
 }
 
+func TestComposerAttach(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	admin := ta.newUser("boss", "admin")
+	chat := ta.newChat(alice, "team")
+
+	body := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, `<label id="composer-attach"`)
+	ensure.StringContains(t, body, `<input id="composer-files" type="file" multiple hidden="" data-upload="`+
+		idStr(chat.ID)+`" data-max="`+strconv.FormatInt(ta.app.cfg.MaxUploadSize, 10)+`">`)
+	ensure.StringContains(t, body, `id="upload-ring"`)
+	ensure.StringContains(t, body, `id="upload-error"`)
+
+	// an admin viewing a group they are not in cannot attach
+	w := ta.get(chatPath(chat.ID), ta.as(admin))
+	ensure.DeepEqual(t, w.Code, http.StatusOK)
+	ensure.StringDoesNotContain(t, w.Body.String(), `id="composer-attach"`)
+	ensure.StringDoesNotContain(t, w.Body.String(), `data-upload`)
+}
+
 func TestMessagesRender(t *testing.T) {
 	ta := newTestApp(t)
 	alice := ta.newUser("alice", "group")

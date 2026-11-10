@@ -97,6 +97,7 @@ async function refresh() {
     if (!next) return
     morph(document.getElementById('app'), next.outerHTML)
     document.title = doc.title
+    showUploadError()
   } catch (err) {
     console.error(err) // offline: the next ping retries
   } finally {
@@ -168,6 +169,140 @@ document.addEventListener('submit', async ev => {
   }
   if (form.id === 'composer') form.querySelector('textarea')?.focus()
 })
+
+// Uploads: chosen files go straight to S3, one at a time, one part at a
+// time, in the background. The ring is drawn by CSS from --upload and the
+// uploading class on <html>, which the morph never touches. The error text
+// lives inside #app, so it is kept here and put back after every refresh.
+let uploadError = ''
+function showUploadError() {
+  const el = document.getElementById('upload-error')
+  if (el && el.textContent !== uploadError) el.textContent = uploadError
+}
+{
+  const root = document.documentElement
+  const queue = []
+  let total = 0 // bytes queued since the queue was last empty
+  let sent = 0 // bytes of finished parts and finished or failed files
+  const progress = loaded =>
+    root.style.setProperty('--upload', total ? Math.min(100, (100 * (sent + loaded)) / total) : 0)
+  const addError = msg => {
+    uploadError = uploadError ? `${uploadError}\n${msg}` : msg
+    showUploadError()
+  }
+  const confirmLeave = ev => {
+    ev.preventDefault()
+    ev.returnValue = ''
+  }
+  const fmtBytes = n => {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB']
+    let i = 0
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024
+      i++
+    }
+    return `${+n.toFixed(1)} ${units[i]}`
+  }
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+  const online = () => new Promise(resolve => addEventListener('online', resolve, { once: true }))
+
+  const api = async (path, body) => {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const out = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(out.error || `status ${res.status}`)
+    return out
+  }
+
+  // XMLHttpRequest, because fetch cannot report upload progress.
+  const put = (url, blob) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+      xhr.open('PUT', url)
+      xhr.upload.onprogress = ev => progress(ev.loaded)
+      xhr.onload = () =>
+        xhr.status >= 200 && xhr.status < 300
+          ? resolve()
+          : reject(new Error(`PUT status ${xhr.status}`))
+      xhr.onerror = xhr.onabort = xhr.ontimeout = () => reject(new Error('PUT failed'))
+      xhr.send(blob)
+    })
+
+  const putRetry = async (url, blob) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await put(url, blob)
+      } catch (err) {
+        if (attempt === 5) throw err
+        progress(0)
+        await sleep(1000 << attempt) // 1, 2, 4, 8, 16 seconds
+        while (!navigator.onLine) await online()
+      }
+    }
+  }
+
+  const upload = async ({ file, chat }) => {
+    const start = sent
+    let id = 0
+    try {
+      const init = await api('/upload/init', { chat, name: file.name, size: file.size })
+      id = init.file
+      for (const [i, url] of init.urls.entries()) {
+        const part = file.slice(i * init.partSize, (i + 1) * init.partSize)
+        await putRetry(url, part)
+        sent += part.size
+        progress(0)
+      }
+      await api('/upload/complete', { file: id })
+    } catch (err) {
+      console.error(err)
+      if (id) api('/upload/abort', { file: id }).catch(console.error)
+      addError(`${file.name} could not be uploaded`)
+    }
+    sent = start + file.size
+    progress(0)
+  }
+
+  let running = false
+  const work = async () => {
+    running = true
+    root.classList.add('uploading')
+    addEventListener('beforeunload', confirmLeave)
+    while (queue.length) {
+      await upload(queue[0])
+      queue.shift() // only now, so the queue is not empty while a file is in flight
+    }
+    removeEventListener('beforeunload', confirmLeave)
+    root.classList.remove('uploading')
+    total = sent = 0
+    progress(0)
+    running = false
+  }
+
+  document.addEventListener('change', ev => {
+    const input = ev.target.closest?.('input[data-upload]')
+    if (!input) return
+    const files = [...input.files]
+    input.value = '' // so the same file can be chosen again
+    const chat = Number(input.dataset.upload)
+    const max = Number(input.dataset.max)
+    uploadError = ''
+    showUploadError()
+    for (const file of files) {
+      if (file.size > max) {
+        addError(`${file.name} is larger than the ${fmtBytes(max)} limit`)
+        continue
+      }
+      queue.push({ file, chat })
+      total += file.size
+    }
+    progress(0)
+    if (queue.length && !running) work()
+  })
+}
 
 // data-morph links change the URL and refresh in place.
 document.addEventListener('click', ev => {
