@@ -158,7 +158,9 @@ SELECT sqlc.embed(chats),
   CAST(coalesce(other_user.username, '') AS TEXT) AS other,
   CAST(coalesce(last.body, '') AS TEXT) AS last_body,
   CAST(coalesce(last_user.username, '') AS TEXT) AS last_username,
-  CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at
+  CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at,
+  CAST(coalesce(last_file.kind, '') AS TEXT) AS last_file_kind,
+  CAST(coalesce(last_file.name, '') AS TEXT) AS last_file_name
 FROM chats
 JOIN members ON members.chat_id = chats.id AND members.user_id = @user_id
   AND members.archived = @archived
@@ -168,6 +170,7 @@ LEFT JOIN users other_user ON other_user.id = other.user_id
 LEFT JOIN messages last ON last.id = (
   SELECT max(m.id) FROM messages m WHERE m.chat_id = chats.id)
 LEFT JOIN users last_user ON last_user.id = last.user_id
+LEFT JOIN files last_file ON last_file.id = last.file_id
 ORDER BY chats.last_message_at DESC, chats.id DESC;
 
 -- name: ChatByDMKey :one
@@ -263,3 +266,27 @@ WHERE chat_id = @chat_id AND user_id != @author_id AND archived;
 
 -- name: ArchivedCount :one
 SELECT count(*) FROM members WHERE user_id = ? AND archived;
+
+-- name: FileCreate :one
+INSERT INTO files (chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, created_at)
+VALUES (@chat_id, @user_id, 'other', 'uploading', @name, @s3_prefix, @upload_id, @size, @created_at)
+RETURNING *;
+
+-- name: FileByID :one
+SELECT * FROM files WHERE id = ?;
+
+-- name: FileCompleteUpload :execrows
+UPDATE files SET kind = @kind, status = @status, upload_id = ''
+WHERE id = @id AND status = 'uploading';
+
+-- name: FileDelete :exec
+DELETE FROM files WHERE id = ?;
+
+-- name: FileDeleteUploading :execrows
+DELETE FROM files WHERE id = ? AND status = 'uploading';
+
+-- name: FilesStaleUploads :many
+SELECT * FROM files WHERE status = 'uploading' AND created_at < @before ORDER BY id;
+
+-- name: FilesByIDs :many
+SELECT * FROM files WHERE id IN (sqlc.slice('ids'));

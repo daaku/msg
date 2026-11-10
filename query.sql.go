@@ -213,7 +213,9 @@ SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.
   CAST(coalesce(other_user.username, '') AS TEXT) AS other,
   CAST(coalesce(last.body, '') AS TEXT) AS last_body,
   CAST(coalesce(last_user.username, '') AS TEXT) AS last_username,
-  CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at
+  CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at,
+  CAST(coalesce(last_file.kind, '') AS TEXT) AS last_file_kind,
+  CAST(coalesce(last_file.name, '') AS TEXT) AS last_file_name
 FROM chats
 JOIN members ON members.chat_id = chats.id AND members.user_id = ?1
   AND members.archived = ?2
@@ -223,6 +225,7 @@ LEFT JOIN users other_user ON other_user.id = other.user_id
 LEFT JOIN messages last ON last.id = (
   SELECT max(m.id) FROM messages m WHERE m.chat_id = chats.id)
 LEFT JOIN users last_user ON last_user.id = last.user_id
+LEFT JOIN files last_file ON last_file.id = last.file_id
 ORDER BY chats.last_message_at DESC, chats.id DESC
 `
 
@@ -237,6 +240,8 @@ type ChatsForUserWithLastRow struct {
 	LastBody      string
 	LastUsername  string
 	LastCreatedAt int64
+	LastFileKind  string
+	LastFileName  string
 }
 
 func (q *Queries) ChatsForUserWithLast(ctx context.Context, arg ChatsForUserWithLastParams) ([]ChatsForUserWithLastRow, error) {
@@ -260,6 +265,8 @@ func (q *Queries) ChatsForUserWithLast(ctx context.Context, arg ChatsForUserWith
 			&i.LastBody,
 			&i.LastUsername,
 			&i.LastCreatedAt,
+			&i.LastFileKind,
+			&i.LastFileName,
 		); err != nil {
 			return nil, err
 		}
@@ -439,6 +446,228 @@ func (q *Queries) CredentialsByUser(ctx context.Context, userID int64) ([]Creden
 			&i.Label,
 			&i.CreatedAt,
 			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const fileByID = `-- name: FileByID :one
+SELECT id, chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, conv_type, conv_size, poster_type, poster_size, width, height, duration, attempts, created_at FROM files WHERE id = ?
+`
+
+func (q *Queries) FileByID(ctx context.Context, id int64) (File, error) {
+	row := q.db.QueryRowContext(ctx, fileByID, id)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.ChatID,
+		&i.UserID,
+		&i.Kind,
+		&i.Status,
+		&i.Name,
+		&i.S3Prefix,
+		&i.UploadID,
+		&i.Size,
+		&i.ConvType,
+		&i.ConvSize,
+		&i.PosterType,
+		&i.PosterSize,
+		&i.Width,
+		&i.Height,
+		&i.Duration,
+		&i.Attempts,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const fileCompleteUpload = `-- name: FileCompleteUpload :execrows
+UPDATE files SET kind = ?1, status = ?2, upload_id = ''
+WHERE id = ?3 AND status = 'uploading'
+`
+
+type FileCompleteUploadParams struct {
+	Kind   string
+	Status string
+	ID     int64
+}
+
+func (q *Queries) FileCompleteUpload(ctx context.Context, arg FileCompleteUploadParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, fileCompleteUpload, arg.Kind, arg.Status, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const fileCreate = `-- name: FileCreate :one
+INSERT INTO files (chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, created_at)
+VALUES (?1, ?2, 'other', 'uploading', ?3, ?4, ?5, ?6, ?7)
+RETURNING id, chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, conv_type, conv_size, poster_type, poster_size, width, height, duration, attempts, created_at
+`
+
+type FileCreateParams struct {
+	ChatID    int64
+	UserID    int64
+	Name      string
+	S3Prefix  string
+	UploadID  string
+	Size      int64
+	CreatedAt int64
+}
+
+func (q *Queries) FileCreate(ctx context.Context, arg FileCreateParams) (File, error) {
+	row := q.db.QueryRowContext(ctx, fileCreate,
+		arg.ChatID,
+		arg.UserID,
+		arg.Name,
+		arg.S3Prefix,
+		arg.UploadID,
+		arg.Size,
+		arg.CreatedAt,
+	)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.ChatID,
+		&i.UserID,
+		&i.Kind,
+		&i.Status,
+		&i.Name,
+		&i.S3Prefix,
+		&i.UploadID,
+		&i.Size,
+		&i.ConvType,
+		&i.ConvSize,
+		&i.PosterType,
+		&i.PosterSize,
+		&i.Width,
+		&i.Height,
+		&i.Duration,
+		&i.Attempts,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const fileDelete = `-- name: FileDelete :exec
+DELETE FROM files WHERE id = ?
+`
+
+func (q *Queries) FileDelete(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, fileDelete, id)
+	return err
+}
+
+const fileDeleteUploading = `-- name: FileDeleteUploading :execrows
+DELETE FROM files WHERE id = ? AND status = 'uploading'
+`
+
+func (q *Queries) FileDeleteUploading(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, fileDeleteUploading, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const filesByIDs = `-- name: FilesByIDs :many
+SELECT id, chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, conv_type, conv_size, poster_type, poster_size, width, height, duration, attempts, created_at FROM files WHERE id IN (/*SLICE:ids*/?)
+`
+
+func (q *Queries) FilesByIDs(ctx context.Context, ids []int64) ([]File, error) {
+	query := filesByIDs
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []File
+	for rows.Next() {
+		var i File
+		if err := rows.Scan(
+			&i.ID,
+			&i.ChatID,
+			&i.UserID,
+			&i.Kind,
+			&i.Status,
+			&i.Name,
+			&i.S3Prefix,
+			&i.UploadID,
+			&i.Size,
+			&i.ConvType,
+			&i.ConvSize,
+			&i.PosterType,
+			&i.PosterSize,
+			&i.Width,
+			&i.Height,
+			&i.Duration,
+			&i.Attempts,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const filesStaleUploads = `-- name: FilesStaleUploads :many
+SELECT id, chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, conv_type, conv_size, poster_type, poster_size, width, height, duration, attempts, created_at FROM files WHERE status = 'uploading' AND created_at < ?1 ORDER BY id
+`
+
+func (q *Queries) FilesStaleUploads(ctx context.Context, before int64) ([]File, error) {
+	rows, err := q.db.QueryContext(ctx, filesStaleUploads, before)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []File
+	for rows.Next() {
+		var i File
+		if err := rows.Scan(
+			&i.ID,
+			&i.ChatID,
+			&i.UserID,
+			&i.Kind,
+			&i.Status,
+			&i.Name,
+			&i.S3Prefix,
+			&i.UploadID,
+			&i.Size,
+			&i.ConvType,
+			&i.ConvSize,
+			&i.PosterType,
+			&i.PosterSize,
+			&i.Width,
+			&i.Height,
+			&i.Duration,
+			&i.Attempts,
+			&i.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

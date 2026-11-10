@@ -49,6 +49,10 @@ const (
 	pDM                 = "/dm"
 	pEvents             = "/events"
 	pFakeS3             = "/fakes3/"
+	pFile               = "/f/"
+	pUploadAbort        = "/upload/abort"
+	pUploadComplete     = "/upload/complete"
+	pUploadInit         = "/upload/init"
 	pHome               = "/"
 	pInvite             = "/invite/"
 	pInvites            = "/invites"
@@ -309,6 +313,9 @@ type app struct {
 	s3  *s3Client
 	// fakeS3 is the built in development bucket, nil with a real one.
 	fakeS3 *fakeS3
+	// mediaWake tells the media worker there is a file to convert.
+	mediaWake chan struct{}
+	fileLocks sync.Map // file id to *sync.Mutex
 
 	master    []byte
 	secretsMu sync.Mutex
@@ -330,14 +337,15 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		return nil, err
 	}
 	a := &app{
-		cfg:     cfg,
-		ctx:     ctx,
-		now:     time.Now,
-		db:      db,
-		q:       New(db),
-		wa:      wa,
-		hub:     newHub(),
-		secrets: map[string][]byte{},
+		cfg:       cfg,
+		ctx:       ctx,
+		now:       time.Now,
+		db:        db,
+		q:         New(db),
+		wa:        wa,
+		hub:       newHub(),
+		mediaWake: make(chan struct{}, 1),
+		secrets:   map[string][]byte{},
 	}
 	if err := a.loadMaster(ctx); err != nil {
 		db.Close()
@@ -642,6 +650,10 @@ func (a *app) handler() http.Handler {
 		mux.Handle(pFakeS3, a.fakeS3)
 	}
 	mux.HandleFunc("GET "+pEvents, a.wrap(accUser, a.events))
+	mux.HandleFunc("POST "+pUploadInit, a.wrap(accUser, api(a.uploadInit)))
+	mux.HandleFunc("POST "+pUploadComplete, a.wrap(accUser, api(a.uploadComplete)))
+	mux.HandleFunc("POST "+pUploadAbort, a.wrap(accUser, api(a.uploadAbort)))
+	mux.HandleFunc("GET "+pFile+"{id}/{variant}", a.wrap(accUser, a.fileRedirect))
 	mux.HandleFunc("GET "+pArchived, a.wrap(accUser, a.archived))
 	mux.HandleFunc("GET "+pDM, a.wrap(accUser, a.dm))
 	mux.HandleFunc("POST "+pDM, a.wrap(accUser, a.dmPost))
@@ -703,6 +715,7 @@ func run(ctx context.Context) error {
 		_ = a.close()
 		return err
 	}
+	a.startJanitor()
 	serveErr := lands.ListenAndServe(a.ctx, defaultAddr, a.handler())
 	cancel()
 	a.bg.Wait()

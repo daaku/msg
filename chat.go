@@ -375,7 +375,7 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 				last = g.Group{
 					h.Time(h.Class("chat-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
 						g.Text(at.In(loc).Format("2 Jan 15:04"))),
-					h.Span(h.Class("chat-snippet"), g.Text(row.LastUsername+": "+snippet(row.LastBody))),
+					h.Span(h.Class("chat-snippet"), g.Text(row.LastUsername+": "+lastSnippet(row))),
 				}
 			}
 			return h.A(h.ID(fmt.Sprintf("chat-%d", c.ID)), h.Class("chat-item "+kind),
@@ -629,6 +629,10 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	files, err := a.filesFor(ctx, rows)
+	if err != nil {
+		return err
+	}
 
 	// The link is always rendered, hidden when there is nothing earlier, so
 	// that the first child of #messages lines up between renders. Without
@@ -661,7 +665,7 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	return a.chatPage(w, r, v.User, &v.Chat, g.Group{
 		paneHead(v),
 		h.Div(h.ID("scroll"), h.Class("scroll"),
-			h.Div(h.ID("messages"), earlier, a.messageNodes(v, rows, reactions, viewerLoc(r)))),
+			h.Div(h.ID("messages"), earlier, a.messageNodes(v, rows, reactions, files, viewerLoc(r)))),
 		composer,
 	})
 }
@@ -692,7 +696,7 @@ func viewerLoc(r *http.Request) *time.Location {
 
 // messageNodes renders messages, oldest first, with a separator before the
 // first message of each day.
-func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[int64][]reactionGroup, loc *time.Location) g.Node {
+func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[int64][]reactionGroup, files map[int64]File, loc *time.Location) g.Node {
 	var nodes g.Group
 	var prevUser int64
 	var prevDay string
@@ -715,10 +719,14 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 			class += " first"
 		}
 		id := fmt.Sprintf("m%d", m.ID)
+		content := h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body)))
+		if f, ok := files[m.FileID.Int64]; ok && m.FileID.Valid {
+			content = h.Div(h.ID(id+"-file"), h.Class("msg-file"), fileNode(f))
+		}
 		nodes = append(nodes, h.Article(h.ID(id), h.Class(class),
 			g.If(first && !mine, h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)),
 				g.Text(row.Username))),
-			h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body))),
+			content,
 			a.reactionChips(v, m, reactions[m.ID]),
 			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
 			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
@@ -729,6 +737,14 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 }
 
 // snippet is the start of a message body for the chat list.
+// lastSnippet describes a chat's newest message in the chat list.
+func lastSnippet(row ChatsForUserWithLastRow) string {
+	if row.LastFileKind != "" {
+		return fileSnippet(row.LastFileKind, row.LastFileName)
+	}
+	return snippet(row.LastBody)
+}
+
 func snippet(body string) string {
 	if utf8.RuneCountInString(body) <= snippetLength {
 		return body
@@ -1212,11 +1228,27 @@ func (a *app) afterEdit(ctx context.Context, chat Chat, msg Message) {
 // deleteMessage is the only place a message is removed. Deletes are hard
 // deletes: reactions and snoozes cascade.
 func (a *app) deleteMessage(ctx context.Context, chat Chat, msg Message) error {
-	// Task 015 also removes the attached file and its S3 objects here, task
-	// 019 the preview and its image.
-	if err := a.q.MessageDelete(ctx, msg.ID); err != nil {
-		return serr.Wrap(err)
+	// Task 019 also removes the preview and its image here.
+	cleanup := func() {}
+	err := a.tx(ctx, func(q *Queries) error {
+		// The message goes first: it holds the reference to the file.
+		if err := q.MessageDelete(ctx, msg.ID); err != nil {
+			return serr.Wrap(err)
+		}
+		if !msg.FileID.Valid {
+			return nil
+		}
+		f, err := q.FileByID(ctx, msg.FileID.Int64)
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		cleanup, err = a.deleteFile(ctx, q, f)
+		return err
+	})
+	if err != nil {
+		return err
 	}
+	cleanup()
 	a.notifyChat(ctx, chat.ID)
 	return nil
 }
