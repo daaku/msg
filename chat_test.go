@@ -9,8 +9,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/daaku/ensure"
+	g "maragu.dev/gomponents"
 )
 
 func idStr(id int64) string { return strconv.FormatInt(id, 10) }
@@ -73,7 +75,7 @@ func TestGroupCreate(t *testing.T) {
 		"user": {idStr(bob.ID), "9999"},
 	}, ta.as(alice))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther, w.Body.String())
-	chats, err := ta.app.q.ChatsForUser(ctx, alice.ID)
+	chats, err := ta.app.q.ChatsForUserWithLast(ctx, alice.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(chats), 1)
 	chat := chats[0].Chat
@@ -510,4 +512,275 @@ func TestDMTitles(t *testing.T) {
 
 	// everyone has the new message link
 	ensure.StringContains(t, ta.get(pHome, ta.as(carol)).Body.String(), `href="/dm"`)
+}
+
+func messagesSent(t *testing.T, ta *testApp, userID int64) int64 {
+	t.Helper()
+	s, err := ta.app.userStats(t.Context(), userID)
+	ensure.Nil(t, err)
+	return s.MessagesSent
+}
+
+func lastMessageAt(t *testing.T, ta *testApp, chatID int64) int64 {
+	t.Helper()
+	c, err := ta.app.q.ChatByID(t.Context(), chatID)
+	ensure.Nil(t, err)
+	return c.LastMessageAt
+}
+
+func TestSend(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	outsider := ta.newUser("outsider")
+	admin := ta.newUser("boss", "admin")
+	chat := ta.newChat(alice, "team", bob)
+	send := chatPath(chat.ID) + "/send"
+
+	later := testNow.Add(time.Hour)
+	ta.app.now = func() time.Time { return later }
+	w := ta.post(send, url.Values{"body": {"  hello\r\nthere  "}}, ta.as(bob))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
+	rows, err := ta.app.q.MessagesLatest(ctx, MessagesLatestParams{ChatID: chat.ID, N: 10})
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, len(rows), 1)
+	m := rows[0].Message
+	ensure.DeepEqual(t, m.Body, "hello\nthere")
+	ensure.DeepEqual(t, m.UserID, bob.ID)
+	ensure.DeepEqual(t, m.CreatedAt, later.Unix())
+	ensure.DeepEqual(t, rows[0].Username, "bob")
+	ensure.DeepEqual(t, lastMessageAt(t, ta, chat.ID), later.Unix())
+	ensure.DeepEqual(t, messagesSent(t, ta, bob.ID), int64(1))
+
+	// non member 404, admin non member 404 on send but 200 on view
+	ensure.DeepEqual(t, ta.post(send, url.Values{"body": {"x"}}, ta.as(outsider)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(send, url.Values{"body": {"x"}}, ta.as(admin)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(send, url.Values{"body": {"x"}}).Code, http.StatusUnauthorized)
+	ensure.DeepEqual(t, ta.post("/c/9999/send", url.Values{"body": {"x"}}, ta.as(admin)).Code, http.StatusNotFound)
+	w = ta.get(chatPath(chat.ID), ta.as(admin))
+	ensure.DeepEqual(t, w.Code, http.StatusOK)
+	ensure.StringDoesNotContain(t, w.Body.String(), `id="composer"`)
+	ensure.StringContains(t, w.Body.String(), `id="composer-note"`)
+	ensure.StringContains(t, w.Body.String(), `href="`+chatPath(chat.ID)+`/info"`)
+
+	// empty creates nothing, too long is 400, exactly the limit is fine
+	w = ta.post(send, url.Values{"body": {" \r\n\t "}}, ta.as(bob))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
+	ensure.DeepEqual(t, ta.post(send, url.Values{"body": {strings.Repeat("a", 8001)}}, ta.as(bob)).Code,
+		http.StatusBadRequest)
+	ensure.DeepEqual(t, countRows(t, ta, "messages"), 1)
+	ensure.DeepEqual(t, ta.post(send, url.Values{"body": {strings.Repeat("a", 8000)}}, ta.as(bob)).Code,
+		http.StatusSeeOther)
+	ensure.DeepEqual(t, countRows(t, ta, "messages"), 2)
+	ensure.DeepEqual(t, messagesSent(t, ta, bob.ID), int64(2))
+
+	// a member's page has the composer
+	body := ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, `<form id="composer" method="post" action="`+send+`" data-morph>`)
+	ensure.StringContains(t, body, `id="composer-body" name="body" rows="1" required maxlength="8000"`)
+	ensure.StringContains(t, body, `id="composer-send"`)
+}
+
+func TestMessagesRender(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "team", bob)
+	at := func(ts time.Time) { ta.app.now = func() time.Time { return ts } }
+
+	day1 := time.Date(2026, 11, 9, 10, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 11, 10, 14, 3, 0, 0, time.UTC)
+	at(day1)
+	m1 := ta.newMessage(chat, alice, "one")
+	m2 := ta.newMessage(chat, alice, "two")
+	m3 := ta.newMessage(chat, bob, "three")
+	at(day2)
+	m4 := ta.newMessage(chat, bob, "four")
+	m5 := ta.newMessage(chat, alice, "<script>alert(1)</script>")
+
+	body := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	for _, id := range []string{`id="pane-head"`, `id="scroll" class="scroll"`, `id="messages"`} {
+		ensure.StringContains(t, body, id)
+	}
+	art := func(m Message) string {
+		i := strings.Index(body, fmt.Sprintf(`<article id="m%d"`, m.ID))
+		ensure.True(t, i > 0, m.ID)
+		j := strings.Index(body[i:], "</article>")
+		return body[i : i+j]
+	}
+	// oldest first
+	pos := func(m Message) int { return strings.Index(body, fmt.Sprintf(`id="m%d"`, m.ID)) }
+	ensure.True(t, pos(m1) < pos(m2) && pos(m2) < pos(m3) && pos(m3) < pos(m4) && pos(m4) < pos(m5))
+	for _, m := range []Message{m1, m2, m3, m4, m5} {
+		a := art(m)
+		ensure.StringContains(t, a, fmt.Sprintf(`id="m%d-body" class="msg-body"`, m.ID))
+		ensure.StringContains(t, a, fmt.Sprintf(`id="m%d-time"`, m.ID))
+	}
+	ensure.StringContains(t, art(m1), `class="msg mine first"`)
+	ensure.StringContains(t, art(m2), `class="msg mine"`)
+	ensure.StringContains(t, art(m3), `class="msg first"`)
+	ensure.StringContains(t, art(m4), `class="msg first"`) // new day, same user
+	ensure.StringContains(t, art(m5), `class="msg mine first"`)
+	// only first messages of other users name the author
+	ensure.StringDoesNotContain(t, art(m1), "msg-who")
+	ensure.StringContains(t, art(m3), fmt.Sprintf(`<div class="msg-who hue-%d">bob</div>`, bob.ID%12))
+	ensure.StringContains(t, art(m4), "msg-who")
+	ensure.StringContains(t, art(m4), `<time id="m`+idStr(m4.ID)+`-time" datetime="2026-11-10T14:03:00Z">14:03</time>`)
+	// day separators
+	ensure.StringContains(t, body, `<div id="day-2026-11-09" class="day">9 November 2026</div>`)
+	ensure.StringContains(t, body, `<div id="day-2026-11-10" class="day">10 November 2026</div>`)
+	ensure.True(t, strings.Index(body, "day-2026-11-10") < pos(m4) && strings.Index(body, "day-2026-11-10") > pos(m3))
+	// HTML is escaped
+	ensure.StringDoesNotContain(t, body, "<script>alert(1)</script>")
+	ensure.StringContains(t, body, "&lt;script&gt;alert(1)&lt;/script&gt;")
+
+	// bob's view flips mine
+	body = ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()
+	ensure.StringContains(t, art(m1), `class="msg first"`)
+	ensure.StringContains(t, art(m1), "alice")
+	ensure.StringContains(t, art(m3), `class="msg mine first"`)
+	ensure.StringContains(t, art(m4), `class="msg mine first"`)
+	ensure.StringDoesNotContain(t, art(m4), "msg-who")
+
+	// no earlier link with only a few messages
+	ensure.StringDoesNotContain(t, body, `id="earlier"`)
+}
+
+func TestLinkify(t *testing.T) {
+	render := func(nodes []g.Node) string {
+		var sb strings.Builder
+		ensure.Nil(t, g.Group(nodes).Render(&sb))
+		return sb.String()
+	}
+	link := func(u string) string {
+		return `<a href="` + u + `" target="_blank" rel="noopener noreferrer nofollow">` + u + `</a>`
+	}
+	cases := []struct{ in, want, first string }{
+		{"plain text", "plain text", ""},
+		{"", "", ""},
+		{"see https://example.com/a?b=c", "see " + link("https://example.com/a?b=c"), "https://example.com/a?b=c"},
+		{"go to http://example.com.", "go to " + link("http://example.com") + ".", "http://example.com"},
+		{"(https://example.com/x)", "(" + link("https://example.com/x") + ")", "https://example.com/x"},
+		{"[https://example.com]!", "[" + link("https://example.com") + "]!", "https://example.com"},
+		{"https://a.com and https://b.com/p", link("https://a.com") + " and " + link("https://b.com/p"), "https://a.com"},
+		{"javascript:alert(1)", "javascript:alert(1)", ""},
+		{`https://a.com/"onmouseover="x`, link("https://a.com/") + "&#34;onmouseover=&#34;x", "https://a.com/"},
+		{"https://a.com/<b>", link("https://a.com/") + "&lt;b&gt;", "https://a.com/"},
+		{"https://a.com/'x", link("https://a.com/") + "&#39;x", "https://a.com/"},
+		{"https://.", "https://.", ""},
+		{"line\nhttps://a.com\nnext", "line\n" + link("https://a.com") + "\nnext", "https://a.com"},
+	}
+	for _, c := range cases {
+		ensure.DeepEqual(t, render(linkify(c.in)), c.want, c.in)
+		ensure.DeepEqual(t, firstURL(c.in), c.first, c.in)
+	}
+}
+
+func TestMessagesPagination(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	chat := ta.newChat(alice, "team")
+	var msgs []Message
+	for i := range 150 {
+		msgs = append(msgs, ta.newMessage(chat, alice, fmt.Sprint("message ", i)))
+	}
+	count := func(body string) int { return strings.Count(body, `<article id="m`) }
+
+	body := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.DeepEqual(t, count(body), 100)
+	ensure.StringContains(t, body, fmt.Sprintf(`<a id="earlier" href="%s?n=200#m%d" data-morph>Show earlier messages</a>`,
+		chatPath(chat.ID), msgs[50].ID))
+	ensure.StringDoesNotContain(t, body, fmt.Sprintf(`id="m%d"`, msgs[49].ID))
+	ensure.StringContains(t, body, fmt.Sprintf(`id="m%d"`, msgs[149].ID))
+	// the link sits before the messages
+	ensure.True(t, strings.Index(body, `id="earlier"`) < strings.Index(body, fmt.Sprintf(`id="m%d"`, msgs[50].ID)))
+
+	body = ta.get(chatPath(chat.ID)+"?n=200", ta.as(alice)).Body.String()
+	ensure.DeepEqual(t, count(body), 150)
+	ensure.StringDoesNotContain(t, body, `id="earlier"`)
+
+	body = ta.get(chatPath(chat.ID)+"?n=150", ta.as(alice)).Body.String()
+	ensure.DeepEqual(t, count(body), 150)
+	ensure.StringDoesNotContain(t, body, `id="earlier"`)
+
+	for in, want := range map[string]int{"0": 1, "-5": 1, "x": 100, "": 100, "149": 149, "99999": 150} {
+		ensure.DeepEqual(t, count(ta.get(chatPath(chat.ID)+"?n="+in, ta.as(alice)).Body.String()), want, in)
+	}
+	ensure.StringContains(t, ta.get(chatPath(chat.ID)+"?n=1", ta.as(alice)).Body.String(), "?n=2#m")
+	ensure.DeepEqual(t, pageSize("4000"), int64(4000))
+	ensure.DeepEqual(t, pageSize("5001"), int64(5000))
+}
+
+func TestMessagesTimeZone(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	chat := ta.newChat(alice, "team")
+	ta.app.now = func() time.Time { return time.Date(2026, 11, 10, 22, 30, 0, 0, time.UTC) }
+	m := ta.newMessage(chat, alice, "late")
+	tz := func(v string) reqOpt {
+		return func(r *http.Request) { r.AddCookie(&http.Cookie{Name: "tz", Value: v}) }
+	}
+	timeTag := func(clock string) string {
+		return fmt.Sprintf(`<time id="m%d-time" datetime="2026-11-10T22:30:00Z">%s</time>`, m.ID, clock)
+	}
+
+	body := ta.get(chatPath(chat.ID), ta.as(alice), tz("Asia/Dubai")).Body.String()
+	ensure.StringContains(t, body, timeTag("02:30"))
+	ensure.StringContains(t, body, `<div id="day-2026-11-11" class="day">11 November 2026</div>`)
+	ensure.StringContains(t, body, "11 Nov 02:30") // the chat list
+
+	for _, v := range []string{"", "Not/AZone", "Local", "../../etc/passwd"} {
+		body = ta.get(chatPath(chat.ID), ta.as(alice), tz(v)).Body.String()
+		ensure.StringContains(t, body, timeTag("22:30"))
+		ensure.StringContains(t, body, `<div id="day-2026-11-10" class="day">10 November 2026</div>`)
+	}
+	body = ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, timeTag("22:30"))
+}
+
+func TestSidebarSnippet(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	g1 := ta.newChat(alice, "first", bob)
+	g2 := ta.newChat(alice, "second", bob)
+	dm := ta.newDM(alice, bob)
+	at := func(min int) {
+		ta.app.now = func() time.Time { return testNow.Add(time.Duration(min) * time.Minute) }
+	}
+	order := func(body string, chats ...Chat) bool {
+		prev := -1
+		for _, c := range chats {
+			i := strings.Index(body, fmt.Sprintf(`id="chat-%d"`, c.ID))
+			if i <= prev {
+				return false
+			}
+			prev = i
+		}
+		return true
+	}
+	at(1)
+	ta.newMessage(g1, bob, "older")
+	at(2)
+	ta.newMessage(g1, bob, strings.Repeat("é", 100)+"\nmore")
+	body := ta.get(pHome, ta.as(alice)).Body.String()
+	ensure.True(t, order(body, g1, dm, g2))
+	ensure.StringContains(t, body, `<span class="chat-snippet">bob: `+strings.Repeat("é", 80)+`</span>`)
+	ensure.StringContains(t, body, `<time class="chat-time" datetime="2026-01-02T03:06:05Z">2 Jan 03:06</time>`)
+	ensure.StringDoesNotContain(t, body, "bob: older")
+
+	// a send through the form reorders the list
+	at(3)
+	ta.post(chatPath(g2.ID)+"/send", url.Values{"body": {"<b>hi</b>"}}, ta.as(alice))
+	body = ta.get(pHome, ta.as(bob)).Body.String()
+	ensure.True(t, order(body, g2, g1, dm))
+	ensure.StringContains(t, body, `<span class="chat-snippet">alice: &lt;b&gt;hi&lt;/b&gt;</span>`)
+	at(4)
+	ta.newMessage(dm, bob, "direct")
+	body = ta.get(pHome, ta.as(alice)).Body.String()
+	ensure.True(t, order(body, dm, g2, g1))
+	ensure.StringContains(t, body, `<span class="chat-snippet">bob: direct</span>`)
 }

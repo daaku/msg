@@ -582,3 +582,11 @@ func (ta *testApp) newDM(a, b *testUser) Chat {
 	ensure.Nil(ta.t, err)
 	return chat
 }
+
+// newMessage posts a text message as user, through createMessage.
+func (ta *testApp) newMessage(chat Chat, user *testUser, body string) Message {
+	ta.t.Helper()
+	msg, err := ta.app.createMessage(ta.t.Context(), chat, user.ID, body, sql.NullInt64{})
+	ensure.Nil(ta.t, err)
+	return msg
+}

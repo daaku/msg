@@ -182,30 +182,54 @@ func (q *Queries) ChatStatsGet(ctx context.Context, chatID int64) (ChatStat, err
 	return i, err
 }
 
-const chatsForUser = `-- name: ChatsForUser :many
-SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at, CAST(coalesce(other_user.username, '') AS TEXT) AS other
+const chatTouch = `-- name: ChatTouch :exec
+UPDATE chats SET last_message_at = ?1 WHERE id = ?2
+`
+
+type ChatTouchParams struct {
+	LastMessageAt int64
+	ID            int64
+}
+
+func (q *Queries) ChatTouch(ctx context.Context, arg ChatTouchParams) error {
+	_, err := q.db.ExecContext(ctx, chatTouch, arg.LastMessageAt, arg.ID)
+	return err
+}
+
+const chatsForUserWithLast = `-- name: ChatsForUserWithLast :many
+SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at,
+  CAST(coalesce(other_user.username, '') AS TEXT) AS other,
+  CAST(coalesce(last.body, '') AS TEXT) AS last_body,
+  CAST(coalesce(last_user.username, '') AS TEXT) AS last_username,
+  CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at
 FROM chats
 JOIN members ON members.chat_id = chats.id AND members.user_id = ?1
 LEFT JOIN members other ON chats.is_dm
   AND other.chat_id = chats.id AND other.user_id != ?1
 LEFT JOIN users other_user ON other_user.id = other.user_id
+LEFT JOIN messages last ON last.id = (
+  SELECT max(m.id) FROM messages m WHERE m.chat_id = chats.id)
+LEFT JOIN users last_user ON last_user.id = last.user_id
 ORDER BY chats.last_message_at DESC, chats.id DESC
 `
 
-type ChatsForUserRow struct {
-	Chat  Chat
-	Other string
+type ChatsForUserWithLastRow struct {
+	Chat          Chat
+	Other         string
+	LastBody      string
+	LastUsername  string
+	LastCreatedAt int64
 }
 
-func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]ChatsForUserRow, error) {
-	rows, err := q.db.QueryContext(ctx, chatsForUser, userID)
+func (q *Queries) ChatsForUserWithLast(ctx context.Context, userID int64) ([]ChatsForUserWithLastRow, error) {
+	rows, err := q.db.QueryContext(ctx, chatsForUserWithLast, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ChatsForUserRow
+	var items []ChatsForUserWithLastRow
 	for rows.Next() {
-		var i ChatsForUserRow
+		var i ChatsForUserWithLastRow
 		if err := rows.Scan(
 			&i.Chat.ID,
 			&i.Chat.Name,
@@ -215,6 +239,9 @@ func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]ChatsForUse
 			&i.Chat.CreatedAt,
 			&i.Chat.LastMessageAt,
 			&i.Other,
+			&i.LastBody,
+			&i.LastUsername,
+			&i.LastCreatedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -833,6 +860,102 @@ func (q *Queries) MembersOfChat(ctx context.Context, chatID int64) ([]MembersOfC
 	for rows.Next() {
 		var i MembersOfChatRow
 		if err := rows.Scan(&i.UserID, &i.Username); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const messageCount = `-- name: MessageCount :one
+SELECT count(*) FROM messages WHERE chat_id = ?
+`
+
+func (q *Queries) MessageCount(ctx context.Context, chatID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, messageCount, chatID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const messageCreate = `-- name: MessageCreate :one
+INSERT INTO messages (chat_id, user_id, body, file_id, created_at)
+VALUES (?1, ?2, ?3, ?4, ?5)
+RETURNING id, chat_id, user_id, body, file_id, created_at, edited_at
+`
+
+type MessageCreateParams struct {
+	ChatID    int64
+	UserID    int64
+	Body      string
+	FileID    sql.NullInt64
+	CreatedAt int64
+}
+
+func (q *Queries) MessageCreate(ctx context.Context, arg MessageCreateParams) (Message, error) {
+	row := q.db.QueryRowContext(ctx, messageCreate,
+		arg.ChatID,
+		arg.UserID,
+		arg.Body,
+		arg.FileID,
+		arg.CreatedAt,
+	)
+	var i Message
+	err := row.Scan(
+		&i.ID,
+		&i.ChatID,
+		&i.UserID,
+		&i.Body,
+		&i.FileID,
+		&i.CreatedAt,
+		&i.EditedAt,
+	)
+	return i, err
+}
+
+const messagesLatest = `-- name: MessagesLatest :many
+SELECT messages.id, messages.chat_id, messages.user_id, messages.body, messages.file_id, messages.created_at, messages.edited_at, users.username
+FROM messages JOIN users ON users.id = messages.user_id
+WHERE messages.chat_id = ?1
+ORDER BY messages.id DESC
+LIMIT ?2
+`
+
+type MessagesLatestParams struct {
+	ChatID int64
+	N      int64
+}
+
+type MessagesLatestRow struct {
+	Message  Message
+	Username string
+}
+
+func (q *Queries) MessagesLatest(ctx context.Context, arg MessagesLatestParams) ([]MessagesLatestRow, error) {
+	rows, err := q.db.QueryContext(ctx, messagesLatest, arg.ChatID, arg.N)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MessagesLatestRow
+	for rows.Next() {
+		var i MessagesLatestRow
+		if err := rows.Scan(
+			&i.Message.ID,
+			&i.Message.ChatID,
+			&i.Message.UserID,
+			&i.Message.Body,
+			&i.Message.FileID,
+			&i.Message.CreatedAt,
+			&i.Message.EditedAt,
+			&i.Username,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

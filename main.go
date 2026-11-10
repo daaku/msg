@@ -629,6 +629,7 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("POST "+pNew, a.wrap(accGroup, a.newGroupPost))
 	mux.HandleFunc("GET "+pChat+"{id}", a.wrap(accUser, a.chat))
 	mux.HandleFunc("GET "+pChat+"{id}/info", a.wrap(accUser, a.chatInfo))
+	mux.HandleFunc("POST "+pChat+"{id}/send", a.wrap(accUser, a.chatSend))
 	mux.HandleFunc("POST "+pChat+"{id}/rename", a.wrap(accUser, a.chatRename))
 	mux.HandleFunc("POST "+pChat+"{id}/members/add", a.wrap(accUser, a.chatMembersAdd))
 	mux.HandleFunc("POST "+pChat+"{id}/members/remove", a.wrap(accUser, a.chatMembersRemove))

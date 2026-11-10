@@ -6,8 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
+	_ "time/tzdata" // the zone database for the tz cookie
 	"unicode/utf8"
 
 	"github.com/daaku/serr"
@@ -15,7 +19,13 @@ import (
 	h "maragu.dev/gomponents/html"
 )
 
-const maxChatName = 64
+const (
+	maxChatName    = 64
+	maxMessageBody = 8000
+	defaultPage    = 100
+	maxPage        = 5000
+	snippetLength  = 80
+)
 
 var msgChatName = fmt.Sprintf("A group name is 1 to %d characters.", maxChatName)
 
@@ -145,10 +155,11 @@ func (a *app) chatManage(r *http.Request) (chatView, error) {
 // active is nil on home.
 func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, active *Chat, pane g.Node) error {
 	ctx := r.Context()
-	chats, err := a.q.ChatsForUser(ctx, user.ID)
+	chats, err := a.q.ChatsForUserWithLast(ctx, user.ID)
 	if err != nil {
 		return serr.Wrap(err)
 	}
+	loc := viewerLoc(r)
 	title := "Home"
 	var activeID int64
 	appAttrs := g.Group{h.Class("chat-layout")}
@@ -175,17 +186,27 @@ func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, activ
 			h.P(h.Strong(g.Text("No chats yet."))),
 			h.P(h.A(h.Href(pDM), g.Text("Start a direct message")), group))
 	} else {
-		list = h.Div(h.ID("chats"), h.Class("chat-list"), g.Map(chats, func(row ChatsForUserRow) g.Node {
+		list = h.Div(h.ID("chats"), h.Class("chat-list"), g.Map(chats, func(row ChatsForUserWithLastRow) g.Node {
 			c := row.Chat
 			kind, kindIcon := "group", "people"
 			if c.IsDm {
 				kind, kindIcon = "dm", "person"
 			}
+			var last g.Node
+			if row.LastCreatedAt > 0 {
+				at := time.Unix(row.LastCreatedAt, 0)
+				last = g.Group{
+					h.Time(h.Class("chat-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
+						g.Text(at.In(loc).Format("2 Jan 15:04"))),
+					h.Span(h.Class("chat-snippet"), g.Text(row.LastUsername+": "+snippet(row.LastBody))),
+				}
+			}
 			return h.A(h.ID(fmt.Sprintf("chat-%d", c.ID)), h.Class("chat-item "+kind),
 				h.Href(chatPath(c.ID)),
 				g.If(c.ID == activeID, h.Aria("current", "page")),
 				icon(kindIcon),
-				h.Span(h.Class("chat-name"), g.Text(a.chatTitle(c, user, row.Other))))
+				h.Span(h.Class("chat-name"), g.Text(a.chatTitle(c, user, row.Other))),
+				last)
 		}))
 	}
 	sidebar := h.Nav(h.ID("sidebar"),
@@ -339,15 +360,232 @@ func (a *app) newGroupPost(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
 	v, err := a.chatView(r)
 	if err != nil {
 		return err
 	}
+	n := pageSize(r.URL.Query().Get("n"))
+	rows, err := a.q.MessagesLatest(ctx, MessagesLatestParams{ChatID: v.Chat.ID, N: n})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	slices.Reverse(rows)
+	total, err := a.q.MessageCount(ctx, v.Chat.ID)
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	base := chatPath(v.Chat.ID)
+
+	var earlier g.Node
+	if total > n && len(rows) > 0 {
+		// The fragment keeps the reading position when the link is followed
+		// as a plain navigation: the browser scrolls to the message that was
+		// the oldest one shown.
+		href := fmt.Sprintf("%s?n=%d#m%d", base, min(2*n, maxPage), rows[0].Message.ID)
+		earlier = h.A(h.ID("earlier"), h.Href(href), g.Attr("data-morph"),
+			g.Text("Show earlier messages"))
+	}
+
+	var composer g.Node
+	if v.Member {
+		composer = h.Form(h.ID("composer"), h.Method("post"), h.Action(base+"/send"),
+			g.Attr("data-morph"),
+			h.Textarea(h.ID("composer-body"), h.Name("body"), h.Rows("1"), h.Required(),
+				h.MaxLength(strconv.Itoa(maxMessageBody)), h.Placeholder("Message"),
+				h.AutoComplete("off"), h.Aria("label", "Message")),
+			h.Button(h.ID("composer-send"), h.Class("btn icon-btn"), h.Type("submit"),
+				h.Aria("label", "Send"), icon("send")))
+	} else {
+		composer = h.P(h.ID("composer-note"), h.Class("composer-note"),
+			g.Text("You are viewing this group as an admin. "),
+			h.A(h.Href(base+"/info"), g.Text("Join it")), g.Text(" to post."))
+	}
+
 	return a.chatPage(w, r, v.User, &v.Chat, g.Group{
 		paneHead(v),
 		h.Div(h.ID("scroll"), h.Class("scroll"),
-			h.Div(h.ID("messages"))),
+			h.Div(h.ID("messages"), earlier, a.messageNodes(v, rows, viewerLoc(r)))),
+		composer,
 	})
+}
+
+// pageSize parses the n query parameter: how many of the newest messages to
+// show.
+func pageSize(s string) int64 {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return defaultPage
+	}
+	return min(max(n, 1), maxPage)
+}
+
+// viewerLoc is the time zone the browser reported in the tz cookie, UTC when
+// it is missing or unknown.
+func viewerLoc(r *http.Request) *time.Location {
+	c, err := r.Cookie("tz")
+	if err != nil || c.Value == "" || c.Value == "Local" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(c.Value)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// messageNodes renders messages, oldest first, with a separator before the
+// first message of each day.
+func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, loc *time.Location) g.Node {
+	var nodes g.Group
+	var prevUser int64
+	var prevDay string
+	for _, row := range rows {
+		m := row.Message
+		at := time.Unix(m.CreatedAt, 0).In(loc)
+		day := at.Format("2006-01-02")
+		if day != prevDay {
+			nodes = append(nodes, h.Div(h.ID("day-"+day), h.Class("day"),
+				g.Text(at.Format("2 January 2006"))))
+		}
+		first := day != prevDay || m.UserID != prevUser
+		prevUser, prevDay = m.UserID, day
+		mine := m.UserID == v.User.ID
+		class := "msg"
+		if mine {
+			class += " mine"
+		}
+		if first {
+			class += " first"
+		}
+		id := fmt.Sprintf("m%d", m.ID)
+		nodes = append(nodes, h.Article(h.ID(id), h.Class(class),
+			g.If(first && !mine, h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)),
+				g.Text(row.Username))),
+			h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body))),
+			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
+				g.Text(at.Format("15:04")))))
+	}
+	return nodes
+}
+
+// snippet is the start of a message body for the chat list.
+func snippet(body string) string {
+	if utf8.RuneCountInString(body) <= snippetLength {
+		return body
+	}
+	return string([]rune(body)[:snippetLength])
+}
+
+var urlRe = regexp.MustCompile(`https?://[^\s<>"']+`)
+
+// findURLs returns the start and end of each http and https URL in s.
+func findURLs(s string) [][2]int {
+	var out [][2]int
+	for _, loc := range urlRe.FindAllStringIndex(s, -1) {
+		start := loc[0]
+		u := strings.TrimRight(s[start:loc[1]], ".,;:!?)]}")
+		if _, rest, _ := strings.Cut(u, "://"); rest != "" {
+			out = append(out, [2]int{start, start + len(u)})
+		}
+	}
+	return out
+}
+
+// linkify renders a message body as text with its http and https URLs as
+// links.
+func linkify(body string) []g.Node {
+	var nodes []g.Node
+	pos := 0
+	for _, u := range findURLs(body) {
+		if u[0] > pos {
+			nodes = append(nodes, g.Text(body[pos:u[0]]))
+		}
+		href := body[u[0]:u[1]]
+		nodes = append(nodes, h.A(h.Href(href), h.Target("_blank"),
+			h.Rel("noopener noreferrer nofollow"), g.Text(href)))
+		pos = u[1]
+	}
+	if pos < len(body) {
+		nodes = append(nodes, g.Text(body[pos:]))
+	}
+	return nodes
+}
+
+// firstURL returns the first http or https URL in body, or "".
+func firstURL(body string) string {
+	if urls := findURLs(body); len(urls) > 0 {
+		return body[urls[0][0]:urls[0][1]]
+	}
+	return ""
+}
+
+// messages
+
+// normalizeBody normalises line endings and trims a message body.
+func normalizeBody(s string) (string, error) {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n"))
+	if len(s) > maxMessageBody {
+		return "", httpErr(http.StatusBadRequest,
+			fmt.Sprintf("A message is at most %d bytes.", maxMessageBody))
+	}
+	return s, nil
+}
+
+// createMessage stores a new message, bumps the chat and the author's
+// counter, and runs afterMessage once it is committed.
+func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body string, fileID sql.NullInt64) (Message, error) {
+	var msg Message
+	err := a.tx(ctx, func(q *Queries) error {
+		now := a.now().Unix()
+		var err error
+		msg, err = q.MessageCreate(ctx, MessageCreateParams{
+			ChatID:    chat.ID,
+			UserID:    userID,
+			Body:      body,
+			FileID:    fileID,
+			CreatedAt: now,
+		})
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		err = q.ChatTouch(ctx, ChatTouchParams{ID: chat.ID, LastMessageAt: now})
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		return a.statUser(ctx, q, userID, UserStatsAddParams{MessagesSent: 1})
+	})
+	if err != nil {
+		return msg, err
+	}
+	a.afterMessage(ctx, chat, msg)
+	return msg, nil
+}
+
+// afterMessage runs after a new message is committed. It is the only place
+// that fans out the side effects of a new message.
+func (a *app) afterMessage(ctx context.Context, chat Chat, msg Message) {
+	// Task 011 adds the live ping, task 019 the link preview and task 020
+	// the push notification.
+}
+
+func (a *app) chatSend(w http.ResponseWriter, r *http.Request) error {
+	v, err := a.chatMember(r)
+	if err != nil {
+		return err
+	}
+	body, err := normalizeBody(r.PostFormValue("body"))
+	if err != nil {
+		return err
+	}
+	if body != "" {
+		_, err = a.createMessage(r.Context(), v.Chat, v.User.ID, body, sql.NullInt64{})
+		if err != nil {
+			return err
+		}
+	}
+	http.Redirect(w, r, chatPath(v.Chat.ID), http.StatusSeeOther)
+	return nil
 }
 
 func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {

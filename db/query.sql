@@ -153,13 +153,20 @@ RETURNING *;
 -- name: ChatByID :one
 SELECT * FROM chats WHERE id = ?;
 
--- name: ChatsForUser :many
-SELECT sqlc.embed(chats), CAST(coalesce(other_user.username, '') AS TEXT) AS other
+-- name: ChatsForUserWithLast :many
+SELECT sqlc.embed(chats),
+  CAST(coalesce(other_user.username, '') AS TEXT) AS other,
+  CAST(coalesce(last.body, '') AS TEXT) AS last_body,
+  CAST(coalesce(last_user.username, '') AS TEXT) AS last_username,
+  CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at
 FROM chats
 JOIN members ON members.chat_id = chats.id AND members.user_id = @user_id
 LEFT JOIN members other ON chats.is_dm
   AND other.chat_id = chats.id AND other.user_id != @user_id
 LEFT JOIN users other_user ON other_user.id = other.user_id
+LEFT JOIN messages last ON last.id = (
+  SELECT max(m.id) FROM messages m WHERE m.chat_id = chats.id)
+LEFT JOIN users last_user ON last_user.id = last.user_id
 ORDER BY chats.last_message_at DESC, chats.id DESC;
 
 -- name: ChatByDMKey :one
@@ -200,3 +207,21 @@ ORDER BY username;
 
 -- name: UsersAllBasic :many
 SELECT id, username FROM users ORDER BY username;
+
+-- name: MessageCreate :one
+INSERT INTO messages (chat_id, user_id, body, file_id, created_at)
+VALUES (@chat_id, @user_id, @body, @file_id, @created_at)
+RETURNING *;
+
+-- name: MessagesLatest :many
+SELECT sqlc.embed(messages), users.username
+FROM messages JOIN users ON users.id = messages.user_id
+WHERE messages.chat_id = @chat_id
+ORDER BY messages.id DESC
+LIMIT @n;
+
+-- name: MessageCount :one
+SELECT count(*) FROM messages WHERE chat_id = ?;
+
+-- name: ChatTouch :exec
+UPDATE chats SET last_message_at = @last_message_at WHERE id = @id;
