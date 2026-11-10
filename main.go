@@ -48,6 +48,7 @@ const (
 	pChat               = "/c/"
 	pDM                 = "/dm"
 	pEvents             = "/events"
+	pFakeS3             = "/fakes3/"
 	pHome               = "/"
 	pInvite             = "/invite/"
 	pInvites            = "/invites"
@@ -305,6 +306,9 @@ type app struct {
 	q   *Queries
 	wa  *webauthn.WebAuthn
 	hub *hub
+	s3  *s3Client
+	// fakeS3 is the built in development bucket, nil with a real one.
+	fakeS3 *fakeS3
 
 	master    []byte
 	secretsMu sync.Mutex
@@ -336,6 +340,12 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		secrets: map[string][]byte{},
 	}
 	if err := a.loadMaster(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// The clock is read through a.now, which tests replace later.
+	a.s3, a.fakeS3, err = newS3(cfg, func() time.Time { return a.now() })
+	if err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -627,6 +637,10 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
 	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
 	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
+	if a.fakeS3 != nil {
+		// Requests carry their own signature, so this is outside a.wrap.
+		mux.Handle(pFakeS3, a.fakeS3)
+	}
 	mux.HandleFunc("GET "+pEvents, a.wrap(accUser, a.events))
 	mux.HandleFunc("GET "+pArchived, a.wrap(accUser, a.archived))
 	mux.HandleFunc("GET "+pDM, a.wrap(accUser, a.dm))
@@ -676,6 +690,13 @@ func run(ctx context.Context) error {
 	defer cancel()
 	a, err := newApp(ctx, cfg)
 	if err != nil {
+		return err
+	}
+	if a.fakeS3 != nil {
+		fmt.Printf("using built in fake S3 in %s; not for production\n", a.fakeS3.dir)
+	}
+	if err := a.s3.selfCheck(ctx, cfg.S3URLValidity); err != nil {
+		_ = a.close()
 		return err
 	}
 	if err := a.bootstrap(ctx); err != nil {

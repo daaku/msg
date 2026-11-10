@@ -36,8 +36,11 @@ func newTestApp(t *testing.T) *testApp {
 func newTestAppIn(t *testing.T, dir string) *testApp {
 	t.Helper()
 	cfg, err := parseConfig(func(key string) string {
-		if key == "STATE_DIRECTORY" {
+		switch key {
+		case "STATE_DIRECTORY":
 			return dir
+		case "S3_ENDPOINT":
+			return "fake"
 		}
 		return ""
 	})
