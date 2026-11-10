@@ -230,6 +230,10 @@ generated on first start and stored in the `config` table.
   repeated in a list, or that holds state (inputs, `details`, video), must
   have a stable, unique `id` derived from its database id (`m123`,
   `m123-reactions`, `chat-5`). Never derive an id from a list position.
+- An element that comes and goes in front of a list (like `#earlier`) is
+  always rendered and given `hidden` when not needed. If it vanished, paxi
+  would move every following sibling, which loses scroll anchoring and
+  restarts playing video.
 - Markup must be a pure function of database state and the URL. Do not render
   random values, the current time, or per request nonces inside `#app`,
   because every difference becomes a DOM mutation on every refresh.

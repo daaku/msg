@@ -46,6 +46,7 @@ const (
 	pAssets             = "/assets/"
 	pChat               = "/c/"
 	pDM                 = "/dm"
+	pEvents             = "/events"
 	pHome               = "/"
 	pInvite             = "/invite/"
 	pInvites            = "/invites"
@@ -302,6 +303,7 @@ type app struct {
 	db  *sql.DB
 	q   *Queries
 	wa  *webauthn.WebAuthn
+	hub *hub
 
 	master    []byte
 	secretsMu sync.Mutex
@@ -329,6 +331,7 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		db:      db,
 		q:       New(db),
 		wa:      wa,
+		hub:     newHub(),
 		secrets: map[string][]byte{},
 	}
 	if err := a.loadMaster(ctx); err != nil {
@@ -623,6 +626,7 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
 	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
 	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
+	mux.HandleFunc("GET "+pEvents, a.wrap(accUser, a.events))
 	mux.HandleFunc("GET "+pDM, a.wrap(accUser, a.dm))
 	mux.HandleFunc("POST "+pDM, a.wrap(accUser, a.dmPost))
 	mux.HandleFunc("GET "+pNew, a.wrap(accGroup, a.newGroup))

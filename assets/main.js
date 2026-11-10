@@ -69,3 +69,119 @@ document.addEventListener('keydown', ev => {
   ev.preventDefault()
   ev.target.form.requestSubmit()
 })
+
+// Live updates. refresh() fetches the current URL as a full page and morphs
+// #app towards it. Only one runs at a time, and a request that arrives while
+// one is running is never dropped.
+let refreshing = false
+let refreshAgain = false
+async function refresh() {
+  if (refreshing) {
+    refreshAgain = true
+    return
+  }
+  refreshing = true
+  try {
+    const res = await fetch(location.href, { headers: { 'X-Refresh': '1' } })
+    if (res.redirected && new URL(res.url).pathname !== location.pathname) {
+      location.href = res.url // signed out, or moved
+      return
+    }
+    if (res.status === 404) {
+      location.href = '/' // lost access
+      return
+    }
+    if (!res.ok) return
+    const doc = new DOMParser().parseFromString(await res.text(), 'text/html')
+    const next = doc.getElementById('app')
+    if (!next) return
+    morph(document.getElementById('app'), next.outerHTML)
+    document.title = doc.title
+  } catch (err) {
+    console.error(err) // offline: the next ping retries
+  } finally {
+    refreshing = false
+    if (refreshAgain) {
+      refreshAgain = false
+      refresh()
+    }
+  }
+}
+
+// The event stream only says "something changed". It is closed while the
+// tab is hidden, so an open stream means someone is looking.
+if (document.getElementById('app')?.hasAttribute('data-live')) {
+  let es = null
+  let opened = false
+  const connect = () => {
+    if (es) return
+    const chat = document.getElementById('app').dataset.chat
+    es = new EventSource('/events' + (chat ? `?chat=${chat}` : ''))
+    es.onmessage = refresh
+    es.onopen = () => {
+      if (opened) refresh() // catch up after a reconnect
+      opened = true
+    }
+  }
+  const disconnect = () => {
+    es?.close()
+    es = null
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      disconnect()
+    } else {
+      refresh()
+      connect()
+    }
+  })
+  addEventListener('pagehide', disconnect)
+  addEventListener('pageshow', ev => {
+    if (ev.persisted && !document.hidden) {
+      refresh()
+      connect()
+    }
+  })
+  if (!document.hidden) connect()
+}
+
+// data-morph forms post in the background and then refresh in place.
+document.addEventListener('submit', async ev => {
+  const form = ev.target
+  if (!form.matches?.('form[data-morph]') || !window.morph) return
+  ev.preventDefault()
+  const button = ev.submitter
+  const body = new URLSearchParams(new FormData(form, button))
+  if (button) button.disabled = true
+  try {
+    const res = await fetch(form.action, { method: 'POST', body, redirect: 'manual' })
+    if (res.type !== 'opaqueredirect' && !res.ok) throw new Error(`status ${res.status}`)
+    form.reset()
+    await refresh()
+  } catch (err) {
+    console.error(err)
+    HTMLFormElement.prototype.submit.call(form) // let the server show its error page
+    return
+  } finally {
+    if (button) button.disabled = false
+  }
+  if (form.id === 'composer') form.querySelector('textarea')?.focus()
+})
+
+// data-morph links change the URL and refresh in place.
+document.addEventListener('click', ev => {
+  const link = ev.target.closest?.('a[data-morph]')
+  if (!link || !window.morph) return
+  if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return
+  ev.preventDefault()
+  const url = new URL(link.href)
+  history.replaceState(null, '', url.pathname + url.search)
+  // Hold the reading position: #scroll is column-reverse, so its scrollTop
+  // is the (negative) distance from the newest message. Browsers do not
+  // keep it by themselves when the view is at the very top.
+  const scroll = document.getElementById('scroll')
+  const top = scroll?.scrollTop
+  refresh().then(() => {
+    if (scroll) scroll.scrollTop = top
+  })
+})

@@ -647,7 +647,7 @@ func TestMessagesRender(t *testing.T) {
 	ensure.StringDoesNotContain(t, art(m4), "msg-who")
 
 	// no earlier link with only a few messages
-	ensure.StringDoesNotContain(t, body, `id="earlier"`)
+	ensure.StringContains(t, body, `<a id="earlier" hidden`)
 }
 
 func TestLinkify(t *testing.T) {
@@ -701,17 +701,17 @@ func TestMessagesPagination(t *testing.T) {
 
 	body = ta.get(chatPath(chat.ID)+"?n=200", ta.as(alice)).Body.String()
 	ensure.DeepEqual(t, count(body), 150)
-	ensure.StringDoesNotContain(t, body, `id="earlier"`)
+	ensure.StringContains(t, body, `<a id="earlier" hidden`)
 
 	body = ta.get(chatPath(chat.ID)+"?n=150", ta.as(alice)).Body.String()
 	ensure.DeepEqual(t, count(body), 150)
-	ensure.StringDoesNotContain(t, body, `id="earlier"`)
+	ensure.StringContains(t, body, `<a id="earlier" hidden`)
 
 	for in, want := range map[string]int{"0": 1, "-5": 1, "x": 100, "": 100, "149": 149, "99999": 150} {
 		ensure.DeepEqual(t, count(ta.get(chatPath(chat.ID)+"?n="+in, ta.as(alice)).Body.String()), want, in)
 	}
 	ensure.StringContains(t, ta.get(chatPath(chat.ID)+"?n=1", ta.as(alice)).Body.String(), "?n=2#m")
-	ensure.StringDoesNotContain(t, ta.get(chatPath(chat.ID)+"?n=5000", ta.as(alice)).Body.String(), `id="earlier"`)
+	ensure.StringContains(t, ta.get(chatPath(chat.ID)+"?n=5000", ta.as(alice)).Body.String(), `<a id="earlier" hidden`)
 	ensure.DeepEqual(t, pageSize("4000"), int64(4000))
 	ensure.DeepEqual(t, pageSize("5001"), int64(5000))
 }

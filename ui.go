@@ -23,6 +23,7 @@ func (a *app) shell(w http.ResponseWriter, r *http.Request, title, bodyClass str
 				h.Meta(h.Name("color-scheme"), h.Content("light dark")),
 				h.TitleEl(g.Text(title+" · "+a.cfg.AppName)),
 				h.Link(h.Rel("stylesheet"), h.Href(assetPath("main.css"))),
+				h.Script(h.Src(assetPath("paxi.js")), h.Defer()),
 				h.Script(h.Src(assetPath("main.js")), h.Defer()),
 				g.If(a.cfg.Dev, h.Script(h.Src(pLivereloadJS), h.Defer())),
 			),

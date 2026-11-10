@@ -5,11 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	_ "time/tzdata" // the zone database for the tz cookie
 	"unicode/utf8"
@@ -97,9 +100,156 @@ func (a *app) chatName(ctx context.Context, chat Chat, viewer *User) (string, er
 	return a.chatTitle(chat, viewer, other), nil
 }
 
+// live updates
+
+// hubConn is one open /events stream.
+type hubConn struct {
+	ch     chan struct{} // buffered, size 1: a pending ping
+	chatID int64         // the chat this tab is showing, 0 if none
+}
+
+// hub fans pings out to the open streams of this process. A ping carries no
+// data: it means "something you can see changed, fetch the page again".
+type hub struct {
+	mu    sync.Mutex
+	conns map[int64]map[*hubConn]struct{} // by user id
+}
+
+func newHub() *hub {
+	return &hub{conns: map[int64]map[*hubConn]struct{}{}}
+}
+
+// subscribe registers a stream. cancel must be called when it ends.
+func (h *hub) subscribe(userID, chatID int64) (c *hubConn, cancel func()) {
+	c = &hubConn{ch: make(chan struct{}, 1), chatID: chatID}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.conns[userID] == nil {
+		h.conns[userID] = map[*hubConn]struct{}{}
+	}
+	h.conns[userID][c] = struct{}{}
+	return c, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		delete(h.conns[userID], c)
+		if len(h.conns[userID]) == 0 {
+			delete(h.conns, userID)
+		}
+	}
+}
+
+// ping never blocks: a full channel already has a ping pending, and one
+// refresh shows everything.
+func (c *hubConn) ping() {
+	select {
+	case c.ch <- struct{}{}:
+	default:
+	}
+}
+
+// notifyUsers pings every stream of the given users.
+func (h *hub) notifyUsers(userIDs ...int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, id := range userIDs {
+		for c := range h.conns[id] {
+			c.ping()
+		}
+	}
+}
+
+// notifyViewers pings every stream that is showing the chat, whoever it
+// belongs to. This reaches an admin watching a group they are not in.
+func (h *hub) notifyViewers(chatID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, conns := range h.conns {
+		for c := range conns {
+			if c.chatID == chatID {
+				c.ping()
+			}
+		}
+	}
+}
+
+// viewing reports whether the user has a stream open on the chat.
+func (h *hub) viewing(userID, chatID int64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.conns[userID] {
+		if c.chatID == chatID {
+			return true
+		}
+	}
+	return false
+}
+
 // notifyChat tells everyone who can see the chat that it changed.
 func (a *app) notifyChat(ctx context.Context, chatID int64) {
-	// Task 011 implements this: ping the members and viewers over SSE.
+	// The request that caused the change may already be over.
+	ids, err := a.q.MemberIDs(context.WithoutCancel(ctx), chatID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "notifyChat %d: %+v\n", chatID, serr.Wrap(err))
+	}
+	a.hub.notifyUsers(ids...)
+	a.hub.notifyViewers(chatID)
+}
+
+const eventsHeartbeat = 25 * time.Second
+
+// events is the Server-Sent Events stream. The optional chat parameter says
+// which chat the tab is showing.
+func (a *app) events(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	var chatID int64
+	if s := r.URL.Query().Get("chat"); s != "" {
+		id, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return errNotFound
+		}
+		if _, _, _, err := a.chatAccess(ctx, user, id); err != nil {
+			return err
+		}
+		chatID = id
+	}
+
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	send := func(s string) bool {
+		if _, err := io.WriteString(w, s); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+
+	// Subscribe before the first byte, so nothing after it can be missed.
+	c, cancel := a.hub.subscribe(user.ID, chatID)
+	defer cancel()
+	if !send("retry: 3000\n\n") {
+		return nil
+	}
+	tick := time.NewTicker(eventsHeartbeat)
+	defer tick.Stop()
+	for {
+		select {
+		case <-c.ch:
+			if !send("data: 1\n\n") {
+				return nil
+			}
+		case <-tick.C:
+			if !send(": hb\n\n") {
+				return nil
+			}
+		case <-ctx.Done():
+			return nil
+		case <-a.ctx.Done(): // shutdown must not wait for open streams
+			return nil
+		}
+	}
 }
 
 // chatView is a chat as seen by the signed in user.
@@ -162,13 +312,13 @@ func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, activ
 	loc := viewerLoc(r)
 	title := "Home"
 	var activeID int64
-	appAttrs := g.Group{h.Class("chat-layout")}
+	appAttrs := g.Group{h.Class("chat-layout"), h.Data("live", "")}
 	if active != nil {
 		activeID = active.ID
 		if title, err = a.chatName(ctx, *active, user); err != nil {
 			return err
 		}
-		appAttrs = g.Group{h.Class("chat-layout has-chat"),
+		appAttrs = g.Group{h.Class("chat-layout has-chat"), h.Data("live", ""),
 			h.Data("chat", strconv.FormatInt(active.ID, 10))}
 	}
 
@@ -377,7 +527,10 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	}
 	base := chatPath(v.Chat.ID)
 
-	var earlier g.Node
+	// The link is always rendered, hidden when there is nothing earlier, so
+	// that the first child of #messages lines up between renders. Without
+	// it the morph would move every message when the link goes away.
+	earlier := h.A(h.ID("earlier"), h.Hidden(""))
 	if total > n && n < maxPage && len(rows) > 0 {
 		// The fragment keeps the reading position when the link is followed
 		// as a plain navigation: the browser scrolls to the message that was
@@ -567,8 +720,8 @@ func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body s
 // afterMessage runs after a new message is committed. It is the only place
 // that fans out the side effects of a new message.
 func (a *app) afterMessage(ctx context.Context, chat Chat, msg Message) {
-	// Task 011 adds the live ping, task 019 the link preview and task 020
-	// the push notification.
+	a.notifyChat(ctx, chat.ID)
+	// Task 019 adds the link preview and task 020 the push notification.
 }
 
 func (a *app) chatSend(w http.ResponseWriter, r *http.Request) error {
@@ -666,6 +819,7 @@ func (a *app) chatRename(w http.ResponseWriter, r *http.Request) error {
 	if err := a.q.ChatRename(r.Context(), ChatRenameParams{ID: v.Chat.ID, Name: name}); err != nil {
 		return serr.Wrap(err)
 	}
+	a.notifyChat(r.Context(), v.Chat.ID)
 	return a.flash(w, r, back, Flash{Kind: flashSuccess, Content: "Group renamed."})
 }
 
@@ -685,6 +839,7 @@ func (a *app) chatMembersAdd(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	a.notifyChat(ctx, v.Chat.ID)
 	http.Redirect(w, r, chatPath(v.Chat.ID)+"/info", http.StatusSeeOther)
 	return nil
 }
@@ -707,6 +862,9 @@ func (a *app) chatMembersRemove(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return serr.Wrap(err)
 	}
+	// The removed user is no longer among the members notifyChat pings.
+	a.notifyChat(r.Context(), v.Chat.ID)
+	a.hub.notifyUsers(id)
 	http.Redirect(w, r, back, http.StatusSeeOther)
 	return nil
 }
