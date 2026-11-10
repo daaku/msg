@@ -1,9 +1,13 @@
 package main
 
+//go:generate go tool sqlc generate
+
 import (
 	"context"
 	"crypto/hkdf"
+	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -14,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,10 +31,12 @@ import (
 	"github.com/daaku/livereload"
 	"github.com/daaku/serr"
 	"github.com/daaku/sookie"
+	"github.com/daaku/sqlmig"
 	g "maragu.dev/gomponents"
 	h "maragu.dev/gomponents/html"
 
 	_ "github.com/joho/godotenv/autoload"
+	_ "modernc.org/sqlite"
 )
 
 const (
@@ -280,16 +287,136 @@ type app struct {
 	ctx context.Context
 	bg  sync.WaitGroup
 	now func() time.Time
+	db  *sql.DB
+	q   *Queries
+
+	master    []byte
+	secretsMu sync.Mutex
+	secrets   map[string][]byte
 }
 
-// secret returns a 32 byte key for the given purpose.
-func (a *app) secret(purpose string) []byte {
-	// Development constant until the stored master secret exists.
-	master := sha256.Sum256([]byte("msg development secret"))
-	key, err := hkdf.Expand(sha256.New, master[:], purpose, 32)
-	if err != nil {
-		panic(err)
+// newApp opens the database, runs the migrations and loads the stored
+// secrets. The caller must call close.
+func newApp(ctx context.Context, cfg config) (*app, error) {
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return nil, serr.Wrap(err)
 	}
+	db, err := openDB(ctx, filepath.Join(cfg.StateDir, "msg.db"))
+	if err != nil {
+		return nil, err
+	}
+	a := &app{
+		cfg:     cfg,
+		ctx:     ctx,
+		now:     time.Now,
+		db:      db,
+		q:       New(db),
+		secrets: map[string][]byte{},
+	}
+	if err := a.loadMaster(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return a, nil
+}
+
+func (a *app) close() error {
+	return serr.Wrap(a.db.Close())
+}
+
+// database
+
+//go:embed db/[0-9]*.sql
+var migrationsFS embed.FS
+
+var migrations = sqlmig.Source{
+	FS:   migrationsFS,
+	Glob: "db/[0-9]*.sql",
+}
+
+var sqliteDSN = strings.Join([]string{
+	"_pragma=journal_mode(wal)",
+	"_pragma=foreign_keys(on)",
+	"_pragma=synchronous(normal)",
+	"_pragma=busy_timeout(5000)",
+	"_pragma=cache_size(-20000)",
+	"_pragma=temp_store(memory)",
+	"_pragma=mmap_size(134217728)",
+	"_txlock=immediate",
+}, "&")
+
+// openDB opens the SQLite database at file and runs the migrations.
+func openDB(ctx context.Context, file string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", "file:"+file+"?"+sqliteDSN)
+	if err != nil {
+		return nil, serr.Wrap(err)
+	}
+	if err := migrations.Migrate(ctx, db); err != nil {
+		db.Close()
+		return nil, serr.Wrap(err)
+	}
+	return db, nil
+}
+
+// tx runs fn inside a transaction, committing when it returns nil and
+// rolling back on an error or a panic.
+func (a *app) tx(ctx context.Context, fn func(q *Queries) error) (err error) {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if err := fn(a.q.WithTx(tx)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return serr.Wrap(err)
+	}
+	committed = true
+	return nil
+}
+
+// loadMaster loads the master secret, generating and storing it on first
+// start. Reading it back after the insert makes two racing starts agree.
+func (a *app) loadMaster(ctx context.Context) error {
+	fresh := make([]byte, 32)
+	_, _ = rand.Read(fresh) // never returns an error
+	err := a.q.ConfigSetDefault(ctx, ConfigSetDefaultParams{
+		Key:   "secret",
+		Value: fresh,
+	})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	master, err := a.q.ConfigGet(ctx, "secret")
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	if len(master) != 32 {
+		return serr.Errorf("stored secret has %d bytes, want 32", len(master))
+	}
+	a.master = master
+	return nil
+}
+
+// secret returns the 32 byte key for the given purpose, derived from the
+// stored master secret.
+func (a *app) secret(purpose string) []byte {
+	a.secretsMu.Lock()
+	defer a.secretsMu.Unlock()
+	if key, ok := a.secrets[purpose]; ok {
+		return key
+	}
+	key, err := hkdf.Expand(sha256.New, a.master, purpose, 32)
+	if err != nil {
+		panic(err) // only possible with an invalid length
+	}
+	a.secrets[purpose] = key
 	return key
 }
 
@@ -490,16 +617,17 @@ func run(ctx context.Context) error {
 	}
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	a := &app{cfg: cfg, ctx: ctx, now: time.Now}
-	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
-		return serr.Wrap(err)
+	a, err := newApp(ctx, cfg)
+	if err != nil {
+		return err
 	}
-	if err := lands.ListenAndServe(a.ctx, defaultAddr, a.handler()); err != nil {
-		return serr.Wrap(err)
-	}
+	serveErr := lands.ListenAndServe(a.ctx, defaultAddr, a.handler())
 	cancel()
 	a.bg.Wait()
-	return nil
+	if err := a.close(); err != nil && serveErr == nil {
+		return err
+	}
+	return serr.Wrap(serveErr)
 }
 
 func main() {

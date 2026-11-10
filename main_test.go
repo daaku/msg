@@ -1,6 +1,9 @@
 package main
 
 import (
+	"database/sql"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -22,21 +25,26 @@ type testApp struct {
 }
 
 // newTestApp builds an app with default configuration on a temporary state
-// directory and a fixed clock.
+// directory with a real, migrated database and a fixed clock.
 func newTestApp(t *testing.T) *testApp {
+	t.Helper()
+	return newTestAppIn(t, t.TempDir())
+}
+
+// newTestAppIn is newTestApp on the given state directory.
+func newTestAppIn(t *testing.T, dir string) *testApp {
 	t.Helper()
 	cfg, err := parseConfig(func(key string) string {
 		if key == "STATE_DIRECTORY" {
-			return t.TempDir()
+			return dir
 		}
 		return ""
 	})
 	ensure.Nil(t, err)
-	a := &app{
-		cfg: cfg,
-		ctx: t.Context(),
-		now: func() time.Time { return testNow },
-	}
+	a, err := newApp(t.Context(), cfg)
+	ensure.Nil(t, err)
+	t.Cleanup(func() { ensure.Nil(t, a.close()) })
+	a.now = func() time.Time { return testNow }
 	return &testApp{t: t, app: a, h: a.handler()}
 }
 
@@ -337,4 +345,92 @@ func TestConfigValues(t *testing.T) {
 	ensure.DeepEqual(t, cfg.ImageResolution, 2560)
 	ensure.DeepEqual(t, cfg.VideoFormat, "av1")
 	ensure.DeepEqual(t, cfg.VideoResolution, 1280)
+}
+
+func TestMigrations(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	files, err := fs.Glob(migrationsFS, migrations.Glob)
+	ensure.Nil(t, err)
+	ensure.True(t, len(files) > 0)
+	var applied int
+	ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM db_migrations").Scan(&applied))
+	ensure.DeepEqual(t, applied, len(files))
+
+	// every table exists and is empty
+	for _, table := range []string{"config", "users", "credentials", "invites",
+		"chats", "members", "files", "messages", "previews", "reactions",
+		"snoozes", "push_subscriptions", "user_stats", "chat_stats"} {
+		var n int
+		ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
+			"SELECT count(*) FROM "+table).Scan(&n), table)
+	}
+	n, err := ta.app.q.UserCount(ctx)
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, n, int64(0))
+
+	// applying again is a no op
+	ensure.Nil(t, migrations.Migrate(ctx, ta.app.db))
+	ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM db_migrations").Scan(&applied))
+	ensure.DeepEqual(t, applied, len(files))
+
+	// query.sql is not a migration
+	for _, f := range files {
+		ensure.StringDoesNotContain(t, f, "query.sql")
+	}
+}
+
+func TestSecret(t *testing.T) {
+	dir := t.TempDir()
+	a1 := newTestAppIn(t, dir).app
+	a2 := newTestAppIn(t, dir).app
+	ensure.DeepEqual(t, len(a1.secret("x")), 32)
+	ensure.DeepEqual(t, a1.secret("x"), a2.secret("x"))
+	ensure.NotDeepEqual(t, a1.secret("x"), a1.secret("y"))
+	other := newTestApp(t).app
+	ensure.NotDeepEqual(t, a1.secret("x"), other.secret("x"))
+}
+
+func TestTxRollsBack(t *testing.T) {
+	ta := newTestApp(t)
+	a := ta.app
+	ctx := t.Context()
+	errBoom := errors.New("boom")
+	err := a.tx(ctx, func(q *Queries) error {
+		ensure.Nil(t, q.ConfigSetDefault(ctx, ConfigSetDefaultParams{Key: "k", Value: []byte("v")}))
+		return errBoom
+	})
+	ensure.True(t, errors.Is(err, errBoom))
+	_, err = a.q.ConfigGet(ctx, "k")
+	ensure.True(t, errors.Is(err, sql.ErrNoRows), err)
+
+	func() {
+		defer ensure.PanicDeepEqual(t, "oops")
+		_ = a.tx(ctx, func(q *Queries) error {
+			ensure.Nil(t, q.ConfigSetDefault(ctx, ConfigSetDefaultParams{Key: "k", Value: []byte("v")}))
+			panic("oops")
+		})
+	}()
+	_, err = a.q.ConfigGet(ctx, "k")
+	ensure.True(t, errors.Is(err, sql.ErrNoRows), err)
+
+	ensure.Nil(t, a.tx(ctx, func(q *Queries) error {
+		return q.ConfigSetDefault(ctx, ConfigSetDefaultParams{Key: "k", Value: []byte("v")})
+	}))
+	v, err := a.q.ConfigGet(ctx, "k")
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, v, []byte("v"))
+}
+
+func TestForeignKeysEnforced(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	_, err := ta.app.db.ExecContext(ctx,
+		"INSERT INTO users (id, username, handle, created_at) VALUES (1, 'a', x'01', 1)")
+	ensure.Nil(t, err)
+	_, err = ta.app.db.ExecContext(ctx,
+		"INSERT INTO members (chat_id, user_id, added_by, created_at) VALUES (99, 1, 1, 1)")
+	ensure.Err(t, err, regexp.MustCompile("FOREIGN KEY"))
 }

@@ -1,0 +1,12 @@
+version: '2'
+sql:
+  - engine: sqlite
+    queries: db/query.sql
+    schema: db
+    gen:
+      go:
+        package: main
+        out: .
+        output_db_file_name: sqlc_db.go
+        output_models_file_name: sqlc_models.go
+        output_files_suffix: ''
