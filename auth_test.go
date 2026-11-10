@@ -952,3 +952,227 @@ func TestInvitesList(t *testing.T) {
 	ensure.StringContains(t, page, "by mallory")
 	ensure.StringDoesNotContain(t, page, link.Token)
 }
+
+func TestAdminAccess(t *testing.T) {
+	ta := newTestApp(t)
+	admin := ta.newUser("boss", "admin")
+	plain := ta.newUser("plain", "invite", "group")
+	base := adminUserPath(plain.ID)
+	gets := []string{pAdmin, base}
+	posts := []string{base + "/perms", base + "/passkey/delete", base + "/link", base + "/link/revoke"}
+	form := url.Values{"id": {strconv.FormatInt(plain.credID, 10)}, "admin": {"1"}}
+
+	for _, p := range gets {
+		ensure.DeepEqual(t, ta.get(p, ta.as(plain)).Code, http.StatusNotFound, p)
+		w := ta.get(p)
+		ensure.DeepEqual(t, w.Code, http.StatusSeeOther, p)
+		ensure.DeepEqual(t, w.Header().Get("Location"), pSignIn, p)
+		ensure.DeepEqual(t, ta.get(p, ta.as(admin)).Code, http.StatusOK, p)
+	}
+	for _, p := range posts {
+		ensure.DeepEqual(t, ta.post(p, form, ta.as(plain)).Code, http.StatusNotFound, p)
+		ensure.DeepEqual(t, ta.post(p, form).Code, http.StatusUnauthorized, p)
+	}
+	// nothing changed
+	ensure.DeepEqual(t, credCount(t, ta, plain.ID), int64(1))
+	u, err := ta.app.q.UserByID(t.Context(), plain.ID)
+	ensure.Nil(t, err)
+	ensure.False(t, u.PermAdmin)
+	ensure.DeepEqual(t, countRows(t, ta, "invites"), 0)
+
+	ensure.StringContains(t, ta.get(pHome, ta.as(admin)).Body.String(), `href="/admin"`)
+	ensure.StringDoesNotContain(t, ta.get(pHome, ta.as(plain)).Body.String(), `href="/admin"`)
+}
+
+func TestAdminUnknownUser(t *testing.T) {
+	ta := newTestApp(t)
+	admin := ta.newUser("boss", "admin")
+	for _, id := range []string{"999", "x", "0", "-1"} {
+		base := pAdminUser + id
+		ensure.DeepEqual(t, ta.get(base, ta.as(admin)).Code, http.StatusNotFound, id)
+		for _, p := range []string{"/perms", "/passkey/delete", "/link", "/link/revoke"} {
+			ensure.DeepEqual(t, ta.post(base+p, url.Values{"id": {"1"}}, ta.as(admin)).Code,
+				http.StatusNotFound, id+p)
+		}
+	}
+	ensure.DeepEqual(t, countRows(t, ta, "invites"), 0)
+}
+
+func TestAdminList(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	admin := ta.newUser("boss", "admin")
+	inv, err := ta.app.createInvite(ctx, ta.app.q, inviteParams{
+		Username: "carol", CreatedBy: admin.ID, TTL: time.Hour})
+	ensure.Nil(t, err)
+	_, _, _ = ta.acceptInvite(inv)
+	carol, err := ta.app.q.UserByUsername(ctx, "carol")
+	ensure.Nil(t, err)
+	alice := ta.newUser("alice", "invite")
+	ta.addPasskey(alice)
+
+	w := ta.get(pAdmin, ta.as(admin))
+	body := w.Body.String()
+	ensure.StringContains(t, body, "<h1>Admin</h1>")
+	ensure.StringContains(t, body, `href="/"`)
+	// ordered by username
+	ia := strings.Index(body, `id="user-`+strconv.FormatInt(alice.ID, 10)+`"`)
+	ib := strings.Index(body, `id="user-`+strconv.FormatInt(admin.ID, 10)+`"`)
+	ic := strings.Index(body, `id="user-`+strconv.FormatInt(carol.ID, 10)+`"`)
+	ensure.True(t, ia >= 0 && ia < ib && ib < ic, ia, ib, ic)
+	ensure.StringContains(t, body, `href="`+adminUserPath(carol.ID)+`"`)
+	row := body[ia:ib]
+	ensure.StringContains(t, row, `<span class="badge">Invite</span>`)
+	ensure.StringContains(t, row, `<td data-label="Passkeys">2</td>`)
+	ensure.StringContains(t, row, `<td data-label="Invited by">-</td>`)
+	ensure.StringContains(t, row, "2 Jan 2026 03:04")
+	ensure.StringContains(t, body[ic:], `<td data-label="Invited by">boss</td>`)
+	ensure.StringContains(t, body[ib:ic], `<span class="badge">Admin</span>`)
+}
+
+func TestAdminPerms(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	admin := ta.newUser("boss", "admin")
+	bob := ta.newUser("bob")
+	set := func(perms ...string) {
+		t.Helper()
+		form := url.Values{}
+		for _, p := range perms {
+			form.Set(p, "1")
+		}
+		w := ta.post(adminUserPath(bob.ID)+"/perms", form, ta.as(admin))
+		ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "Permissions saved.")
+	}
+	get := func() User {
+		t.Helper()
+		u, err := ta.app.q.UserByID(ctx, bob.ID)
+		ensure.Nil(t, err)
+		return u
+	}
+
+	page := ta.get(adminUserPath(bob.ID), ta.as(admin)).Body.String()
+	ensure.StringContains(t, page, "<h1>bob</h1>")
+	ensure.StringContains(t, page, `href="/admin"`)
+	for _, p := range []string{"admin", "invite", "group"} {
+		ensure.StringContains(t, page, `type="checkbox" name="`+p+`"`)
+	}
+
+	set("invite")
+	ensure.True(t, get().PermInvite)
+	ensure.False(t, get().PermGroup)
+	ensure.DeepEqual(t, ta.get(pInvites, ta.as(bob)).Code, http.StatusOK)
+	ensure.DeepEqual(t, ta.get(pAdmin, ta.as(bob)).Code, http.StatusNotFound)
+	ensure.StringContains(t, ta.get(adminUserPath(bob.ID), ta.as(admin)).Body.String(),
+		`name="invite" value="1" checked`)
+
+	set("group")
+	ensure.False(t, get().PermInvite)
+	ensure.True(t, get().PermGroup)
+	ensure.DeepEqual(t, ta.get(pInvites, ta.as(bob)).Code, http.StatusNotFound)
+
+	set("admin")
+	ensure.True(t, get().PermAdmin)
+	ensure.False(t, get().PermGroup)
+	ensure.DeepEqual(t, ta.get(pAdmin, ta.as(bob)).Code, http.StatusOK)
+	ensure.DeepEqual(t, ta.get(pInvites, ta.as(bob)).Code, http.StatusOK)
+
+	set()
+	u := get()
+	ensure.False(t, u.PermAdmin || u.PermInvite || u.PermGroup)
+	ensure.DeepEqual(t, ta.get(pAdmin, ta.as(bob)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.get(pInvites, ta.as(bob)).Code, http.StatusNotFound)
+}
+
+func TestAdminCannotRemoveOwnAdmin(t *testing.T) {
+	ta := newTestApp(t)
+	admin := ta.newUser("boss", "admin")
+	page := ta.get(adminUserPath(admin.ID), ta.as(admin)).Body.String()
+	ensure.StringDoesNotContain(t, page, `type="checkbox" name="admin"`)
+	ensure.StringContains(t, page, "You cannot remove your own admin permission.")
+	// no delete controls for the own passkeys
+	ensure.StringDoesNotContain(t, page, "/passkey/delete")
+
+	w := ta.post(adminUserPath(admin.ID)+"/perms", url.Values{"invite": {"1"}}, ta.as(admin))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "You cannot remove your own admin permission.")
+	u, err := ta.app.q.UserByID(t.Context(), admin.ID)
+	ensure.Nil(t, err)
+	ensure.True(t, u.PermAdmin)
+	ensure.False(t, u.PermInvite)
+
+	// the form as rendered still saves the other permissions
+	w = ta.post(adminUserPath(admin.ID)+"/perms", url.Values{"admin": {"1"}, "invite": {"1"}}, ta.as(admin))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "Permissions saved.")
+	u, err = ta.app.q.UserByID(t.Context(), admin.ID)
+	ensure.Nil(t, err)
+	ensure.True(t, u.PermAdmin && u.PermInvite)
+
+	// own passkeys cannot be deleted here, even with a second one
+	ta.addPasskey(admin)
+	w = ta.post(adminUserPath(admin.ID)+"/passkey/delete",
+		url.Values{"id": {strconv.FormatInt(admin.credID, 10)}}, ta.as(admin))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "Manage your own passkeys in Settings.")
+	ensure.DeepEqual(t, credCount(t, ta, admin.ID), int64(2))
+}
+
+func TestAdminRecovery(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	admin := ta.newUser("boss", "admin")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	base := adminUserPath(bob.ID)
+
+	page := ta.get(base, ta.as(admin)).Body.String()
+	ensure.StringContains(t, page, fmt.Sprintf(`id="passkey-%d"`, bob.credID))
+	ensure.StringContains(t, page, `action="`+base+`/passkey/delete"`)
+	ensure.StringContains(t, page, "locks bob out until they use a recovery link")
+
+	// a passkey of another user through bob's page is not found
+	ensure.DeepEqual(t, ta.post(base+"/passkey/delete",
+		url.Values{"id": {strconv.FormatInt(carol.credID, 10)}}, ta.as(admin)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, credCount(t, ta, carol.ID), int64(1))
+
+	// deleting bob's only passkey ends his session
+	ensure.DeepEqual(t, ta.get(pSettings, ta.as(bob)).Code, http.StatusOK)
+	w := ta.post(base+"/passkey/delete",
+		url.Values{"id": {strconv.FormatInt(bob.credID, 10)}}, ta.as(admin))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "Passkey deleted.")
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(0))
+	ensure.DeepEqual(t, ta.get(pSettings, ta.as(bob)).Code, http.StatusSeeOther)
+
+	// a recovery link
+	w = ta.post(base+"/link", nil, ta.as(admin))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "Recovery link created.")
+	links := pendingLinks(t, ta, bob.ID)
+	ensure.DeepEqual(t, len(links), 1)
+	link := links[0]
+	ensure.DeepEqual(t, link.CreatedBy.Int64, admin.ID)
+	ensure.DeepEqual(t, link.ExpiresAt, testNow.Add(24*time.Hour).Unix())
+	page = ta.get(base, ta.as(admin)).Body.String()
+	ensure.StringContains(t, page, `value="`+ta.app.inviteURL(link)+`"`)
+	ensure.StringContains(t, page, "data-copy")
+	ensure.StringContains(t, page, `action="`+base+`/link/revoke"`)
+	ensure.DeepEqual(t, invitesSent(t, ta, admin.ID), int64(0))
+
+	// revoke, then a fresh one
+	ensure.DeepEqual(t, ta.post(adminUserPath(carol.ID)+"/link/revoke",
+		url.Values{"id": {strconv.FormatInt(link.ID, 10)}}, ta.as(admin)).Code, http.StatusNotFound)
+	w = ta.post(base+"/link/revoke", url.Values{"id": {strconv.FormatInt(link.ID, 10)}}, ta.as(admin))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "Link revoked.")
+	ensure.DeepEqual(t, ta.get(invitePath(link.Token)).Code, http.StatusNotFound)
+	ta.post(base+"/link", nil, ta.as(admin))
+	link = pendingLinks(t, ta, bob.ID)[0]
+
+	// bob registers a new passkey and signs in as the same user
+	aw, auth, cred := ta.acceptInvite(link)
+	ensure.DeepEqual(t, aw.Code, http.StatusSeeOther, aw.Body.String())
+	ensure.DeepEqual(t, countRows(t, ta, "users"), 3)
+	si := ta.signIn(auth, cred)
+	ensure.DeepEqual(t, si.Header().Get("Location"), pHome)
+	ensure.StringContains(t, ta.get(pSettings, withCookies(si)).Body.String(), "<dd>bob</dd>")
+	row, err := ta.app.q.CredentialByCredentialID(ctx, cred.ID)
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, row.UserID, bob.ID)
+	ensure.DeepEqual(t, invitesSent(t, ta, admin.ID), int64(0))
+}

@@ -41,6 +41,8 @@ import (
 )
 
 const (
+	pAdmin              = "/admin"
+	pAdminUser          = "/admin/u/"
 	pAssets             = "/assets/"
 	pHome               = "/"
 	pInvite             = "/invite/"
@@ -612,6 +614,8 @@ func (a *app) home(w http.ResponseWriter, r *http.Request) error {
 			h.Header(h.Class("home-header"),
 				h.H1(g.Text(a.cfg.AppName)),
 				h.Nav(h.Class("cluster"),
+					g.If(allowed(user, accAdmin),
+						h.A(h.Class("btn ghost"), h.Href(pAdmin), g.Text("Admin"))),
 					g.If(allowed(user, accInvite),
 						h.A(h.Class("btn ghost"), h.Href(pInvites), g.Text("Invites"))),
 					h.A(h.Class("btn ghost"), h.Href(pSettings), h.Title("Settings"),
@@ -634,6 +638,12 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
 	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
 	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
+	mux.HandleFunc("GET "+pAdmin, a.wrap(accAdmin, a.admin))
+	mux.HandleFunc("GET "+pAdminUser+"{id}", a.wrap(accAdmin, a.adminUser))
+	mux.HandleFunc("POST "+pAdminUser+"{id}/perms", a.wrap(accAdmin, a.adminUserPerms))
+	mux.HandleFunc("POST "+pAdminUser+"{id}/passkey/delete", a.wrap(accAdmin, a.adminUserPasskeyDelete))
+	mux.HandleFunc("POST "+pAdminUser+"{id}/link", a.wrap(accAdmin, a.adminUserLink))
+	mux.HandleFunc("POST "+pAdminUser+"{id}/link/revoke", a.wrap(accAdmin, a.adminUserLinkRevoke))
 	mux.HandleFunc("GET "+pInvites, a.wrap(accInvite, a.invites))
 	mux.HandleFunc("POST "+pInvites, a.wrap(accInvite, a.invitesPost))
 	mux.HandleFunc("POST "+pInvitesRevoke, a.wrap(accInvite, a.invitesRevoke))

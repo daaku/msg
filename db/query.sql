@@ -131,3 +131,16 @@ WHERE username = @username AND user_id IS NULL AND expires_at > @now;
 DELETE FROM invites
 WHERE id = @id AND user_id IS NULL AND created_by IS NOT NULL
   AND (created_by = @created_by OR CAST(@any_creator AS BOOLEAN));
+
+-- name: UsersAll :many
+SELECT sqlc.embed(users), CAST(coalesce(inviter.username, '') AS TEXT) AS inviter,
+  (SELECT count(*) FROM credentials WHERE credentials.user_id = users.id) AS passkeys
+FROM users LEFT JOIN users AS inviter ON inviter.id = users.invited_by
+ORDER BY users.username;
+
+-- name: UserSetPerms :exec
+UPDATE users SET perm_admin = @perm_admin, perm_invite = @perm_invite, perm_group = @perm_group
+WHERE id = @id;
+
+-- name: CredentialDeleteByAdmin :execrows
+DELETE FROM credentials WHERE id = @id AND user_id = @user_id AND user_id != @admin_id;

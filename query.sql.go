@@ -174,6 +174,24 @@ func (q *Queries) CredentialDelete(ctx context.Context, arg CredentialDeletePara
 	return result.RowsAffected()
 }
 
+const credentialDeleteByAdmin = `-- name: CredentialDeleteByAdmin :execrows
+DELETE FROM credentials WHERE id = ?1 AND user_id = ?2 AND user_id != ?3
+`
+
+type CredentialDeleteByAdminParams struct {
+	ID      int64
+	UserID  int64
+	AdminID int64
+}
+
+func (q *Queries) CredentialDeleteByAdmin(ctx context.Context, arg CredentialDeleteByAdminParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, credentialDeleteByAdmin, arg.ID, arg.UserID, arg.AdminID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const credentialUpdate = `-- name: CredentialUpdate :exec
 UPDATE credentials SET credential = ?1, last_used_at = ?2
 WHERE id = ?3
@@ -676,6 +694,28 @@ func (q *Queries) UserCreate(ctx context.Context, arg UserCreateParams) (User, e
 	return i, err
 }
 
+const userSetPerms = `-- name: UserSetPerms :exec
+UPDATE users SET perm_admin = ?1, perm_invite = ?2, perm_group = ?3
+WHERE id = ?4
+`
+
+type UserSetPermsParams struct {
+	PermAdmin  bool
+	PermInvite bool
+	PermGroup  bool
+	ID         int64
+}
+
+func (q *Queries) UserSetPerms(ctx context.Context, arg UserSetPermsParams) error {
+	_, err := q.db.ExecContext(ctx, userSetPerms,
+		arg.PermAdmin,
+		arg.PermInvite,
+		arg.PermGroup,
+		arg.ID,
+	)
+	return err
+}
+
 const userStatsAdd = `-- name: UserStatsAdd :exec
 INSERT INTO user_stats (
   user_id, messages_sent, images_uploaded, videos_uploaded, files_uploaded,
@@ -744,4 +784,51 @@ func (q *Queries) UserStatsGet(ctx context.Context, userID int64) (UserStat, err
 		&i.InvitesSent,
 	)
 	return i, err
+}
+
+const usersAll = `-- name: UsersAll :many
+SELECT users.id, users.username, users.handle, users.perm_admin, users.perm_invite, users.perm_group, users.invited_by, users.created_at, CAST(coalesce(inviter.username, '') AS TEXT) AS inviter,
+  (SELECT count(*) FROM credentials WHERE credentials.user_id = users.id) AS passkeys
+FROM users LEFT JOIN users AS inviter ON inviter.id = users.invited_by
+ORDER BY users.username
+`
+
+type UsersAllRow struct {
+	User     User
+	Inviter  string
+	Passkeys int64
+}
+
+func (q *Queries) UsersAll(ctx context.Context) ([]UsersAllRow, error) {
+	rows, err := q.db.QueryContext(ctx, usersAll)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UsersAllRow
+	for rows.Next() {
+		var i UsersAllRow
+		if err := rows.Scan(
+			&i.User.ID,
+			&i.User.Username,
+			&i.User.Handle,
+			&i.User.PermAdmin,
+			&i.User.PermInvite,
+			&i.User.PermGroup,
+			&i.User.InvitedBy,
+			&i.User.CreatedAt,
+			&i.Inviter,
+			&i.Passkeys,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

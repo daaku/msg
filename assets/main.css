@@ -367,3 +367,64 @@ select {
   clip-path: inset(50%);
   white-space: nowrap;
 }
+
+label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2xs);
+  font-weight: normal;
+}
+
+/* tables: a stacked list on narrow screens */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+
+  th {
+    text-align: start;
+    color: var(--color-text-muted);
+    font-size: var(--step--1);
+  }
+
+  th,
+  td {
+    padding: var(--space-2xs) var(--space-s);
+    border-top: 1px solid var(--color-border);
+  }
+}
+
+@media (width < 48rem) {
+  .table {
+    thead {
+      display: none;
+    }
+
+    tr,
+    td {
+      display: block;
+    }
+
+    td {
+      border-top: none;
+      padding-block: var(--space-3xs);
+
+      &::before {
+        content: attr(data-label);
+        display: block;
+        color: var(--color-text-muted);
+        font-size: var(--step--2);
+      }
+    }
+
+    tr + tr {
+      border-top: 1px solid var(--color-border);
+    }
+
+    tr {
+      padding-block: var(--space-2xs);
+    }
+  }
+}

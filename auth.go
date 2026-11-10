@@ -1001,3 +1001,224 @@ func (a *app) invitesRevoke(w http.ResponseWriter, r *http.Request) error {
 	}
 	return a.flash(w, r, pInvites, Flash{Kind: flashSuccess, Content: "Invite revoked."})
 }
+
+// admin users
+
+func adminUserPath(id int64) string {
+	return pAdminUser + strconv.FormatInt(id, 10)
+}
+
+// permBadges renders the permissions a user holds as badges.
+func permBadges(u User) g.Node {
+	names := permNames(u)
+	if len(names) == 0 {
+		return h.Span(h.Class("muted"), g.Text("none"))
+	}
+	return h.Span(h.Class("cluster"), g.Map(names, func(n string) g.Node {
+		return h.Span(h.Class("badge"), g.Text(n))
+	}))
+}
+
+func (a *app) admin(w http.ResponseWriter, r *http.Request) error {
+	rows, err := a.q.UsersAll(r.Context())
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	cell := func(label string, children ...g.Node) g.Node {
+		return h.Td(h.Data("label", label), g.Group(children))
+	}
+	return a.page(w, r, "Admin",
+		h.Div(h.Class("stack"),
+			pageHeader("Admin", backLink(pHome, "Home")),
+			h.Table(h.ID("users"), h.Class("table"),
+				h.THead(h.Tr(
+					h.Th(g.Text("Username")), h.Th(g.Text("Permissions")),
+					h.Th(g.Text("Created")), h.Th(g.Text("Invited by")),
+					h.Th(g.Text("Passkeys")))),
+				h.TBody(g.Map(rows, func(row UsersAllRow) g.Node {
+					u := row.User
+					inviter := row.Inviter
+					if inviter == "" {
+						inviter = "-"
+					}
+					return h.Tr(h.ID(fmt.Sprintf("user-%d", u.ID)),
+						cell("Username", h.A(h.Href(adminUserPath(u.ID)), g.Text(u.Username))),
+						cell("Permissions", permBadges(u)),
+						cell("Created", g.Text(fmtTime(time.Unix(u.CreatedAt, 0), nil))),
+						cell("Invited by", g.Text(inviter)),
+						cell("Passkeys", g.Text(strconv.FormatInt(row.Passkeys, 10))))
+				}))))).Render(w)
+}
+
+// adminTarget loads the user named by the {id} path value.
+func (a *app) adminTarget(r *http.Request) (User, error) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		return User{}, httpErr(http.StatusNotFound, "Not found.")
+	}
+	u, err := a.q.UserByID(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return u, httpErr(http.StatusNotFound, "Not found.")
+	}
+	return u, serr.Wrap(err)
+}
+
+func (a *app) adminUser(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	target, err := a.adminTarget(r)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Cache-Control", "no-store") // holds recovery links
+	self := target.ID == userFrom(ctx).ID
+	creds, err := a.q.CredentialsByUser(ctx, target.ID)
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	links, err := a.q.InvitesPendingForUser(ctx, InvitesPendingForUserParams{
+		UserID: sql.NullInt64{Int64: target.ID, Valid: true},
+		Now:    a.now().Unix(),
+	})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	base := adminUserPath(target.ID)
+	check := func(name, label string, on bool) g.Node {
+		return h.Label(h.Class("check"),
+			h.Input(h.Type("checkbox"), h.Name(name), h.Value("1"), g.If(on, h.Checked())),
+			g.Text(label))
+	}
+	var adminControl g.Node
+	if self {
+		// The own admin flag cannot be removed, so there is no control for it.
+		adminControl = g.Group{
+			h.Input(h.Type("hidden"), h.Name("admin"), h.Value("1")),
+			h.P(h.Class("muted"), g.Text("Admin. You cannot remove your own admin permission.")),
+		}
+	} else {
+		adminControl = check("admin", "Admin", target.PermAdmin)
+	}
+	var passkeyNote g.Node
+	if self {
+		passkeyNote = h.P(h.Class("muted"), g.Text("Manage your own passkeys in "),
+			h.A(h.Href(pSettings+"#passkeys"), g.Text("Settings")), g.Text("."))
+	} else {
+		passkeyNote = h.P(h.Class("muted"), g.Text("Deleting the last passkey locks "+
+			target.Username+" out until they use a recovery link."))
+	}
+	return a.pageSimple(w, r, target.Username, backLink(pAdmin, "Admin"),
+		h.Section(h.ID("perms"), h.Class("stack"),
+			h.H2(g.Text("Permissions")),
+			h.Form(h.Method("post"), h.Action(base+"/perms"), h.Class("stack card"),
+				adminControl,
+				check("invite", "Invite", target.PermInvite),
+				check("group", "Create groups", target.PermGroup),
+				h.Button(h.Class("btn"), g.Text("Save")))),
+		h.Section(h.ID("passkeys"), h.Class("stack"),
+			h.H2(g.Text("Passkeys")),
+			passkeyNote,
+			passkeyList(creds, 0, base+"/passkey/delete", !self)),
+		h.Section(h.ID("recovery"), h.Class("stack"),
+			h.H2(g.Text("Recovery link")),
+			h.P(h.Class("muted"), g.Text("A link adds a passkey for "+target.Username+
+				". It works once, for 24 hours.")),
+			h.Form(h.Method("post"), h.Action(base+"/link"),
+				h.Button(h.Class("btn secondary"), icon("plus"), h.Span(g.Text("Create recovery link")))),
+			a.linkList(links, base+"/link/revoke")),
+	).Render(w)
+}
+
+func (a *app) adminUserPerms(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	target, err := a.adminTarget(r)
+	if err != nil {
+		return err
+	}
+	arg := UserSetPermsParams{
+		ID:         target.ID,
+		PermAdmin:  r.FormValue("admin") != "",
+		PermInvite: r.FormValue("invite") != "",
+		PermGroup:  r.FormValue("group") != "",
+	}
+	back := adminUserPath(target.ID)
+	if target.ID == userFrom(ctx).ID && !arg.PermAdmin {
+		return a.flash(w, r, back, Flash{Kind: flashError,
+			Content: "You cannot remove your own admin permission."})
+	}
+	if err := a.q.UserSetPerms(ctx, arg); err != nil {
+		return serr.Wrap(err)
+	}
+	return a.flash(w, r, back, Flash{Kind: flashSuccess, Content: "Permissions saved."})
+}
+
+func (a *app) adminUserPasskeyDelete(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	target, err := a.adminTarget(r)
+	if err != nil {
+		return err
+	}
+	id, err := formID(r, "id")
+	if err != nil {
+		return err
+	}
+	back := adminUserPath(target.ID)
+	admin := userFrom(ctx)
+	if target.ID == admin.ID {
+		return a.flash(w, r, back, Flash{Kind: flashError,
+			Content: "Manage your own passkeys in Settings."})
+	}
+	n, err := a.q.CredentialDeleteByAdmin(ctx, CredentialDeleteByAdminParams{
+		ID:      id,
+		UserID:  target.ID,
+		AdminID: admin.ID,
+	})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	if n == 0 {
+		return httpErr(http.StatusNotFound, "Not found.")
+	}
+	return a.flash(w, r, back+"#passkeys", Flash{Kind: flashSuccess, Content: "Passkey deleted."})
+}
+
+func (a *app) adminUserLink(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	target, err := a.adminTarget(r)
+	if err != nil {
+		return err
+	}
+	_, err = a.createInvite(ctx, a.q, inviteParams{
+		User:      &target,
+		CreatedBy: userFrom(ctx).ID,
+		TTL:       addPasskeyTTL,
+	})
+	if err != nil {
+		return err
+	}
+	return a.flash(w, r, adminUserPath(target.ID)+"#recovery", Flash{Kind: flashSuccess,
+		Content: "Recovery link created. Send it to " + target.Username + "."})
+}
+
+func (a *app) adminUserLinkRevoke(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	target, err := a.adminTarget(r)
+	if err != nil {
+		return err
+	}
+	id, err := formID(r, "id")
+	if err != nil {
+		return err
+	}
+	n, err := a.q.InviteRevokeForUser(ctx, InviteRevokeForUserParams{
+		ID:     id,
+		UserID: sql.NullInt64{Int64: target.ID, Valid: true},
+	})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	if n == 0 {
+		return httpErr(http.StatusNotFound, "Not found.")
+	}
+	return a.flash(w, r, adminUserPath(target.ID)+"#recovery", Flash{Kind: flashSuccess,
+		Content: "Link revoked."})
+}
