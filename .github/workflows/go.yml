@@ -1,0 +1,30 @@
+name: Go
+on: [push]
+permissions:
+  contents: write
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: 0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - run: go mod download
+      - run: go mod tidy -diff
+      - run: go generate ./...
+      - run: test -z "$(git status --porcelain)"
+      - run: go build -v -trimpath ./...
+      - run: go test -v -trimpath ./...
+      - run: go build -trimpath
+      - run: tar cf ${{ github.event.repository.name }}.tar ${{ github.event.repository.name }}
+      - uses: svenstaro/upload-release-action@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          overwrite: true
+          file: ${{ github.event.repository.name }}.tar
+          asset_name: ${{ github.event.repository.name }}.tar
+          tag: r${{ github.run_number }}

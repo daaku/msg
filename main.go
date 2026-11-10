@@ -1,0 +1,510 @@
+package main
+
+import (
+	"context"
+	"crypto/hkdf"
+	"crypto/sha256"
+	"embed"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"path"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/daaku/hashfs"
+	"github.com/daaku/lands"
+	"github.com/daaku/livereload"
+	"github.com/daaku/serr"
+	"github.com/daaku/sookie"
+	g "maragu.dev/gomponents"
+	h "maragu.dev/gomponents/html"
+
+	_ "github.com/joho/godotenv/autoload"
+)
+
+const (
+	pAssets       = "/assets/"
+	pHome         = "/"
+	pLivereload   = "/livereload"
+	pLivereloadJS = "/livereload.js"
+	pRobotsTxt    = "/robots.txt"
+	pSignIn       = "/sign-in"
+)
+
+const defaultAddr = "localhost:8080"
+
+//go:embed assets/*
+var assets embed.FS
+
+func assetPath(filename string) string {
+	return "/" + hashfs.Path(assets, path.Join("assets", filename))
+}
+
+// config
+
+type config struct {
+	PublicURL         string
+	AppName           string
+	StateDir          string
+	AdminUsername     string
+	Dev               bool
+	S3Endpoint        string
+	S3Region          string
+	S3Bucket          string
+	S3AccessKeyID     string
+	S3SecretAccessKey string
+	S3PathStyle       bool
+	S3URLValidity     time.Duration
+	MaxUploadSize     int64
+	ImageFormat       string
+	ImageResolution   int
+	VideoFormat       string
+	VideoResolution   int
+}
+
+var usernameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{1,31}$`)
+
+var resolutions = map[string]int{
+	"4k":    3840,
+	"1440p": 2560,
+	"1080p": 1920,
+	"720p":  1280,
+	"480p":  854,
+}
+
+// loadConfig parses the configuration from the environment.
+func loadConfig() (config, error) {
+	return parseConfig(os.Getenv)
+}
+
+func parseConfig(getenv func(string) string) (config, error) {
+	var errs []error
+	get := func(key, def string) string {
+		if v := getenv(key); v != "" {
+			return v
+		}
+		return def
+	}
+	bad := func(key, v string, err error) {
+		errs = append(errs, fmt.Errorf("invalid %s %q: %w", key, v, err))
+	}
+	parse := func(key, def string, fn func(string) error) {
+		v := get(key, def)
+		if err := fn(v); err != nil {
+			bad(key, v, err)
+		}
+	}
+	oneOf := func(key, def string, allowed ...string) string {
+		v := get(key, def)
+		for _, a := range allowed {
+			if v == a {
+				return v
+			}
+		}
+		bad(key, v, fmt.Errorf("must be one of %s", strings.Join(allowed, ", ")))
+		return v
+	}
+
+	var c config
+
+	c.PublicURL = strings.TrimSuffix(get("PUBLIC_URL", "http://"+defaultAddr), "/")
+	if u, err := url.Parse(c.PublicURL); err != nil {
+		bad("PUBLIC_URL", c.PublicURL, err)
+	} else if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		bad("PUBLIC_URL", c.PublicURL, errors.New("must be an origin like https://chat.example.com"))
+	}
+
+	c.AppName = get("APP_NAME", "msg")
+	c.StateDir = get("STATE_DIRECTORY", "data")
+
+	c.AdminUsername = get("ADMIN_USERNAME", "admin")
+	if !usernameRe.MatchString(c.AdminUsername) {
+		bad("ADMIN_USERNAME", c.AdminUsername, fmt.Errorf("must match %s", usernameRe))
+	}
+
+	switch v := getenv("DEV"); v {
+	case "", "0":
+	case "1":
+		c.Dev = true
+	default:
+		bad("DEV", v, errors.New("must be 1 or unset"))
+	}
+
+	c.S3Endpoint = strings.TrimSuffix(getenv("S3_ENDPOINT"), "/")
+	if c.S3Endpoint != "" && c.S3Endpoint != "fake" {
+		if u, err := url.Parse(c.S3Endpoint); err != nil {
+			bad("S3_ENDPOINT", c.S3Endpoint, err)
+		} else if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" {
+			bad("S3_ENDPOINT", c.S3Endpoint, errors.New("must be https://host or fake"))
+		}
+	}
+	c.S3Region = get("S3_REGION", "us-east-1")
+	c.S3Bucket = getenv("S3_BUCKET")
+	c.S3AccessKeyID = getenv("S3_ACCESS_KEY_ID")
+	c.S3SecretAccessKey = getenv("S3_SECRET_ACCESS_KEY")
+	parse("S3_PATH_STYLE", "true", func(v string) (err error) {
+		if c.S3PathStyle, err = strconv.ParseBool(v); err != nil {
+			return errors.New("must be true or false")
+		}
+		return nil
+	})
+	parse("S3_URL_VALIDITY", "7d", func(v string) (err error) {
+		if c.S3URLValidity, err = parseDuration(v); err != nil {
+			return err
+		}
+		if c.S3URLValidity > 7*24*time.Hour {
+			return errors.New("must be at most 7d")
+		}
+		return nil
+	})
+
+	parse("MAX_UPLOAD_SIZE", "100MB", func(v string) (err error) {
+		c.MaxUploadSize, err = parseSize(v)
+		return err
+	})
+
+	c.ImageFormat = oneOf("IMAGE_FORMAT", "webp", "webp", "avif", "jpeg")
+	parse("IMAGE_RESOLUTION", "4k", func(v string) (err error) {
+		c.ImageResolution, err = parseResolution(v)
+		return err
+	})
+	c.VideoFormat = oneOf("VIDEO_FORMAT", "h264", "h264", "av1")
+	parse("VIDEO_RESOLUTION", "1080p", func(v string) (err error) {
+		c.VideoResolution, err = parseResolution(v)
+		return err
+	})
+
+	if err := errors.Join(errs...); err != nil {
+		return config{}, err
+	}
+	return c, nil
+}
+
+// parseSize parses a positive byte size such as 512KB, 100MB, 1GB or 1024.
+// Units are binary: 1KB is 1024 bytes.
+func parseSize(s string) (int64, error) {
+	num, mult := s, int64(1)
+	for _, u := range []struct {
+		suffix string
+		mult   int64
+	}{{"KB", 1 << 10}, {"MB", 1 << 20}, {"GB", 1 << 30}, {"TB", 1 << 40}, {"B", 1}} {
+		if strings.HasSuffix(strings.ToUpper(s), u.suffix) {
+			num, mult = s[:len(s)-len(u.suffix)], u.mult
+			break
+		}
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(num), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, errors.New("must be a positive size like 100MB")
+	}
+	if n > math.MaxInt64/mult {
+		return 0, errors.New("size too large")
+	}
+	return n * mult, nil
+}
+
+// parseDuration is time.ParseDuration plus a "d" suffix for whole days. The
+// duration must be positive.
+func parseDuration(s string) (time.Duration, error) {
+	var d time.Duration
+	if days, ok := strings.CutSuffix(s, "d"); ok {
+		n, err := strconv.ParseInt(days, 10, 64)
+		if err != nil || n <= 0 || n > math.MaxInt64/int64(24*time.Hour) {
+			return 0, errors.New("must be a positive duration like 7d or 12h")
+		}
+		d = time.Duration(n) * 24 * time.Hour
+	} else {
+		var err error
+		d, err = time.ParseDuration(s)
+		if err != nil {
+			return 0, errors.New("must be a positive duration like 7d or 12h")
+		}
+	}
+	if d <= 0 {
+		return 0, errors.New("must be a positive duration like 7d or 12h")
+	}
+	return d, nil
+}
+
+// parseResolution maps a resolution name to the long edge in pixels.
+func parseResolution(s string) (int, error) {
+	if n, ok := resolutions[s]; ok {
+		return n, nil
+	}
+	return 0, errors.New("must be one of 4k, 1440p, 1080p, 720p, 480p")
+}
+
+// s3Origin is the origin media is loaded from, or "" when there is none
+// outside of this server.
+func (c config) s3Origin() string {
+	if c.S3Endpoint == "" || c.S3Endpoint == "fake" {
+		return ""
+	}
+	u, err := url.Parse(c.S3Endpoint)
+	if err != nil {
+		return ""
+	}
+	if !c.S3PathStyle && c.S3Bucket != "" {
+		return u.Scheme + "://" + c.S3Bucket + "." + u.Host
+	}
+	return u.Scheme + "://" + u.Host
+}
+
+func (c config) csp() string {
+	s3 := ""
+	if o := c.s3Origin(); o != "" {
+		s3 = " " + o
+	}
+	return "default-src 'self'; " +
+		"img-src 'self' data:" + s3 + "; " +
+		"media-src 'self'" + s3 + "; " +
+		"connect-src 'self'" + s3 + "; " +
+		"frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+}
+
+// app
+
+type app struct {
+	cfg config
+	ctx context.Context
+	bg  sync.WaitGroup
+	now func() time.Time
+}
+
+// secret returns a 32 byte key for the given purpose.
+func (a *app) secret(purpose string) []byte {
+	// Development constant until the stored master secret exists.
+	master := sha256.Sum256([]byte("msg development secret"))
+	key, err := hkdf.Expand(sha256.New, master[:], purpose, 32)
+	if err != nil {
+		panic(err)
+	}
+	return key
+}
+
+// errors
+
+type httpError struct {
+	code int
+	msg  string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("%d %s", e.code, e.msg)
+}
+
+// httpErr is an expected failure shown to the user with the given status.
+func httpErr(code int, msg string) error {
+	return &httpError{code: code, msg: msg}
+}
+
+func (a *app) renderError(w http.ResponseWriter, r *http.Request, err error) {
+	code, msg := http.StatusInternalServerError, "Something went wrong."
+	var detail g.Node
+	if he, ok := errors.AsType[*httpError](err); ok {
+		code, msg = he.code, he.msg
+	} else {
+		fmt.Fprintf(os.Stderr, "%s %s: %+v\n", r.Method, r.URL.Path, err)
+		if a.cfg.Dev {
+			detail = h.Pre(h.Class("stack-trace"), g.Text(fmt.Sprintf("%+v", err)))
+		}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(code)
+	_ = a.pageSimple(w, r, http.StatusText(code), backLink(pHome, "Home"),
+		h.P(g.Text(msg)), detail).Render(w)
+}
+
+// access control
+
+type access int
+
+const (
+	accPublic access = iota
+	accUser
+	accInvite
+	accGroup
+	accAdmin
+)
+
+type handler func(w http.ResponseWriter, r *http.Request) error
+
+// wrap enforces the access level and turns a returned error into a response.
+func (a *app) wrap(acc access, f handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// There are no users yet, so every request is signed out.
+		if acc != accPublic {
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				http.Redirect(w, r, pSignIn, http.StatusSeeOther)
+				return
+			}
+			a.renderError(w, r, httpErr(http.StatusUnauthorized, "Please sign in."))
+			return
+		}
+		if err := f(w, r); err != nil {
+			a.renderError(w, r, err)
+		}
+	}
+}
+
+// flash
+
+type flashKind string
+
+const (
+	flashError   = flashKind("error")
+	flashSuccess = flashKind("success")
+)
+
+type Flash struct {
+	Kind    flashKind
+	Content string
+}
+
+func (a *app) flashCookie() http.Cookie {
+	return http.Cookie{
+		Name:     "flash",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   strings.HasPrefix(a.cfg.PublicURL, "https://"),
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+// flash stores a message for the next page and redirects there.
+func (a *app) flash(w http.ResponseWriter, r *http.Request, url string, f Flash) error {
+	if err := sookie.Set(a.secret("flash"), w, &f, a.flashCookie()); err != nil {
+		return serr.Wrap(err)
+	}
+	http.Redirect(w, r, url, http.StatusSeeOther)
+	return nil
+}
+
+// getFlash returns and clears the pending flash message, if any.
+func (a *app) getFlash(w http.ResponseWriter, r *http.Request) *Flash {
+	c := a.flashCookie()
+	sookie.Del(w, r, c)
+	f, err := sookie.Get[*Flash](a.secret("flash"), r, c.Name)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
+// renderFlash renders the flash region, empty when there is no message.
+func (a *app) renderFlash(w http.ResponseWriter, r *http.Request) g.Node {
+	f := a.getFlash(w, r)
+	if f == nil || f.Content == "" {
+		return h.Div(h.ID("flash"))
+	}
+	kind := f.Kind
+	if kind == "" {
+		kind = flashError
+	}
+	return h.Div(h.ID("flash"),
+		h.Div(h.Class("alert "+string(kind)), h.Role("status"), g.Text(f.Content)))
+}
+
+// security headers
+
+func secureHandler(csp string, next http.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hd := w.Header()
+		hd.Set("Content-Security-Policy", csp)
+		hd.Set("Referrer-Policy", "same-origin")
+		hd.Set("X-Content-Type-Options", "nosniff")
+		hd.Set("X-Frame-Options", "deny")
+		hd.Set("Cross-Origin-Opener-Policy", "same-origin")
+		next.ServeHTTP(w, r)
+	}
+}
+
+// handlers
+
+func (a *app) static(filename string) handler {
+	name := path.Join("assets", filename)
+	return func(w http.ResponseWriter, r *http.Request) error {
+		f, err := assets.Open(name)
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		defer f.Close()
+		stat, err := f.Stat()
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		http.ServeContent(w, r, name, stat.ModTime(), f.(io.ReadSeeker))
+		return nil
+	}
+}
+
+func (a *app) livereloadJS(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, err := io.WriteString(w, livereload.JS)
+	return serr.Wrap(err)
+}
+
+func (a *app) home(w http.ResponseWriter, r *http.Request) error {
+	return a.page(w, r, "Home",
+		h.Section(h.Class("stack"),
+			h.H1(g.Text(a.cfg.AppName)),
+			h.P(g.Text("Chats will appear here.")))).Render(w)
+}
+
+func (a *app) signIn(w http.ResponseWriter, r *http.Request) error {
+	return a.pageSimple(w, r, "Sign in", nil,
+		h.P(g.Text("Passkey sign in is coming soon."))).Render(w)
+}
+
+// handler builds the complete HTTP handler.
+func (a *app) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET "+pAssets, hashfs.FileServer(assets))
+	mux.HandleFunc("GET "+pRobotsTxt, a.wrap(accPublic, a.static("robots.txt")))
+	mux.HandleFunc("GET "+pSignIn, a.wrap(accPublic, a.signIn))
+	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
+	if a.cfg.Dev {
+		mux.HandleFunc("GET "+pLivereload, livereload.Handler)
+		mux.HandleFunc("GET "+pLivereloadJS, a.wrap(accPublic, a.livereloadJS))
+	}
+	return secureHandler(a.cfg.csp(), http.NewCrossOriginProtection().Handler(mux))
+}
+
+func run(ctx context.Context) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	a := &app{cfg: cfg, ctx: ctx, now: time.Now}
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return serr.Wrap(err)
+	}
+	if err := lands.ListenAndServe(a.ctx, defaultAddr, a.handler()); err != nil {
+		return serr.Wrap(err)
+	}
+	cancel()
+	a.bg.Wait()
+	return nil
+}
+
+func main() {
+	if err := run(context.Background()); err != nil {
+		fmt.Fprintf(os.Stderr, "%+v\n", err)
+		os.Exit(1)
+	}
+}

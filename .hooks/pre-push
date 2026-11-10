@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+shopt -s dotglob nullglob
+trap 'echo "${0} line ${LINENO} Status: ${?}"' ERR
+
+go mod tidy -diff
+go generate ./...
+test -z "$(git status --porcelain)"
+go build -v ./...
+go test -v ./...

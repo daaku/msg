@@ -1,0 +1,305 @@
+/* reset */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+}
+
+input,
+button,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+img,
+picture,
+svg,
+video {
+  display: block;
+  max-width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* @link https://utopia.fyi/type/calculator?c=360,16,1.125,1240,18,1.2,5,2,&s=0.75|0.5|0.25,1.5|2|3|4|6,s-l&g=s,l,xl,12 */
+:root {
+  --step--2: clamp(0.7813rem, 0.7938rem + -0.0161vw, 0.7901rem);
+  --step--1: clamp(0.8889rem, 0.869rem + 0.0884vw, 0.9375rem);
+  --step-0: clamp(1rem, 0.9489rem + 0.2273vw, 1.125rem);
+  --step-1: clamp(1.125rem, 1.033rem + 0.4091vw, 1.35rem);
+  --step-2: clamp(1.2656rem, 1.1207rem + 0.6443vw, 1.62rem);
+  --step-3: clamp(1.4238rem, 1.211rem + 0.9458vw, 1.944rem);
+  --step-4: clamp(1.6018rem, 1.3028rem + 1.3291vw, 2.3328rem);
+  --step-5: clamp(1.802rem, 1.394rem + 1.8133vw, 2.7994rem);
+}
+
+/* @link https://utopia.fyi/space/calculator?c=360,16,1.125,1240,18,1.2,5,2,&s=0.75|0.5|0.25,1.5|2|3|4|6,s-l&g=s,l,xl,12 */
+:root {
+  --space-3xs: clamp(0.25rem, 0.2244rem + 0.1136vw, 0.3125rem);
+  --space-2xs: clamp(0.5rem, 0.4744rem + 0.1136vw, 0.5625rem);
+  --space-xs: clamp(0.75rem, 0.6989rem + 0.2273vw, 0.875rem);
+  --space-s: clamp(1rem, 0.9489rem + 0.2273vw, 1.125rem);
+  --space-m: clamp(1.5rem, 1.4233rem + 0.3409vw, 1.6875rem);
+  --space-l: clamp(2rem, 1.8977rem + 0.4545vw, 2.25rem);
+  --space-xl: clamp(3rem, 2.8466rem + 0.6818vw, 3.375rem);
+  --space-2xl: clamp(4rem, 3.7955rem + 0.9091vw, 4.5rem);
+  --space-3xl: clamp(6rem, 5.6932rem + 1.3636vw, 6.75rem);
+}
+
+/* colour tokens */
+:root {
+  color-scheme: light dark;
+
+  --color-accent: #2f6fde;
+  --color-danger: #c8382c;
+  --color-success: #2e8b57;
+
+  --color-bg: #f7f7f5;
+  --color-surface: #ffffff;
+  --color-surface-2: #eeeeea;
+  --color-border: #d9d9d3;
+  --color-text: #1d1d1b;
+  --color-text-muted: #66665f;
+  --color-on-accent: #ffffff;
+
+  --radius: 0.5rem;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 2px 8px rgb(0 0 0 / 0.04);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-accent: #5b8ff0;
+    --color-danger: #ec6a5e;
+    --color-success: #4fbf7f;
+
+    --color-bg: #141413;
+    --color-surface: #1e1e1c;
+    --color-surface-2: #2a2a27;
+    --color-border: #3a3a36;
+    --color-text: #ececea;
+    --color-text-muted: #a3a39c;
+    --color-on-accent: #0d0d0c;
+
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4);
+  }
+}
+
+body {
+  font-family:
+    ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
+    "Segoe UI Symbol", "Noto Color Emoji";
+  font-size: var(--step-0);
+  line-height: 1.5;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  min-height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+h1 {
+  font-size: var(--step-3);
+  line-height: 1.2;
+}
+
+h2 {
+  font-size: var(--step-2);
+  line-height: 1.25;
+}
+
+a {
+  color: var(--color-accent);
+}
+
+#app {
+  padding: var(--space-s);
+}
+
+/* layout primitives */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-s);
+}
+
+.cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.simple #app {
+  max-width: 32rem;
+  margin-inline: auto;
+  padding-block: var(--space-l);
+}
+
+.page-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+
+  .back {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3xs);
+    align-self: flex-start;
+    color: var(--color-text-muted);
+    text-decoration: none;
+    font-size: var(--step--1);
+
+    &:hover {
+      color: var(--color-text);
+    }
+  }
+}
+
+.card {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: var(--space-s);
+}
+
+.list {
+  list-style: none;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+
+  > li {
+    padding: var(--space-2xs) var(--space-s);
+
+    + li {
+      border-top: 1px solid var(--color-border);
+    }
+  }
+}
+
+.icon {
+  width: 1.1em;
+  height: 1.1em;
+  fill: currentcolor;
+  flex: none;
+}
+
+/* buttons */
+.btn {
+  --btn-bg: var(--color-accent);
+  --btn-fg: var(--color-on-accent);
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  min-height: 2.75rem;
+  padding: var(--space-3xs) var(--space-s);
+  background-color: var(--btn-bg);
+  color: var(--btn-fg);
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  touch-action: manipulation;
+
+  &:hover {
+    background-color: color-mix(in oklab, var(--btn-bg) 85%, var(--color-text));
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  &.secondary {
+    --btn-bg: var(--color-surface-2);
+    --btn-fg: var(--color-text);
+    border-color: var(--color-border);
+  }
+
+  &.danger {
+    --btn-bg: var(--color-danger);
+    --btn-fg: #ffffff;
+  }
+
+  &.ghost {
+    --btn-bg: transparent;
+    --btn-fg: var(--color-text);
+
+    &:hover {
+      background-color: var(--color-surface-2);
+    }
+  }
+}
+
+/* forms */
+label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  font-weight: 600;
+}
+
+input:not([type="checkbox"], [type="radio"], [type="hidden"]),
+textarea,
+select {
+  width: 100%;
+  min-height: 2.75rem;
+  padding: var(--space-3xs) var(--space-2xs);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-weight: normal;
+
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: -1px;
+  }
+}
+
+/* alerts */
+.alert {
+  --alert-color: var(--color-accent);
+
+  padding: var(--space-2xs) var(--space-s);
+  margin-block-end: var(--space-s);
+  border: 1px solid var(--alert-color);
+  border-radius: var(--radius);
+  background-color: color-mix(in oklab, var(--alert-color) 12%, var(--color-surface));
+
+  &.error {
+    --alert-color: var(--color-danger);
+  }
+
+  &.success {
+    --alert-color: var(--color-success);
+  }
+}
+
+.stack-trace {
+  overflow-x: auto;
+  font-size: var(--step--2);
+  white-space: pre-wrap;
+}
