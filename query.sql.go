@@ -595,6 +595,60 @@ func (q *Queries) FileCreate(ctx context.Context, arg FileCreateParams) (File, e
 	return i, err
 }
 
+const fileCreatePreview = `-- name: FileCreatePreview :one
+INSERT INTO files (chat_id, user_id, kind, status, name, s3_prefix, size,
+  conv_type, conv_size, width, height, created_at)
+VALUES (?1, ?2, 'preview', 'ready', 'preview', ?3, 0,
+  ?4, ?5, ?6, ?7, ?8)
+RETURNING id, chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, conv_type, conv_size, poster_type, poster_size, width, height, duration, attempts, created_at
+`
+
+type FileCreatePreviewParams struct {
+	ChatID    int64
+	UserID    int64
+	S3Prefix  string
+	ConvType  string
+	ConvSize  int64
+	Width     int64
+	Height    int64
+	CreatedAt int64
+}
+
+func (q *Queries) FileCreatePreview(ctx context.Context, arg FileCreatePreviewParams) (File, error) {
+	row := q.db.QueryRowContext(ctx, fileCreatePreview,
+		arg.ChatID,
+		arg.UserID,
+		arg.S3Prefix,
+		arg.ConvType,
+		arg.ConvSize,
+		arg.Width,
+		arg.Height,
+		arg.CreatedAt,
+	)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.ChatID,
+		&i.UserID,
+		&i.Kind,
+		&i.Status,
+		&i.Name,
+		&i.S3Prefix,
+		&i.UploadID,
+		&i.Size,
+		&i.ConvType,
+		&i.ConvSize,
+		&i.PosterType,
+		&i.PosterSize,
+		&i.Width,
+		&i.Height,
+		&i.Duration,
+		&i.Attempts,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const fileDelete = `-- name: FileDelete :exec
 DELETE FROM files WHERE id = ?
 `
@@ -1469,6 +1523,167 @@ func (q *Queries) MessagesLatest(ctx context.Context, arg MessagesLatestParams) 
 			&i.Message.CreatedAt,
 			&i.Message.EditedAt,
 			&i.Username,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const previewByMessage = `-- name: PreviewByMessage :one
+SELECT message_id, url, status, title, description, site_name, file_id, created_at FROM previews WHERE message_id = ?
+`
+
+func (q *Queries) PreviewByMessage(ctx context.Context, messageID int64) (Preview, error) {
+	row := q.db.QueryRowContext(ctx, previewByMessage, messageID)
+	var i Preview
+	err := row.Scan(
+		&i.MessageID,
+		&i.Url,
+		&i.Status,
+		&i.Title,
+		&i.Description,
+		&i.SiteName,
+		&i.FileID,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const previewClaim = `-- name: PreviewClaim :one
+UPDATE previews SET status = 'failed'
+WHERE message_id = (
+  SELECT p.message_id FROM previews p WHERE p.status = 'pending'
+  ORDER BY p.message_id LIMIT 1
+)
+RETURNING message_id, url, status, title, description, site_name, file_id, created_at
+`
+
+// A preview is tried once: claiming it marks it failed, and success later
+// marks it ready. A crash in between leaves it failed.
+func (q *Queries) PreviewClaim(ctx context.Context) (Preview, error) {
+	row := q.db.QueryRowContext(ctx, previewClaim)
+	var i Preview
+	err := row.Scan(
+		&i.MessageID,
+		&i.Url,
+		&i.Status,
+		&i.Title,
+		&i.Description,
+		&i.SiteName,
+		&i.FileID,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const previewCreate = `-- name: PreviewCreate :exec
+INSERT INTO previews (message_id, url, status, created_at)
+VALUES (?1, ?2, 'pending', ?3)
+`
+
+type PreviewCreateParams struct {
+	MessageID int64
+	Url       string
+	CreatedAt int64
+}
+
+func (q *Queries) PreviewCreate(ctx context.Context, arg PreviewCreateParams) error {
+	_, err := q.db.ExecContext(ctx, previewCreate, arg.MessageID, arg.Url, arg.CreatedAt)
+	return err
+}
+
+const previewDelete = `-- name: PreviewDelete :exec
+DELETE FROM previews WHERE message_id = ?
+`
+
+func (q *Queries) PreviewDelete(ctx context.Context, messageID int64) error {
+	_, err := q.db.ExecContext(ctx, previewDelete, messageID)
+	return err
+}
+
+const previewSetReady = `-- name: PreviewSetReady :execrows
+UPDATE previews SET status = 'ready', title = ?1, description = ?2,
+  site_name = ?3, file_id = ?4
+WHERE message_id = ?5 AND url = ?6 AND status = 'failed'
+`
+
+type PreviewSetReadyParams struct {
+	Title       string
+	Description string
+	SiteName    string
+	FileID      sql.NullInt64
+	MessageID   int64
+	Url         string
+}
+
+func (q *Queries) PreviewSetReady(ctx context.Context, arg PreviewSetReadyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, previewSetReady,
+		arg.Title,
+		arg.Description,
+		arg.SiteName,
+		arg.FileID,
+		arg.MessageID,
+		arg.Url,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const previewsForMessages = `-- name: PreviewsForMessages :many
+SELECT previews.message_id, previews.url, previews.status, previews.title, previews.description, previews.site_name, previews.file_id, previews.created_at,
+  CAST(coalesce(files.width, 0) AS INTEGER) AS width,
+  CAST(coalesce(files.height, 0) AS INTEGER) AS height
+FROM previews LEFT JOIN files ON files.id = previews.file_id
+WHERE previews.status = 'ready'
+  AND previews.message_id IN (/*SLICE:message_ids*/?)
+`
+
+type PreviewsForMessagesRow struct {
+	Preview Preview
+	Width   int64
+	Height  int64
+}
+
+func (q *Queries) PreviewsForMessages(ctx context.Context, messageIds []int64) ([]PreviewsForMessagesRow, error) {
+	query := previewsForMessages
+	var queryParams []interface{}
+	if len(messageIds) > 0 {
+		for _, v := range messageIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:message_ids*/?", strings.Repeat(",?", len(messageIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:message_ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PreviewsForMessagesRow
+	for rows.Next() {
+		var i PreviewsForMessagesRow
+		if err := rows.Scan(
+			&i.Preview.MessageID,
+			&i.Preview.Url,
+			&i.Preview.Status,
+			&i.Preview.Title,
+			&i.Preview.Description,
+			&i.Preview.SiteName,
+			&i.Preview.FileID,
+			&i.Preview.CreatedAt,
+			&i.Width,
+			&i.Height,
 		); err != nil {
 			return nil, err
 		}

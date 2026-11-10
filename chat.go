@@ -645,6 +645,10 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	previews, err := a.previewsFor(ctx, rows)
+	if err != nil {
+		return err
+	}
 	if v.Snoozes, err = a.snoozesFor(ctx, v.User.ID, rows, viewerLoc(r)); err != nil {
 		return err
 	}
@@ -685,7 +689,7 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	return a.chatPage(w, r, v.User, &v.Chat, g.Group{
 		paneHead(v),
 		h.Div(h.ID("scroll"), h.Class("scroll"),
-			h.Div(h.ID("messages"), earlier, a.messageNodes(v, rows, reactions, files, viewerLoc(r)))),
+			h.Div(h.ID("messages"), earlier, a.messageNodes(v, rows, reactions, files, previews, viewerLoc(r)))),
 		composer,
 	})
 }
@@ -716,7 +720,7 @@ func viewerLoc(r *http.Request) *time.Location {
 
 // messageNodes renders messages, oldest first, with a separator before the
 // first message of each day.
-func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[int64][]reactionGroup, files map[int64]File, loc *time.Location) g.Node {
+func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[int64][]reactionGroup, files map[int64]File, previews map[int64]PreviewsForMessagesRow, loc *time.Location) g.Node {
 	var nodes g.Group
 	var prevUser int64
 	var prevDay string
@@ -743,10 +747,15 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 		if f, ok := files[m.FileID.Int64]; ok && m.FileID.Valid {
 			content = h.Div(h.ID(id+"-file"), h.Class("msg-file"), fileNode(f))
 		}
+		var preview g.Node
+		if p, ok := previews[m.ID]; ok {
+			preview = previewNode(id, p)
+		}
 		nodes = append(nodes, h.Article(h.ID(id), h.Class(class),
 			g.If(first && !mine, h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)),
 				g.Text(row.Username))),
 			content,
+			preview,
 			a.reactionChips(v, m, reactions[m.ID]),
 			snoozeMarker(v, m),
 			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
@@ -869,7 +878,7 @@ func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body s
 func (a *app) afterMessage(ctx context.Context, chat Chat, msg Message) {
 	a.notifyChat(ctx, chat.ID)
 	a.pushMessage(chat, msg)
-	// Task 019 adds the link preview and task 020 the push notification.
+	a.requestPreview(ctx, msg)
 }
 
 func (a *app) chatSend(w http.ResponseWriter, r *http.Request) error {
@@ -1249,17 +1258,21 @@ func (a *app) messageDelete(w http.ResponseWriter, r *http.Request) error {
 // afterEdit runs after a message's text was changed. It is the only place
 // for the side effects of an edit.
 func (a *app) afterEdit(ctx context.Context, chat Chat, msg Message) {
+	a.refreshPreview(ctx, msg)
 	a.notifyChat(ctx, chat.ID)
-	// Task 019 refreshes the link preview here.
 }
 
 // deleteMessage is the only place a message is removed. Deletes are hard
 // deletes: reactions and snoozes cascade.
 func (a *app) deleteMessage(ctx context.Context, chat Chat, msg Message) error {
-	// Task 019 also removes the preview and its image here.
-	cleanup := func() {}
+	cleanup, cleanupPreview := func() {}, func() {}
 	err := a.tx(ctx, func(q *Queries) error {
-		// The message goes first: it holds the reference to the file.
+		// The preview's image is a file of its own.
+		var err error
+		if cleanupPreview, err = a.dropPreview(ctx, q, msg.ID); err != nil {
+			return err
+		}
+		// The message goes before its file: it holds the reference.
 		if err := q.MessageDelete(ctx, msg.ID); err != nil {
 			return serr.Wrap(err)
 		}
@@ -1277,6 +1290,7 @@ func (a *app) deleteMessage(ctx context.Context, chat Chat, msg Message) error {
 		return err
 	}
 	cleanup()
+	cleanupPreview()
 	a.notifyChat(ctx, chat.ID)
 	return nil
 }

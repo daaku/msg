@@ -379,3 +379,43 @@ JOIN users ON users.id = chats.created_by
 LEFT JOIN chat_stats ON chat_stats.chat_id = chats.id
 WHERE NOT chats.is_dm
 ORDER BY chats.name, chats.id;
+
+-- name: PreviewCreate :exec
+INSERT INTO previews (message_id, url, status, created_at)
+VALUES (@message_id, @url, 'pending', @created_at);
+
+-- name: PreviewClaim :one
+-- A preview is tried once: claiming it marks it failed, and success later
+-- marks it ready. A crash in between leaves it failed.
+UPDATE previews SET status = 'failed'
+WHERE message_id = (
+  SELECT p.message_id FROM previews p WHERE p.status = 'pending'
+  ORDER BY p.message_id LIMIT 1
+)
+RETURNING *;
+
+-- name: PreviewSetReady :execrows
+UPDATE previews SET status = 'ready', title = @title, description = @description,
+  site_name = @site_name, file_id = @file_id
+WHERE message_id = @message_id AND url = @url AND status = 'failed';
+
+-- name: PreviewByMessage :one
+SELECT * FROM previews WHERE message_id = ?;
+
+-- name: PreviewDelete :exec
+DELETE FROM previews WHERE message_id = ?;
+
+-- name: PreviewsForMessages :many
+SELECT sqlc.embed(previews),
+  CAST(coalesce(files.width, 0) AS INTEGER) AS width,
+  CAST(coalesce(files.height, 0) AS INTEGER) AS height
+FROM previews LEFT JOIN files ON files.id = previews.file_id
+WHERE previews.status = 'ready'
+  AND previews.message_id IN (sqlc.slice('message_ids'));
+
+-- name: FileCreatePreview :one
+INSERT INTO files (chat_id, user_id, kind, status, name, s3_prefix, size,
+  conv_type, conv_size, width, height, created_at)
+VALUES (@chat_id, @user_id, 'preview', 'ready', 'preview', @s3_prefix, 0,
+  @conv_type, @conv_size, @width, @height, @created_at)
+RETURNING *;

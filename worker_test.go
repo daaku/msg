@@ -466,3 +466,18 @@ func TestKindMismatchFails(t *testing.T) {
 	ta.runMedia()
 	ensure.DeepEqual(t, ta.file(id).Status, statusFailed)
 }
+
+// fakeObjects lists the keys stored in the fake S3.
+func (ta *testApp) fakeObjects() []string {
+	ta.t.Helper()
+	root := filepath.Join(ta.app.fakeS3.dir, "objects")
+	var keys []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(root, path)
+			keys = append(keys, rel)
+		}
+		return nil
+	})
+	return keys
+}

@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -322,6 +323,13 @@ type app struct {
 	// mediaWake tells the media worker there is a file to convert.
 	mediaWake chan struct{}
 	fileLocks sync.Map // file id to *sync.Mutex
+	// previewWake tells the preview worker there is a link to fetch.
+	previewWake chan struct{}
+	// previewClient is the only client that fetches user supplied URLs.
+	previewClient *http.Client
+	// previewAllow decides which addresses previewClient may connect to.
+	// Tests relax it to reach local servers.
+	previewAllow func(netip.AddrPort) bool
 	// beforeConvert is a test hook that runs just before a converter.
 	beforeConvert func(File)
 	push          pushSender
@@ -348,16 +356,18 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		return nil, err
 	}
 	a := &app{
-		cfg:       cfg,
-		ctx:       ctx,
-		now:       time.Now,
-		db:        db,
-		q:         New(db),
-		wa:        wa,
-		hub:       newHub(),
-		mediaWake: make(chan struct{}, 1),
-		pushSem:   make(chan struct{}, pushConcurrency),
-		secrets:   map[string][]byte{},
+		cfg:          cfg,
+		ctx:          ctx,
+		now:          time.Now,
+		db:           db,
+		q:            New(db),
+		wa:           wa,
+		hub:          newHub(),
+		mediaWake:    make(chan struct{}, 1),
+		pushSem:      make(chan struct{}, pushConcurrency),
+		secrets:      map[string][]byte{},
+		previewWake:  make(chan struct{}, 1),
+		previewAllow: previewAllowStrict,
 	}
 	if err := a.loadMaster(ctx); err != nil {
 		db.Close()
@@ -367,6 +377,7 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		db.Close()
 		return nil, err
 	}
+	a.previewClient = a.newPreviewClient()
 	// The clock is read through a.now, which tests replace later.
 	a.s3, a.fakeS3, err = newS3(cfg, func() time.Time { return a.now() })
 	if err != nil {
@@ -741,6 +752,7 @@ func run(ctx context.Context) error {
 	}
 	a.startJanitor()
 	a.startSnoozes()
+	a.startPreviews()
 	if err := a.startMedia(); err != nil {
 		cancel()
 		a.bg.Wait()

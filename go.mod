@@ -15,6 +15,7 @@ require (
 	github.com/descope/virtualwebauthn v1.0.5
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/joho/godotenv v1.5.1
+	golang.org/x/net v0.58.0
 	maragu.dev/gomponents v1.4.0
 	modernc.org/sqlite v1.60.1
 )
@@ -68,7 +69,6 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
-	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
