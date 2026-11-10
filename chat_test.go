@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -710,6 +711,7 @@ func TestMessagesPagination(t *testing.T) {
 		ensure.DeepEqual(t, count(ta.get(chatPath(chat.ID)+"?n="+in, ta.as(alice)).Body.String()), want, in)
 	}
 	ensure.StringContains(t, ta.get(chatPath(chat.ID)+"?n=1", ta.as(alice)).Body.String(), "?n=2#m")
+	ensure.StringDoesNotContain(t, ta.get(chatPath(chat.ID)+"?n=5000", ta.as(alice)).Body.String(), `id="earlier"`)
 	ensure.DeepEqual(t, pageSize("4000"), int64(4000))
 	ensure.DeepEqual(t, pageSize("5001"), int64(5000))
 }
@@ -783,4 +785,250 @@ func TestSidebarSnippet(t *testing.T) {
 	body = ta.get(pHome, ta.as(alice)).Body.String()
 	ensure.True(t, order(body, dm, g2, g1))
 	ensure.StringContains(t, body, `<span class="chat-snippet">bob: direct</span>`)
+}
+
+func messageRow(t *testing.T, ta *testApp, id int64) (Message, bool) {
+	t.Helper()
+	m, err := ta.app.q.MessageByID(t.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return m, false
+	}
+	ensure.Nil(t, err)
+	return m, true
+}
+
+func TestMessageEdit(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	admin := ta.newUser("boss", "admin")
+	chat := ta.newChat(alice, "team", bob, admin)
+	m := ta.newMessage(chat, alice, "original")
+	edit := messagePath(chat.ID, m.ID) + "/edit"
+
+	// the edit page
+	w := ta.get(edit, ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusOK)
+	body := w.Body.String()
+	ensure.StringContains(t, body, `class="back" href="`+chatPath(chat.ID)+`"`)
+	ensure.StringContains(t, body, `action="`+edit+`"`)
+	ensure.StringContains(t, body, `required maxlength="8000"`)
+	ensure.StringContains(t, body, `>original</textarea>`)
+	ensure.StringContains(t, body, `data-chat="`+idStr(chat.ID)+`"`)
+
+	// saving unchanged text leaves edited_at alone
+	w = ta.post(edit, url.Values{"body": {" original\r\n"}}, ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
+	got, _ := messageRow(t, ta, m.ID)
+	ensure.DeepEqual(t, got.EditedAt, int64(0))
+	ensure.StringDoesNotContain(t, ta.get(chatPath(chat.ID), ta.as(alice)).Body.String(), `id="m`+idStr(m.ID)+`-edited"`)
+
+	// the author changes the text
+	later := testNow.Add(time.Hour)
+	ta.app.now = func() time.Time { return later }
+	w = ta.post(edit, url.Values{"body": {"changed\r\n<b>bold</b>"}}, ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	got, _ = messageRow(t, ta, m.ID)
+	ensure.DeepEqual(t, got.Body, "changed\n<b>bold</b>")
+	ensure.DeepEqual(t, got.EditedAt, later.Unix())
+	ensure.DeepEqual(t, got.CreatedAt, testNow.Unix())
+	ensure.DeepEqual(t, lastMessageAt(t, ta, chat.ID), testNow.Unix())
+	body = ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, `<span id="m`+idStr(m.ID)+`-edited" class="msg-edited">edited</span><time id="m`+idStr(m.ID)+`-time"`)
+	ensure.StringContains(t, body, "changed\n&lt;b&gt;bold&lt;/b&gt;")
+	ensure.StringDoesNotContain(t, body, "<b>bold</b>")
+
+	// empty is refused with a flash, over the limit is 400
+	w = ta.post(edit, url.Values{"body": {"  "}}, ta.as(alice))
+	ensure.DeepEqual(t, w.Header().Get("Location"), edit)
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "Delete it instead.")
+	ensure.DeepEqual(t, ta.post(edit, url.Values{"body": {strings.Repeat("a", 8001)}}, ta.as(alice)).Code,
+		http.StatusBadRequest)
+	got, _ = messageRow(t, ta, m.ID)
+	ensure.DeepEqual(t, got.Body, "changed\n<b>bold</b>")
+
+	// another member and an admin are 404, signed out is redirected or 401
+	for _, u := range []*testUser{bob, admin} {
+		ensure.DeepEqual(t, ta.get(edit, ta.as(u)).Code, http.StatusNotFound, u.Username)
+		ensure.DeepEqual(t, ta.post(edit, url.Values{"body": {"hijack"}}, ta.as(u)).Code, http.StatusNotFound, u.Username)
+	}
+	ensure.DeepEqual(t, ta.get(edit).Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, ta.post(edit, url.Values{"body": {"x"}}).Code, http.StatusUnauthorized)
+
+	// a message with a file has no text to edit
+	ta.app.now = func() time.Time { return testNow }
+	res, err := ta.app.db.ExecContext(t.Context(), `INSERT INTO files (chat_id, user_id, status, name, s3_prefix, size, created_at)
+		VALUES (?, ?, 'ready', 'a.txt', 'p1', 1, 1)`, chat.ID, alice.ID)
+	ensure.Nil(t, err)
+	fileID, _ := res.LastInsertId()
+	fm, err := ta.app.createMessage(t.Context(), chat, alice.ID, "", sql.NullInt64{Int64: fileID, Valid: true})
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, ta.get(messagePath(chat.ID, fm.ID)+"/edit", ta.as(alice)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(messagePath(chat.ID, fm.ID)+"/edit", url.Values{"body": {"x"}}, ta.as(alice)).Code,
+		http.StatusNotFound)
+	body = ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.StringDoesNotContain(t, body, fmt.Sprintf(`id="m%d-edit"`, fm.ID))
+	ensure.StringContains(t, body, fmt.Sprintf(`id="m%d-del"`, fm.ID))
+
+	ensure.DeepEqual(t, messagesSent(t, ta, alice.ID), int64(2))
+}
+
+func TestMessageDelete(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	admin := ta.newUser("boss", "admin")
+	chat := ta.newChat(alice, "team", bob)
+	at := func(min int) {
+		ta.app.now = func() time.Time { return testNow.Add(time.Duration(min) * time.Minute) }
+	}
+	del := func(m Message) string { return messagePath(chat.ID, m.ID) + "/delete" }
+
+	at(1)
+	m1 := ta.newMessage(chat, alice, "first")
+	at(2)
+	m2 := ta.newMessage(chat, bob, "second")
+	at(3)
+	m3 := ta.newMessage(chat, alice, "third")
+	_, err := ta.app.db.ExecContext(t.Context(),
+		"INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, '👍', 1)", m3.ID, bob.ID)
+	ensure.Nil(t, err)
+
+	// another member is 404, signed out is 401
+	ensure.DeepEqual(t, ta.post(del(m3), nil, ta.as(bob)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(del(m3), nil).Code, http.StatusUnauthorized)
+	_, ok := messageRow(t, ta, m3.ID)
+	ensure.True(t, ok)
+
+	// the author removes the newest; the snippet falls back to the previous
+	w := ta.post(del(m3), nil, ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
+	_, ok = messageRow(t, ta, m3.ID)
+	ensure.False(t, ok)
+	ensure.DeepEqual(t, countRows(t, ta, "reactions"), 0)
+	body := ta.get(pHome, ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, `<span class="chat-snippet">bob: second</span>`)
+	ensure.StringDoesNotContain(t, ta.get(chatPath(chat.ID), ta.as(alice)).Body.String(), fmt.Sprintf(`id="m%d"`, m3.ID))
+	ensure.DeepEqual(t, lastMessageAt(t, ta, chat.ID), testNow.Add(3*time.Minute).Unix())
+
+	// an admin who is not a member can delete in a group
+	ensure.DeepEqual(t, ta.post(del(m2), nil, ta.as(admin)).Code, http.StatusSeeOther)
+	_, ok = messageRow(t, ta, m2.ID)
+	ensure.False(t, ok)
+	// and so can an admin who is a member
+	ta.post(chatPath(chat.ID)+"/members/add", url.Values{"user": {idStr(admin.ID)}}, ta.as(admin))
+	ensure.DeepEqual(t, ta.post(del(m1), nil, ta.as(admin)).Code, http.StatusSeeOther)
+	body = ta.get(pHome, ta.as(alice)).Body.String()
+	ensure.StringDoesNotContain(t, body, `class="chat-snippet"`)
+	ensure.StringDoesNotContain(t, body, `class="chat-time"`)
+	// deleting again is 404
+	ensure.DeepEqual(t, ta.post(del(m1), nil, ta.as(alice)).Code, http.StatusNotFound)
+
+	// counters count what was sent
+	ensure.DeepEqual(t, messagesSent(t, ta, alice.ID), int64(2))
+	ensure.DeepEqual(t, messagesSent(t, ta, bob.ID), int64(1))
+
+	// an admin cannot delete in a direct message they are not part of
+	dm := ta.newDM(alice, bob)
+	dmMsg := ta.newMessage(dm, bob, "private")
+	ensure.DeepEqual(t, ta.post(messagePath(dm.ID, dmMsg.ID)+"/delete", nil, ta.as(admin)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(messagePath(dm.ID, dmMsg.ID)+"/delete", nil, ta.as(alice)).Code, http.StatusNotFound)
+	_, ok = messageRow(t, ta, dmMsg.ID)
+	ensure.True(t, ok)
+	ensure.DeepEqual(t, ta.post(messagePath(dm.ID, dmMsg.ID)+"/delete", nil, ta.as(bob)).Code, http.StatusSeeOther)
+	_, ok = messageRow(t, ta, dmMsg.ID)
+	ensure.False(t, ok)
+}
+
+func TestMessageFormerMember(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "team", bob)
+	m := ta.newMessage(chat, bob, "mine")
+	ta.post(chatPath(chat.ID)+"/members/remove", url.Values{"user": {idStr(bob.ID)}}, ta.as(alice))
+	base := messagePath(chat.ID, m.ID)
+	ensure.DeepEqual(t, ta.get(base+"/edit", ta.as(bob)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(base+"/edit", url.Values{"body": {"x"}}, ta.as(bob)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(base+"/delete", nil, ta.as(bob)).Code, http.StatusNotFound)
+	got, ok := messageRow(t, ta, m.ID)
+	ensure.True(t, ok)
+	ensure.DeepEqual(t, got.Body, "mine")
+}
+
+func TestMessageWrongChat(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	admin := ta.newUser("boss", "admin")
+	c1 := ta.newChat(alice, "one")
+	c2 := ta.newChat(alice, "two")
+	m := ta.newMessage(c2, alice, "in two")
+	for _, u := range []*testUser{alice, admin} {
+		base := messagePath(c1.ID, m.ID)
+		ensure.DeepEqual(t, ta.get(base+"/edit", ta.as(u)).Code, http.StatusNotFound)
+		ensure.DeepEqual(t, ta.post(base+"/edit", url.Values{"body": {"x"}}, ta.as(u)).Code, http.StatusNotFound)
+		ensure.DeepEqual(t, ta.post(base+"/delete", nil, ta.as(u)).Code, http.StatusNotFound)
+		for _, p := range []string{"/m/abc/edit", "/m/9999/edit"} {
+			ensure.DeepEqual(t, ta.get(chatPath(c1.ID)+p, ta.as(u)).Code, http.StatusNotFound)
+		}
+		ensure.DeepEqual(t, ta.post(chatPath(c1.ID)+"/m/9999/delete", nil, ta.as(u)).Code, http.StatusNotFound)
+	}
+	got, ok := messageRow(t, ta, m.ID)
+	ensure.True(t, ok)
+	ensure.DeepEqual(t, got.Body, "in two")
+}
+
+func TestMessageMenu(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	admin := ta.newUser("boss", "admin")
+	chat := ta.newChat(alice, "team", bob)
+	m1 := ta.newMessage(chat, alice, "one")
+	m2 := ta.newMessage(chat, alice, "two")
+	mb := ta.newMessage(chat, bob, "bobs")
+	ids := func(m Message) (string, string, string, string) {
+		p := fmt.Sprintf("m%d", m.ID)
+		return `id="` + p + `-more"`, `id="` + p + `-menu"`, `id="` + p + `-edit"`, `id="` + p + `-del"`
+	}
+
+	// the author sees Edit and Delete on their own message, nothing on bob's
+	body := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	for _, m := range []Message{m1, m2} {
+		more, menu, edit, del := ids(m)
+		ensure.DeepEqual(t, strings.Count(body, more), 1)
+		ensure.DeepEqual(t, strings.Count(body, menu), 1)
+		ensure.StringContains(t, body, edit)
+		ensure.StringContains(t, body, del)
+	}
+	more, menu, edit, del := ids(m1)
+	ensure.StringContains(t, body, `<button `+more+` class="msg-more" type="button" popovertarget="m`+idStr(m1.ID)+`-menu" aria-label="Message actions">`)
+	ensure.StringContains(t, body, `<div `+menu+` popover class="sheet">`)
+	ensure.StringContains(t, body, `<a `+edit+` class="sheet-item" href="`+messagePath(chat.ID, m1.ID)+`/edit">Edit</a>`)
+	ensure.StringContains(t, body, `<details `+del+` class="sheet-confirm"><summary class="sheet-item">Delete</summary>`+
+		`<form method="post" action="`+messagePath(chat.ID, m1.ID)+`/delete" data-morph><button class="btn danger">Delete this message</button></form></details>`)
+	more, menu, _, _ = ids(mb)
+	ensure.StringDoesNotContain(t, body, more)
+	ensure.StringDoesNotContain(t, body, menu)
+
+	// another member sees no menu on alice's messages
+	body = ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()
+	more, menu, _, _ = ids(m1)
+	ensure.StringDoesNotContain(t, body, more)
+	ensure.StringDoesNotContain(t, body, menu)
+	_, _, edit, del = ids(mb)
+	ensure.StringContains(t, body, edit)
+	ensure.StringContains(t, body, del)
+
+	// an admin sees Delete only, on every message
+	body = ta.get(chatPath(chat.ID), ta.as(admin)).Body.String()
+	for _, m := range []Message{m1, m2, mb} {
+		more, menu, edit, del := ids(m)
+		ensure.DeepEqual(t, strings.Count(body, more), 1)
+		ensure.DeepEqual(t, strings.Count(body, menu), 1)
+		ensure.StringDoesNotContain(t, body, edit)
+		ensure.StringContains(t, body, del)
+	}
 }

@@ -686,11 +686,103 @@ fieldset {
     margin-block-start: var(--space-2xs);
   }
 
-  > time {
+  > time,
+  > .msg-edited {
     margin-inline-start: auto;
     color: var(--color-text-muted);
     font-size: var(--step--2);
   }
+
+  > .msg-edited + time {
+    margin-inline-start: 0;
+  }
+}
+
+/* per message menu: the button, and a sheet at the bottom of the viewport */
+.msg-more {
+  display: inline-grid;
+  place-items: center;
+  min-width: 2rem;
+  min-height: 1.5rem;
+  margin-inline-end: calc(-1 * var(--space-3xs));
+  padding: 0;
+  border: none;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0.6;
+
+  &:hover,
+  &:focus-visible {
+    opacity: 1;
+    background-color: var(--color-surface-2);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-accent);
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .msg-more {
+    opacity: 0;
+  }
+
+  .msg:hover .msg-more,
+  .msg:focus-within .msg-more {
+    opacity: 1;
+  }
+}
+
+.sheet {
+  inset: auto 0 0;
+  width: min(100%, 28rem);
+  margin: 0 auto;
+  padding: var(--space-2xs) var(--space-2xs)
+    calc(var(--space-2xs) + env(safe-area-inset-bottom));
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-bottom: none;
+  border-radius: calc(2 * var(--radius)) calc(2 * var(--radius)) 0 0;
+  box-shadow: 0 -4px 24px rgb(0 0 0 / 0.18);
+
+  &::backdrop {
+    background-color: rgb(0 0 0 / 0.25);
+  }
+
+  .btn {
+    width: 100%;
+  }
+}
+
+.sheet-item {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 var(--space-s);
+  border-radius: var(--radius);
+  color: var(--color-text);
+  text-decoration: none;
+  cursor: pointer;
+  list-style: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  &:hover {
+    background-color: var(--color-surface-2);
+  }
+}
+
+.sheet-confirm[open] > .sheet-item {
+  color: var(--color-text-muted);
+}
+
+.sheet-confirm > form {
+  padding: var(--space-3xs) var(--space-s) var(--space-2xs);
 }
 
 .msg-who,

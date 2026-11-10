@@ -225,3 +225,12 @@ SELECT count(*) FROM messages WHERE chat_id = ?;
 
 -- name: ChatTouch :exec
 UPDATE chats SET last_message_at = @last_message_at WHERE id = @id;
+
+-- name: MessageByID :one
+SELECT * FROM messages WHERE id = ?;
+
+-- name: MessageUpdateBody :exec
+UPDATE messages SET body = @body, edited_at = @edited_at WHERE id = @id;
+
+-- name: MessageDelete :exec
+DELETE FROM messages WHERE id = ?;

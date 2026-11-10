@@ -873,6 +873,25 @@ func (q *Queries) MembersOfChat(ctx context.Context, chatID int64) ([]MembersOfC
 	return items, nil
 }
 
+const messageByID = `-- name: MessageByID :one
+SELECT id, chat_id, user_id, body, file_id, created_at, edited_at FROM messages WHERE id = ?
+`
+
+func (q *Queries) MessageByID(ctx context.Context, id int64) (Message, error) {
+	row := q.db.QueryRowContext(ctx, messageByID, id)
+	var i Message
+	err := row.Scan(
+		&i.ID,
+		&i.ChatID,
+		&i.UserID,
+		&i.Body,
+		&i.FileID,
+		&i.CreatedAt,
+		&i.EditedAt,
+	)
+	return i, err
+}
+
 const messageCount = `-- name: MessageCount :one
 SELECT count(*) FROM messages WHERE chat_id = ?
 `
@@ -917,6 +936,30 @@ func (q *Queries) MessageCreate(ctx context.Context, arg MessageCreateParams) (M
 		&i.EditedAt,
 	)
 	return i, err
+}
+
+const messageDelete = `-- name: MessageDelete :exec
+DELETE FROM messages WHERE id = ?
+`
+
+func (q *Queries) MessageDelete(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, messageDelete, id)
+	return err
+}
+
+const messageUpdateBody = `-- name: MessageUpdateBody :exec
+UPDATE messages SET body = ?1, edited_at = ?2 WHERE id = ?3
+`
+
+type MessageUpdateBodyParams struct {
+	Body     string
+	EditedAt int64
+	ID       int64
+}
+
+func (q *Queries) MessageUpdateBody(ctx context.Context, arg MessageUpdateBodyParams) error {
+	_, err := q.db.ExecContext(ctx, messageUpdateBody, arg.Body, arg.EditedAt, arg.ID)
+	return err
 }
 
 const messagesLatest = `-- name: MessagesLatest :many

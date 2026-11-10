@@ -378,7 +378,7 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	base := chatPath(v.Chat.ID)
 
 	var earlier g.Node
-	if total > n && len(rows) > 0 {
+	if total > n && n < maxPage && len(rows) > 0 {
 		// The fragment keeps the reading position when the link is followed
 		// as a plain navigation: the browser scrolls to the message that was
 		// the oldest one shown.
@@ -463,8 +463,10 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, loc *time.Locat
 			g.If(first && !mine, h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)),
 				g.Text(row.Username))),
 			h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body))),
+			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
 			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
-				g.Text(at.Format("15:04")))))
+				g.Text(at.Format("15:04"))),
+			a.messageMenu(v, m)))
 	}
 	return nodes
 }
@@ -792,5 +794,151 @@ func (a *app) dmPost(w http.ResponseWriter, r *http.Request) error {
 		a.notifyChat(ctx, chat.ID)
 	}
 	http.Redirect(w, r, chatPath(chat.ID), http.StatusSeeOther)
+	return nil
+}
+
+// editing and deleting
+
+func messagePath(chatID, msgID int64) string {
+	return fmt.Sprintf("%s/m/%d", chatPath(chatID), msgID)
+}
+
+// canEdit reports whether the viewer may edit the message: the author, while
+// still a member, and only a text message.
+func canEdit(v chatView, m Message) bool {
+	return m.UserID == v.User.ID && v.Member && !m.FileID.Valid
+}
+
+// canDelete reports whether the viewer may delete the message: the author
+// while still a member, or an admin who can view the chat.
+func canDelete(v chatView, m Message) bool {
+	return (m.UserID == v.User.ID && v.Member) || allowed(v.User, accAdmin)
+}
+
+// messageMenu builds the per message popover with the actions the viewer may
+// use. It renders nothing when there are none.
+func (a *app) messageMenu(v chatView, m Message) g.Node {
+	id := fmt.Sprintf("m%d", m.ID)
+	base := messagePath(v.Chat.ID, m.ID)
+	// Task 012 adds the emoji row first, task 021 the snooze choices.
+	var entries g.Group
+	if canEdit(v, m) {
+		entries = append(entries, h.A(h.ID(id+"-edit"), h.Class("sheet-item"), h.Href(base+"/edit"),
+			g.Text("Edit")))
+	}
+	if canDelete(v, m) {
+		entries = append(entries, h.Details(h.ID(id+"-del"), h.Class("sheet-confirm"),
+			h.Summary(h.Class("sheet-item"), g.Text("Delete")),
+			h.Form(h.Method("post"), h.Action(base+"/delete"), g.Attr("data-morph"),
+				h.Button(h.Class("btn danger"), g.Text("Delete this message")))))
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	return g.Group{
+		h.Button(h.ID(id+"-more"), h.Class("msg-more"), h.Type("button"),
+			g.Attr("popovertarget", id+"-menu"), h.Aria("label", "Message actions"), icon("dots")),
+		h.Div(h.ID(id+"-menu"), g.Attr("popover"), h.Class("sheet"), entries),
+	}
+}
+
+// chatMessage loads the chat and the message named in the path. A message
+// that is not in that chat is not found.
+func (a *app) chatMessage(r *http.Request) (chatView, Message, error) {
+	v, err := a.chatView(r)
+	if err != nil {
+		return v, Message{}, err
+	}
+	id, err := strconv.ParseInt(r.PathValue("mid"), 10, 64)
+	if err != nil {
+		return v, Message{}, errNotFound
+	}
+	m, err := a.q.MessageByID(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && m.ChatID != v.Chat.ID) {
+		return v, m, errNotFound
+	}
+	return v, m, serr.Wrap(err)
+}
+
+// editableMessage is chatMessage for a message the viewer may edit.
+func (a *app) editableMessage(r *http.Request) (chatView, Message, error) {
+	v, m, err := a.chatMessage(r)
+	if err == nil && !canEdit(v, m) {
+		return v, m, errNotFound
+	}
+	return v, m, err
+}
+
+func (a *app) messageEdit(w http.ResponseWriter, r *http.Request) error {
+	v, m, err := a.editableMessage(r)
+	if err != nil {
+		return err
+	}
+	return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("edit"), h.Class("pane-body stack"),
+		pageHeader("Edit message", backLink(chatPath(v.Chat.ID), v.Title)),
+		h.Form(h.Method("post"), h.Action(messagePath(v.Chat.ID, m.ID)+"/edit"), h.Class("stack"),
+			h.Textarea(h.ID("edit-body"), h.Name("body"), h.Rows("6"), h.Required(),
+				h.MaxLength(strconv.Itoa(maxMessageBody)), h.AutoComplete("off"),
+				h.Aria("label", "Message"), g.Text(m.Body)),
+			h.Button(h.Class("btn"), g.Text("Save")))))
+}
+
+func (a *app) messageEditPost(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	v, m, err := a.editableMessage(r)
+	if err != nil {
+		return err
+	}
+	body, err := normalizeBody(r.PostFormValue("body"))
+	if err != nil {
+		return err
+	}
+	if body == "" {
+		return a.flash(w, r, messagePath(v.Chat.ID, m.ID)+"/edit", Flash{Kind: flashError,
+			Content: "A message cannot be empty. Delete it instead."})
+	}
+	if body != m.Body {
+		m.Body, m.EditedAt = body, a.now().Unix()
+		err := a.q.MessageUpdateBody(ctx, MessageUpdateBodyParams{ID: m.ID, Body: m.Body, EditedAt: m.EditedAt})
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		a.afterEdit(ctx, v.Chat, m)
+	}
+	http.Redirect(w, r, chatPath(v.Chat.ID), http.StatusSeeOther)
+	return nil
+}
+
+func (a *app) messageDelete(w http.ResponseWriter, r *http.Request) error {
+	v, m, err := a.chatMessage(r)
+	if err != nil {
+		return err
+	}
+	if !canDelete(v, m) {
+		return errNotFound
+	}
+	if err := a.deleteMessage(r.Context(), v.Chat, m); err != nil {
+		return err
+	}
+	http.Redirect(w, r, chatPath(v.Chat.ID), http.StatusSeeOther)
+	return nil
+}
+
+// afterEdit runs after a message's text was changed. It is the only place
+// for the side effects of an edit.
+func (a *app) afterEdit(ctx context.Context, chat Chat, msg Message) {
+	a.notifyChat(ctx, chat.ID)
+	// Task 019 refreshes the link preview here.
+}
+
+// deleteMessage is the only place a message is removed. Deletes are hard
+// deletes: reactions and snoozes cascade.
+func (a *app) deleteMessage(ctx context.Context, chat Chat, msg Message) error {
+	// Task 015 also removes the attached file and its S3 objects here, task
+	// 019 the preview and its image.
+	if err := a.q.MessageDelete(ctx, msg.ID); err != nil {
+		return serr.Wrap(err)
+	}
+	a.notifyChat(ctx, chat.ID)
 	return nil
 }
