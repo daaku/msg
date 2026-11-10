@@ -78,7 +78,7 @@ func TestGroupCreate(t *testing.T) {
 		"user": {idStr(bob.ID), "9999"},
 	}, ta.as(alice))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther, w.Body.String())
-	chats, err := ta.app.q.ChatsForUserWithLast(ctx, alice.ID)
+	chats, err := ta.app.q.ChatsForUserWithLast(ctx, ChatsForUserWithLastParams{UserID: alice.ID})
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(chats), 1)
 	chat := chats[0].Chat
@@ -1241,4 +1241,190 @@ func TestReactionsConstantQueries(t *testing.T) {
 		ensure.DeepEqual(t, strings.Count(body, `id="m`+id+`-reactions"`), 1)
 		ensure.DeepEqual(t, strings.Count(body, `id="m`+id+`-pick"`), 1)
 	}
+}
+
+// archiving
+
+func isArchived(t *testing.T, ta *testApp, chatID, userID int64) bool {
+	t.Helper()
+	m, err := ta.app.q.MemberGet(t.Context(), MemberGetParams{ChatID: chatID, UserID: userID})
+	ensure.Nil(t, err)
+	return m.Archived
+}
+
+func chatRow(id int64) string { return fmt.Sprintf(`id="chat-%d"`, id) }
+
+const archivedHidden = `<a id="archived-link" class="archived-link" hidden=""></a>`
+
+func TestArchive(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	team := ta.newChat(alice, "team", bob, carol)
+	other := ta.newChat(alice, "other", bob)
+	setLastMessageAt(t, ta, other.ID, testNow.Unix()+10) // other is on top
+	base := chatPath(team.ID)
+
+	body := ta.get(pHome, ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, archivedHidden)
+
+	// archiving moves it out of bob's list and nobody else's
+	bobHome, cancel := ta.app.hub.subscribe(bob.ID, 0)
+	defer cancel()
+	aliceHome, cancelAlice := ta.app.hub.subscribe(alice.ID, 0)
+	defer cancelAlice()
+	w := ta.post(base+"/archive", nil, ta.as(bob))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), pHome)
+	ensure.True(t, isArchived(t, ta, team.ID, bob.ID))
+	ensure.True(t, pinged(bobHome))
+	ensure.False(t, pinged(aliceHome))
+
+	body = ta.get(pHome, ta.as(bob)).Body.String()
+	ensure.StringDoesNotContain(t, body, chatRow(team.ID))
+	ensure.StringContains(t, body, chatRow(other.ID))
+	link := `<a id="archived-link" class="archived-link" href="/archived">Archived (1)</a>`
+	ensure.StringContains(t, body, link)
+	ensure.True(t, strings.Index(body, chatRow(other.ID)) < strings.Index(body, link))
+	ensure.StringContains(t, body, link+`</div>`) // the last row of the list
+
+	body = ta.get(pArchived, ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, `<main id="app" class="chat-layout" data-live`)
+	ensure.StringContains(t, body, `<h1>Archived</h1>`)
+	ensure.StringContains(t, body, `href="/" title="Back"`)
+	ensure.StringContains(t, body, chatRow(team.ID))
+	ensure.StringDoesNotContain(t, body, chatRow(other.ID))
+	ensure.StringDoesNotContain(t, body, `id="archived-link"`)
+
+	for _, u := range []*testUser{alice, carol} {
+		body = ta.get(pHome, ta.as(u)).Body.String()
+		ensure.StringContains(t, body, chatRow(team.ID))
+		ensure.StringContains(t, body, archivedHidden)
+		ensure.StringContains(t, ta.get(pArchived, ta.as(u)).Body.String(), `id="chats-empty"`)
+		// nothing about bob's flag shows to the others
+		ensure.StringDoesNotContain(t, ta.get(base, ta.as(u)).Body.String(), `id="pane-archived"`)
+		ensure.StringContains(t, ta.get(base+"/info", ta.as(u)).Body.String(), `action="`+base+`/archive"`)
+	}
+
+	// it still opens for bob, labelled, with Unarchive on the info page
+	body = ta.get(base, ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, `<form id="pane-archived" class="pane-archived" method="post" action="`+base+`/unarchive"><span class="badge">Archived</span>`)
+	body = ta.get(base+"/info", ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, `<form id="archive" method="post" action="`+base+`/unarchive"><button class="btn secondary">Unarchive</button></form>`)
+
+	// bob's own message keeps it archived for him
+	ensure.DeepEqual(t, ta.post(base+"/send", url.Values{"body": {"still here"}}, ta.as(bob)).Code, http.StatusSeeOther)
+	ensure.True(t, isArchived(t, ta, team.ID, bob.ID))
+
+	// but it does bring it back for carol, who had archived it too
+	ensure.DeepEqual(t, ta.post(base+"/archive", nil, ta.as(carol)).Code, http.StatusSeeOther)
+	m := ta.newMessage(team, bob, "hm")
+	ensure.True(t, isArchived(t, ta, team.ID, bob.ID))
+	ensure.False(t, isArchived(t, ta, team.ID, carol.ID))
+
+	// reactions, edits and deletes by others do not unarchive
+	ta.newMessage(other, alice, "elsewhere") // nor does activity in another chat
+	ensure.DeepEqual(t, react(ta, team, m, "👍", alice), http.StatusSeeOther)
+	ensure.True(t, isArchived(t, ta, team.ID, bob.ID))
+	// alice's message from before they archived, edited and deleted now
+	alicesMsg := ta.newMessage(team, alice, "draft")
+	for _, u := range []*testUser{bob, carol} {
+		ensure.DeepEqual(t, ta.post(base+"/archive", nil, ta.as(u)).Code, http.StatusSeeOther)
+	}
+	ensure.DeepEqual(t, ta.post(messagePath(team.ID, alicesMsg.ID)+"/edit", url.Values{"body": {"edited"}}, ta.as(alice)).Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, ta.post(messagePath(team.ID, alicesMsg.ID)+"/delete", nil, ta.as(alice)).Code, http.StatusSeeOther)
+	ensure.True(t, isArchived(t, ta, team.ID, bob.ID))
+	ensure.True(t, isArchived(t, ta, team.ID, carol.ID))
+	ensure.StringContains(t, ta.get(pHome, ta.as(bob)).Body.String(), "Archived (1)")
+
+	// a new message from someone else brings it back for everyone, on top
+	ta.app.now = func() time.Time { return testNow.Add(time.Hour) }
+	ensure.DeepEqual(t, ta.post(base+"/send", url.Values{"body": {"wake up"}}, ta.as(alice)).Code, http.StatusSeeOther)
+	ensure.False(t, isArchived(t, ta, team.ID, bob.ID))
+	ensure.False(t, isArchived(t, ta, team.ID, carol.ID))
+	for _, u := range []*testUser{bob, carol} {
+		body = ta.get(pHome, ta.as(u)).Body.String()
+		ensure.StringContains(t, body, archivedHidden)
+		first := strings.Index(body, `class="chat-item`)
+		ensure.True(t, first > 0 && strings.Index(body, chatRow(team.ID)) < first, u.Username)
+		ensure.StringDoesNotContain(t, ta.get(base, ta.as(u)).Body.String(), `id="pane-archived"`)
+	}
+
+	// unarchive returns it to the main list
+	ensure.DeepEqual(t, ta.post(base+"/archive", nil, ta.as(bob)).Code, http.StatusSeeOther)
+	ensure.StringDoesNotContain(t, ta.get(pHome, ta.as(bob)).Body.String(), chatRow(team.ID))
+	w = ta.post(base+"/unarchive", nil, ta.as(bob))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), base)
+	ensure.True(t, pinged(bobHome))
+	body = ta.get(pHome, ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, chatRow(team.ID))
+	ensure.StringContains(t, body, archivedHidden)
+	ensure.StringContains(t, ta.get(base+"/info", ta.as(bob)).Body.String(), `action="`+base+`/archive"`)
+}
+
+func TestArchiveEverything(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	team := ta.newChat(alice, "team")
+	ta.post(chatPath(team.ID)+"/archive", nil, ta.as(alice))
+	// with every chat archived the list is not the "no chats yet" state
+	body := ta.get(pHome, ta.as(alice)).Body.String()
+	ensure.StringDoesNotContain(t, body, `id="chats-empty"`)
+	ensure.StringContains(t, body, `<div id="chats" class="chat-list"><a id="archived-link" class="archived-link" href="/archived">Archived (1)</a></div>`)
+}
+
+func TestArchiveDM(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice")
+	bob := ta.newUser("bob")
+	dm := ta.newDM(alice, bob)
+	ta.newMessage(dm, bob, "hi")
+	base := chatPath(dm.ID)
+
+	ensure.StringContains(t, ta.get(base+"/info", ta.as(alice)).Body.String(), `action="`+base+`/archive"`)
+	ensure.DeepEqual(t, ta.post(base+"/archive", nil, ta.as(alice)).Code, http.StatusSeeOther)
+	ensure.StringDoesNotContain(t, ta.get(pHome, ta.as(alice)).Body.String(), chatRow(dm.ID))
+	ensure.StringContains(t, ta.get(pHome, ta.as(alice)).Body.String(), "Archived (1)")
+	ensure.StringContains(t, ta.get(pArchived, ta.as(alice)).Body.String(), `<span class="chat-name">bob</span>`)
+	ensure.StringContains(t, ta.get(pHome, ta.as(bob)).Body.String(), chatRow(dm.ID))
+	ensure.StringContains(t, ta.get(base, ta.as(alice)).Body.String(), `id="pane-archived"`)
+	ensure.StringDoesNotContain(t, ta.get(base, ta.as(bob)).Body.String(), `id="pane-archived"`)
+
+	// alice can still post, and stays archived
+	ensure.DeepEqual(t, ta.post(base+"/send", url.Values{"body": {"quiet"}}, ta.as(alice)).Code, http.StatusSeeOther)
+	ensure.True(t, isArchived(t, ta, dm.ID, alice.ID))
+	// bob's reaction does not unarchive, his message does
+	m := ta.newMessage(dm, alice, "x")
+	ensure.DeepEqual(t, react(ta, dm, m, "👀", bob), http.StatusSeeOther)
+	ensure.True(t, isArchived(t, ta, dm.ID, alice.ID))
+	ta.newMessage(dm, bob, "back")
+	ensure.False(t, isArchived(t, ta, dm.ID, alice.ID))
+	ensure.StringContains(t, ta.get(pHome, ta.as(alice)).Body.String(), chatRow(dm.ID))
+}
+
+func TestArchiveAccess(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	admin := ta.newUser("boss", "admin")
+	team := ta.newChat(alice, "team", bob)
+	dm := ta.newDM(alice, bob)
+	for _, c := range []Chat{team, dm} {
+		for _, action := range []string{"/archive", "/unarchive"} {
+			path := chatPath(c.ID) + action
+			ensure.DeepEqual(t, ta.post(path, nil).Code, http.StatusUnauthorized, path)
+			ensure.DeepEqual(t, ta.post(path, nil, ta.as(carol)).Code, http.StatusNotFound, path)
+			ensure.DeepEqual(t, ta.post(path, nil, ta.as(admin)).Code, http.StatusNotFound, path)
+			ensure.DeepEqual(t, ta.post(path, nil, ta.as(bob)).Code, http.StatusSeeOther, path)
+		}
+		ensure.DeepEqual(t, ta.post(chatPath(9999)+"/archive", nil, ta.as(bob)).Code, http.StatusNotFound)
+	}
+	// an admin looking at a group has no archive button
+	ensure.StringDoesNotContain(t, ta.get(chatPath(team.ID)+"/info", ta.as(admin)).Body.String(), `id="archive"`)
+	// the archived page needs a session
+	ensure.DeepEqual(t, ta.get(pArchived).Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, ta.get(pArchived, ta.as(carol)).Code, http.StatusOK)
 }

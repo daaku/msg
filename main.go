@@ -43,6 +43,7 @@ import (
 const (
 	pAdmin              = "/admin"
 	pAdminUser          = "/admin/u/"
+	pArchived           = "/archived"
 	pAssets             = "/assets/"
 	pChat               = "/c/"
 	pDM                 = "/dm"
@@ -627,6 +628,7 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
 	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
 	mux.HandleFunc("GET "+pEvents, a.wrap(accUser, a.events))
+	mux.HandleFunc("GET "+pArchived, a.wrap(accUser, a.archived))
 	mux.HandleFunc("GET "+pDM, a.wrap(accUser, a.dm))
 	mux.HandleFunc("POST "+pDM, a.wrap(accUser, a.dmPost))
 	mux.HandleFunc("GET "+pNew, a.wrap(accGroup, a.newGroup))
@@ -635,6 +637,8 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pChat+"{id}/info", a.wrap(accUser, a.chatInfo))
 	mux.HandleFunc("POST "+pChat+"{id}/send", a.wrap(accUser, a.chatSend))
 	mux.HandleFunc("POST "+pChat+"{id}/react", a.wrap(accUser, a.chatReact))
+	mux.HandleFunc("POST "+pChat+"{id}/archive", a.wrap(accUser, a.chatArchive))
+	mux.HandleFunc("POST "+pChat+"{id}/unarchive", a.wrap(accUser, a.chatUnarchive))
 	mux.HandleFunc("GET "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEdit))
 	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEditPost))
 	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/delete", a.wrap(accUser, a.messageDelete))

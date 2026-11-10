@@ -161,6 +161,7 @@ SELECT sqlc.embed(chats),
   CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at
 FROM chats
 JOIN members ON members.chat_id = chats.id AND members.user_id = @user_id
+  AND members.archived = @archived
 LEFT JOIN members other ON chats.is_dm
   AND other.chat_id = chats.id AND other.user_id != @user_id
 LEFT JOIN users other_user ON other_user.id = other.user_id
@@ -251,3 +252,14 @@ SELECT reactions.message_id, reactions.emoji, reactions.user_id, users.username
 FROM reactions JOIN users ON users.id = reactions.user_id
 WHERE reactions.message_id IN (sqlc.slice('ids'))
 ORDER BY reactions.created_at, reactions.user_id;
+
+-- name: MemberSetArchived :exec
+UPDATE members SET archived = @archived
+WHERE chat_id = @chat_id AND user_id = @user_id;
+
+-- name: MembersUnarchive :exec
+UPDATE members SET archived = FALSE
+WHERE chat_id = @chat_id AND user_id != @author_id AND archived;
+
+-- name: ArchivedCount :one
+SELECT count(*) FROM members WHERE user_id = ? AND archived;

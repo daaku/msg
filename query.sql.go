@@ -11,6 +11,17 @@ import (
 	"strings"
 )
 
+const archivedCount = `-- name: ArchivedCount :one
+SELECT count(*) FROM members WHERE user_id = ? AND archived
+`
+
+func (q *Queries) ArchivedCount(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, archivedCount, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const chatByDMKey = `-- name: ChatByDMKey :one
 SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at FROM chats WHERE dm_key = ?
 `
@@ -205,6 +216,7 @@ SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.
   CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at
 FROM chats
 JOIN members ON members.chat_id = chats.id AND members.user_id = ?1
+  AND members.archived = ?2
 LEFT JOIN members other ON chats.is_dm
   AND other.chat_id = chats.id AND other.user_id != ?1
 LEFT JOIN users other_user ON other_user.id = other.user_id
@@ -214,6 +226,11 @@ LEFT JOIN users last_user ON last_user.id = last.user_id
 ORDER BY chats.last_message_at DESC, chats.id DESC
 `
 
+type ChatsForUserWithLastParams struct {
+	UserID   int64
+	Archived bool
+}
+
 type ChatsForUserWithLastRow struct {
 	Chat          Chat
 	Other         string
@@ -222,8 +239,8 @@ type ChatsForUserWithLastRow struct {
 	LastCreatedAt int64
 }
 
-func (q *Queries) ChatsForUserWithLast(ctx context.Context, userID int64) ([]ChatsForUserWithLastRow, error) {
-	rows, err := q.db.QueryContext(ctx, chatsForUserWithLast, userID)
+func (q *Queries) ChatsForUserWithLast(ctx context.Context, arg ChatsForUserWithLastParams) ([]ChatsForUserWithLastRow, error) {
+	rows, err := q.db.QueryContext(ctx, chatsForUserWithLast, arg.UserID, arg.Archived)
 	if err != nil {
 		return nil, err
 	}
@@ -839,6 +856,22 @@ func (q *Queries) MemberRemove(ctx context.Context, arg MemberRemoveParams) erro
 	return err
 }
 
+const memberSetArchived = `-- name: MemberSetArchived :exec
+UPDATE members SET archived = ?1
+WHERE chat_id = ?2 AND user_id = ?3
+`
+
+type MemberSetArchivedParams struct {
+	Archived bool
+	ChatID   int64
+	UserID   int64
+}
+
+func (q *Queries) MemberSetArchived(ctx context.Context, arg MemberSetArchivedParams) error {
+	_, err := q.db.ExecContext(ctx, memberSetArchived, arg.Archived, arg.ChatID, arg.UserID)
+	return err
+}
+
 const membersOfChat = `-- name: MembersOfChat :many
 SELECT members.user_id, users.username FROM members
 JOIN users ON users.id = members.user_id
@@ -872,6 +905,21 @@ func (q *Queries) MembersOfChat(ctx context.Context, chatID int64) ([]MembersOfC
 		return nil, err
 	}
 	return items, nil
+}
+
+const membersUnarchive = `-- name: MembersUnarchive :exec
+UPDATE members SET archived = FALSE
+WHERE chat_id = ?1 AND user_id != ?2 AND archived
+`
+
+type MembersUnarchiveParams struct {
+	ChatID   int64
+	AuthorID int64
+}
+
+func (q *Queries) MembersUnarchive(ctx context.Context, arg MembersUnarchiveParams) error {
+	_, err := q.db.ExecContext(ctx, membersUnarchive, arg.ChatID, arg.AuthorID)
+	return err
 }
 
 const messageByID = `-- name: MessageByID :one

@@ -43,34 +43,42 @@ func chatPath(id int64) string {
 // chatAccess loads a chat and decides what the user may do with it. A user
 // who may not view it gets a 404, so its existence is not revealed.
 func (a *app) chatAccess(ctx context.Context, user *User, chatID int64) (chat Chat, member bool, manage bool, err error) {
+	chat, row, manage, err := a.chatAccessRow(ctx, user, chatID)
+	return chat, row != nil, manage, err
+}
+
+// chatAccessRow is chatAccess that also returns the user's members row, nil
+// when they are not a member.
+func (a *app) chatAccessRow(ctx context.Context, user *User, chatID int64) (chat Chat, row *Member, manage bool, err error) {
 	chat, err = a.q.ChatByID(ctx, chatID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return chat, false, false, errNotFound
+		return chat, nil, false, errNotFound
 	}
 	if err != nil {
-		return chat, false, false, serr.Wrap(err)
+		return chat, nil, false, serr.Wrap(err)
 	}
-	_, err = a.q.MemberGet(ctx, MemberGetParams{ChatID: chatID, UserID: user.ID})
+	m, err := a.q.MemberGet(ctx, MemberGetParams{ChatID: chatID, UserID: user.ID})
 	switch {
 	case err == nil:
-		member = true
+		row = &m
 	case !errors.Is(err, sql.ErrNoRows):
-		return chat, false, false, serr.Wrap(err)
+		return chat, nil, false, serr.Wrap(err)
 	}
+	member := row != nil
 	if chat.IsDm {
 		// Only the two participants can see a direct message, not even an
 		// admin, and there is nothing to manage.
 		if !member {
-			return chat, false, false, errNotFound
+			return chat, nil, false, errNotFound
 		}
-		return chat, true, false, nil
+		return chat, row, false, nil
 	}
 	admin := allowed(user, accAdmin)
 	if !member && !admin {
-		return chat, false, false, errNotFound
+		return chat, nil, false, errNotFound
 	}
 	manage = admin || (chat.CreatedBy == user.ID && user.PermGroup)
-	return chat, member, manage, nil
+	return chat, row, manage, nil
 }
 
 // chatTitle is the name a chat is shown with: the group's name, or for a
@@ -254,11 +262,12 @@ func (a *app) events(w http.ResponseWriter, r *http.Request) error {
 
 // chatView is a chat as seen by the signed in user.
 type chatView struct {
-	Chat   Chat
-	User   *User
-	Member bool
-	Manage bool
-	Title  string
+	Chat     Chat
+	User     *User
+	Member   bool
+	Manage   bool
+	Archived bool // by this user, private to them
+	Title    string
 }
 
 // chatView loads the chat named by the {id} path value for a user who may
@@ -270,7 +279,7 @@ func (a *app) chatView(r *http.Request) (chatView, error) {
 		return chatView{}, errNotFound
 	}
 	user := userFrom(ctx)
-	chat, member, manage, err := a.chatAccess(ctx, user, id)
+	chat, row, manage, err := a.chatAccessRow(ctx, user, id)
 	if err != nil {
 		return chatView{}, err
 	}
@@ -278,7 +287,8 @@ func (a *app) chatView(r *http.Request) (chatView, error) {
 	if err != nil {
 		return chatView{}, err
 	}
-	return chatView{Chat: chat, User: user, Member: member, Manage: manage, Title: title}, nil
+	return chatView{Chat: chat, User: user, Member: row != nil, Manage: manage,
+		Archived: row != nil && row.Archived, Title: title}, nil
 }
 
 // chatMember is chatView for a user who must be a member.
@@ -304,13 +314,28 @@ func (a *app) chatManage(r *http.Request) (chatView, error) {
 // chatPage renders the two pane shell shared by home and every chat page.
 // active is nil on home.
 func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, active *Chat, pane g.Node) error {
+	return a.chatShell(w, r, user, active, false, pane)
+}
+
+// chatShell is chatPage with the sidebar showing either the main chat list
+// or, when archived is true, the user's archived chats.
+func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, active *Chat, archived bool, pane g.Node) error {
 	ctx := r.Context()
-	chats, err := a.q.ChatsForUserWithLast(ctx, user.ID)
+	chats, err := a.q.ChatsForUserWithLast(ctx, ChatsForUserWithLastParams{UserID: user.ID, Archived: archived})
 	if err != nil {
 		return serr.Wrap(err)
 	}
+	var archivedCount int64
+	if !archived {
+		if archivedCount, err = a.q.ArchivedCount(ctx, user.ID); err != nil {
+			return serr.Wrap(err)
+		}
+	}
 	loc := viewerLoc(r)
 	title := "Home"
+	if archived {
+		title = "Archived"
+	}
 	var activeID int64
 	appAttrs := g.Group{h.Class("chat-layout"), h.Data("live", "")}
 	if active != nil {
@@ -327,7 +352,9 @@ func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, activ
 			h.Aria("label", label), icon(iconName))
 	}
 	var list g.Node
-	if len(chats) == 0 {
+	if archived && len(chats) == 0 {
+		list = h.P(h.ID("chats-empty"), h.Class("empty"), g.Text("No archived chats."))
+	} else if len(chats) == 0 && archivedCount == 0 {
 		var group g.Node = g.Text(" Someone needs to add you to a group.")
 		if allowed(user, accGroup) {
 			group = g.Group{g.Text(" or "), h.A(h.Href(pNew), g.Text("create a group")), g.Text(".")}
@@ -357,33 +384,105 @@ func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, activ
 				icon(kindIcon),
 				h.Span(h.Class("chat-name"), g.Text(a.chatTitle(c, user, row.Other))),
 				last)
-		}))
+		}), g.If(!archived, archivedLink(archivedCount)))
 	}
-	sidebar := h.Nav(h.ID("sidebar"),
-		h.Header(h.Class("sidebar-head"),
-			h.H1(g.Text(a.cfg.AppName)),
-			h.Div(h.Class("cluster"),
-				headerLink(pDM, "New message", "pencil"),
-				g.If(allowed(user, accGroup), headerLink(pNew, "New group", "plus")),
-				g.If(allowed(user, accInvite), headerLink(pInvites, "Invites", "person-plus")),
-				g.If(allowed(user, accAdmin), headerLink(pAdmin, "Admin", "shield")),
-				headerLink(pSettings, "Settings", "gear"))),
-		list)
+	head := h.Header(h.Class("sidebar-head"),
+		h.H1(g.Text(a.cfg.AppName)),
+		h.Div(h.Class("cluster"),
+			headerLink(pDM, "New message", "pencil"),
+			g.If(allowed(user, accGroup), headerLink(pNew, "New group", "plus")),
+			g.If(allowed(user, accInvite), headerLink(pInvites, "Invites", "person-plus")),
+			g.If(allowed(user, accAdmin), headerLink(pAdmin, "Admin", "shield")),
+			headerLink(pSettings, "Settings", "gear")))
+	if archived {
+		head = h.Header(h.Class("sidebar-head start"),
+			headerLink(pHome, "Back", "back"),
+			h.H1(g.Text("Archived")))
+	}
+	sidebar := h.Nav(h.ID("sidebar"), head, list)
 	return a.shell(w, r, title, "chat", appAttrs, sidebar,
 		h.Section(h.ID("pane"), pane)).Render(w)
 }
 
+// archivedLink is the last row of the main chat list. It is always
+// rendered, hidden when nothing is archived, so it never shifts the rows.
+func archivedLink(n int64) g.Node {
+	if n == 0 {
+		return h.A(h.ID("archived-link"), h.Class("archived-link"), h.Hidden(""))
+	}
+	return h.A(h.ID("archived-link"), h.Class("archived-link"), h.Href(pArchived),
+		g.Textf("Archived (%d)", n))
+}
+
 // paneHead is the header of a chat pane. The back link to home is only
-// shown on narrow screens, where the chat list is not visible.
+// shown on narrow screens, where the chat list is not visible. A chat the
+// viewer archived carries a label and an Unarchive button at the end.
 func paneHead(v chatView) g.Node {
 	return h.Header(h.ID("pane-head"), h.Class("pane-head"),
 		h.A(h.Class("back narrow-only"), h.Href(pHome), h.Aria("label", "Back"), icon("back")),
-		h.A(h.Class("pane-title"), h.Href(chatPath(v.Chat.ID)+"/info"), g.Text(v.Title)))
+		h.A(h.Class("pane-title"), h.Href(chatPath(v.Chat.ID)+"/info"), g.Text(v.Title)),
+		g.If(v.Archived, h.Form(h.ID("pane-archived"), h.Class("pane-archived"), h.Method("post"),
+			h.Action(chatPath(v.Chat.ID)+"/unarchive"),
+			h.Span(h.Class("badge"), g.Text("Archived")),
+			h.Button(h.Class("btn secondary"), g.Text("Unarchive")))))
+}
+
+func homePlaceholder() g.Node {
+	return h.Div(h.Class("placeholder"), h.P(g.Text("Select a group or a direct message")))
 }
 
 func (a *app) home(w http.ResponseWriter, r *http.Request) error {
-	return a.chatPage(w, r, userFrom(r.Context()), nil,
-		h.Div(h.Class("placeholder"), h.P(g.Text("Select a group or a direct message"))))
+	return a.chatPage(w, r, userFrom(r.Context()), nil, homePlaceholder())
+}
+
+// archived is home with the user's archived chats in the sidebar.
+func (a *app) archived(w http.ResponseWriter, r *http.Request) error {
+	return a.chatShell(w, r, userFrom(r.Context()), nil, true, homePlaceholder())
+}
+
+func (a *app) chatArchive(w http.ResponseWriter, r *http.Request) error {
+	return a.setArchived(w, r, true)
+}
+
+func (a *app) chatUnarchive(w http.ResponseWriter, r *http.Request) error {
+	return a.setArchived(w, r, false)
+}
+
+// setArchived sets the flag on the user's own members row. Only the user's
+// own tabs are told, because nobody else may see it.
+func (a *app) setArchived(w http.ResponseWriter, r *http.Request, archived bool) error {
+	v, err := a.chatMember(r)
+	if err != nil {
+		return err
+	}
+	err = a.q.MemberSetArchived(r.Context(), MemberSetArchivedParams{
+		Archived: archived,
+		ChatID:   v.Chat.ID,
+		UserID:   v.User.ID,
+	})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	a.hub.notifyUsers(v.User.ID)
+	to := chatPath(v.Chat.ID)
+	if archived {
+		to = pHome
+	}
+	http.Redirect(w, r, to, http.StatusSeeOther)
+	return nil
+}
+
+// archiveForm is the Archive or Unarchive button on the chat info page.
+func archiveForm(v chatView) g.Node {
+	if !v.Member {
+		return nil
+	}
+	action, label := "/archive", "Archive"
+	if v.Archived {
+		action, label = "/unarchive", "Unarchive"
+	}
+	return h.Form(h.ID("archive"), h.Method("post"), h.Action(chatPath(v.Chat.ID)+action),
+		h.Button(h.Class("btn secondary"), g.Text(label)))
 }
 
 // groups
@@ -709,6 +808,12 @@ func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body s
 		if err != nil {
 			return serr.Wrap(err)
 		}
+		// New activity is never hidden: everyone else who archived the chat
+		// gets it back. The author's own flag is left alone.
+		err = q.MembersUnarchive(ctx, MembersUnarchiveParams{ChatID: chat.ID, AuthorID: userID})
+		if err != nil {
+			return serr.Wrap(err)
+		}
 		err = q.ChatTouch(ctx, ChatTouchParams{ID: chat.ID, LastMessageAt: now})
 		if err != nil {
 			return serr.Wrap(err)
@@ -798,13 +903,15 @@ func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {
 	if v.Chat.IsDm {
 		return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("info"), h.Class("pane-body stack"),
 			pageHeader(v.Title, backLink(base, "Back")),
-			h.P(g.Text("Direct message with "+v.Title+"."))))
+			h.P(g.Text("Direct message with "+v.Title+".")),
+			archiveForm(v)))
 	}
 	return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("info"), h.Class("pane-body stack"),
 		pageHeader(v.Title, backLink(base, "Back")),
 		g.If(!v.Member, h.Form(h.ID("join"), h.Method("post"), h.Action(base+"/members/add"),
 			h.Input(h.Type("hidden"), h.Name("user"), h.Value(strconv.FormatInt(v.User.ID, 10))),
 			h.Button(h.Class("btn"), g.Text("Join")))),
+		archiveForm(v),
 		h.Section(h.Class("stack"),
 			h.H2(g.Text("Members")),
 			memberList),
