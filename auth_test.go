@@ -144,7 +144,7 @@ func TestInviteAccept(t *testing.T) {
 	// the returned cookie authenticates
 	home := ta.get(pHome, withCookies(w))
 	ensure.DeepEqual(t, home.Code, http.StatusOK)
-	ensure.StringContains(t, home.Body.String(), "bob")
+	ensure.StringContains(t, home.Body.String(), `id="sidebar"`)
 }
 
 func TestInviteSingleUse(t *testing.T) {

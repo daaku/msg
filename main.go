@@ -44,12 +44,14 @@ const (
 	pAdmin              = "/admin"
 	pAdminUser          = "/admin/u/"
 	pAssets             = "/assets/"
+	pChat               = "/c/"
 	pHome               = "/"
 	pInvite             = "/invite/"
 	pInvites            = "/invites"
 	pInvitesRevoke      = "/invites/revoke"
 	pLivereload         = "/livereload"
 	pLivereloadJS       = "/livereload.js"
+	pNew                = "/new"
 	pPasskeyCreate      = "/passkey/create"
 	pPasskeyDelete      = "/passkey/delete"
 	pPasskeyOptions     = "/passkey/options"
@@ -607,24 +609,6 @@ func (a *app) livereloadJS(w http.ResponseWriter, r *http.Request) error {
 	return serr.Wrap(err)
 }
 
-func (a *app) home(w http.ResponseWriter, r *http.Request) error {
-	user := userFrom(r.Context())
-	return a.page(w, r, "Home",
-		h.Section(h.Class("stack"),
-			h.Header(h.Class("home-header"),
-				h.H1(g.Text(a.cfg.AppName)),
-				h.Nav(h.Class("cluster"),
-					g.If(allowed(user, accAdmin),
-						h.A(h.Class("btn ghost"), h.Href(pAdmin), g.Text("Admin"))),
-					g.If(allowed(user, accInvite),
-						h.A(h.Class("btn ghost"), h.Href(pInvites), g.Text("Invites"))),
-					h.A(h.Class("btn ghost"), h.Href(pSettings), h.Title("Settings"),
-						icon("gear"), h.Span(h.Class("visually-hidden"), g.Text("Settings"))))),
-			h.P(g.Text("Signed in as "+user.Username+".")),
-			h.Form(h.Method("post"), h.Action(pSignOut),
-				h.Button(h.Class("btn secondary"), g.Text("Sign out"))))).Render(w)
-}
-
 // handler builds the complete HTTP handler.
 func (a *app) handler() http.Handler {
 	mux := http.NewServeMux()
@@ -638,6 +622,13 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
 	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
 	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
+	mux.HandleFunc("GET "+pNew, a.wrap(accGroup, a.newGroup))
+	mux.HandleFunc("POST "+pNew, a.wrap(accGroup, a.newGroupPost))
+	mux.HandleFunc("GET "+pChat+"{id}", a.wrap(accUser, a.chat))
+	mux.HandleFunc("GET "+pChat+"{id}/info", a.wrap(accUser, a.chatInfo))
+	mux.HandleFunc("POST "+pChat+"{id}/rename", a.wrap(accUser, a.chatRename))
+	mux.HandleFunc("POST "+pChat+"{id}/members/add", a.wrap(accUser, a.chatMembersAdd))
+	mux.HandleFunc("POST "+pChat+"{id}/members/remove", a.wrap(accUser, a.chatMembersRemove))
 	mux.HandleFunc("GET "+pAdmin, a.wrap(accAdmin, a.admin))
 	mux.HandleFunc("GET "+pAdminUser+"{id}", a.wrap(accAdmin, a.adminUser))
 	mux.HandleFunc("POST "+pAdminUser+"{id}/perms", a.wrap(accAdmin, a.adminUserPerms))

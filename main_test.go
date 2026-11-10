@@ -560,3 +560,17 @@ func (ta *testApp) signIn(auth *virtualwebauthn.Authenticator, cred virtualwebau
 	resp := virtualwebauthn.CreateAssertionResponse(testRP, *auth, cred, *ao)
 	return ta.post(pSignIn, url.Values{"json": {resp}}, withCookies(wo))
 }
+
+// chat harness
+
+// newChat creates a group made by creator with the given other members.
+func (ta *testApp) newChat(creator *testUser, name string, members ...*testUser) Chat {
+	ta.t.Helper()
+	ids := make([]int64, len(members))
+	for i, m := range members {
+		ids[i] = m.ID
+	}
+	chat, err := ta.app.createGroup(ta.t.Context(), creator.ID, name, ids)
+	ensure.Nil(ta.t, err)
+	return chat
+}

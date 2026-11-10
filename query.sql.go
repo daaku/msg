@@ -10,6 +10,72 @@ import (
 	"database/sql"
 )
 
+const chatByID = `-- name: ChatByID :one
+SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at FROM chats WHERE id = ?
+`
+
+func (q *Queries) ChatByID(ctx context.Context, id int64) (Chat, error) {
+	row := q.db.QueryRowContext(ctx, chatByID, id)
+	var i Chat
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IsDm,
+		&i.DmKey,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.LastMessageAt,
+	)
+	return i, err
+}
+
+const chatCreate = `-- name: ChatCreate :one
+INSERT INTO chats (name, created_by, created_at, last_message_at)
+VALUES (?1, ?2, ?3, ?4)
+RETURNING id, name, is_dm, dm_key, created_by, created_at, last_message_at
+`
+
+type ChatCreateParams struct {
+	Name          string
+	CreatedBy     int64
+	CreatedAt     int64
+	LastMessageAt int64
+}
+
+func (q *Queries) ChatCreate(ctx context.Context, arg ChatCreateParams) (Chat, error) {
+	row := q.db.QueryRowContext(ctx, chatCreate,
+		arg.Name,
+		arg.CreatedBy,
+		arg.CreatedAt,
+		arg.LastMessageAt,
+	)
+	var i Chat
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IsDm,
+		&i.DmKey,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.LastMessageAt,
+	)
+	return i, err
+}
+
+const chatRename = `-- name: ChatRename :exec
+UPDATE chats SET name = ?1 WHERE id = ?2
+`
+
+type ChatRenameParams struct {
+	Name string
+	ID   int64
+}
+
+func (q *Queries) ChatRename(ctx context.Context, arg ChatRenameParams) error {
+	_, err := q.db.ExecContext(ctx, chatRename, arg.Name, arg.ID)
+	return err
+}
+
 const chatStatsAdd = `-- name: ChatStatsAdd :exec
 INSERT INTO chat_stats (
   chat_id, images_uploaded, videos_uploaded, files_uploaded,
@@ -62,6 +128,44 @@ func (q *Queries) ChatStatsGet(ctx context.Context, chatID int64) (ChatStat, err
 		&i.BytesDownloaded,
 	)
 	return i, err
+}
+
+const chatsForUser = `-- name: ChatsForUser :many
+SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at FROM chats
+JOIN members ON members.chat_id = chats.id
+WHERE members.user_id = ?1
+ORDER BY chats.last_message_at DESC, chats.id DESC
+`
+
+func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]Chat, error) {
+	rows, err := q.db.QueryContext(ctx, chatsForUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Chat
+	for rows.Next() {
+		var i Chat
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.IsDm,
+			&i.DmKey,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.LastMessageAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const configGet = `-- name: ConfigGet :one
@@ -560,6 +664,127 @@ func (q *Queries) InvitesPendingForUser(ctx context.Context, arg InvitesPendingF
 	return items, nil
 }
 
+const memberAdd = `-- name: MemberAdd :exec
+INSERT INTO members (chat_id, user_id, added_by, created_at)
+SELECT ?1, users.id, ?2, ?3 FROM users WHERE users.id = ?4
+ON CONFLICT (chat_id, user_id) DO NOTHING
+`
+
+type MemberAddParams struct {
+	ChatID    int64
+	AddedBy   int64
+	CreatedAt int64
+	UserID    int64
+}
+
+func (q *Queries) MemberAdd(ctx context.Context, arg MemberAddParams) error {
+	_, err := q.db.ExecContext(ctx, memberAdd,
+		arg.ChatID,
+		arg.AddedBy,
+		arg.CreatedAt,
+		arg.UserID,
+	)
+	return err
+}
+
+const memberGet = `-- name: MemberGet :one
+SELECT chat_id, user_id, added_by, archived, created_at FROM members WHERE chat_id = ?1 AND user_id = ?2
+`
+
+type MemberGetParams struct {
+	ChatID int64
+	UserID int64
+}
+
+func (q *Queries) MemberGet(ctx context.Context, arg MemberGetParams) (Member, error) {
+	row := q.db.QueryRowContext(ctx, memberGet, arg.ChatID, arg.UserID)
+	var i Member
+	err := row.Scan(
+		&i.ChatID,
+		&i.UserID,
+		&i.AddedBy,
+		&i.Archived,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const memberIDs = `-- name: MemberIDs :many
+SELECT user_id FROM members WHERE chat_id = ? ORDER BY user_id
+`
+
+func (q *Queries) MemberIDs(ctx context.Context, chatID int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, memberIDs, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []int64
+	for rows.Next() {
+		var user_id int64
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const memberRemove = `-- name: MemberRemove :exec
+DELETE FROM members WHERE chat_id = ?1 AND user_id = ?2
+`
+
+type MemberRemoveParams struct {
+	ChatID int64
+	UserID int64
+}
+
+func (q *Queries) MemberRemove(ctx context.Context, arg MemberRemoveParams) error {
+	_, err := q.db.ExecContext(ctx, memberRemove, arg.ChatID, arg.UserID)
+	return err
+}
+
+const membersOfChat = `-- name: MembersOfChat :many
+SELECT members.user_id, users.username FROM members
+JOIN users ON users.id = members.user_id
+WHERE members.chat_id = ?
+ORDER BY users.username
+`
+
+type MembersOfChatRow struct {
+	UserID   int64
+	Username string
+}
+
+func (q *Queries) MembersOfChat(ctx context.Context, chatID int64) ([]MembersOfChatRow, error) {
+	rows, err := q.db.QueryContext(ctx, membersOfChat, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MembersOfChatRow
+	for rows.Next() {
+		var i MembersOfChatRow
+		if err := rows.Scan(&i.UserID, &i.Username); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const userByHandle = `-- name: UserByHandle :one
 SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at FROM users WHERE handle = ?
 `
@@ -820,6 +1045,72 @@ func (q *Queries) UsersAll(ctx context.Context) ([]UsersAllRow, error) {
 			&i.Inviter,
 			&i.Passkeys,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const usersAllBasic = `-- name: UsersAllBasic :many
+SELECT id, username FROM users ORDER BY username
+`
+
+type UsersAllBasicRow struct {
+	ID       int64
+	Username string
+}
+
+func (q *Queries) UsersAllBasic(ctx context.Context) ([]UsersAllBasicRow, error) {
+	rows, err := q.db.QueryContext(ctx, usersAllBasic)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UsersAllBasicRow
+	for rows.Next() {
+		var i UsersAllBasicRow
+		if err := rows.Scan(&i.ID, &i.Username); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const usersNotInChat = `-- name: UsersNotInChat :many
+SELECT id, username FROM users
+WHERE id NOT IN (SELECT user_id FROM members WHERE chat_id = ?)
+ORDER BY username
+`
+
+type UsersNotInChatRow struct {
+	ID       int64
+	Username string
+}
+
+func (q *Queries) UsersNotInChat(ctx context.Context, chatID int64) ([]UsersNotInChatRow, error) {
+	rows, err := q.db.QueryContext(ctx, usersNotInChat, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UsersNotInChatRow
+	for rows.Next() {
+		var i UsersNotInChatRow
+		if err := rows.Scan(&i.ID, &i.Username); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

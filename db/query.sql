@@ -144,3 +144,48 @@ WHERE id = @id;
 
 -- name: CredentialDeleteByAdmin :execrows
 DELETE FROM credentials WHERE id = @id AND user_id = @user_id AND user_id != @admin_id;
+
+-- name: ChatCreate :one
+INSERT INTO chats (name, created_by, created_at, last_message_at)
+VALUES (@name, @created_by, @created_at, @last_message_at)
+RETURNING *;
+
+-- name: ChatByID :one
+SELECT * FROM chats WHERE id = ?;
+
+-- name: ChatsForUser :many
+SELECT chats.* FROM chats
+JOIN members ON members.chat_id = chats.id
+WHERE members.user_id = @user_id
+ORDER BY chats.last_message_at DESC, chats.id DESC;
+
+-- name: ChatRename :exec
+UPDATE chats SET name = @name WHERE id = @id;
+
+-- name: MemberAdd :exec
+INSERT INTO members (chat_id, user_id, added_by, created_at)
+SELECT @chat_id, users.id, @added_by, @created_at FROM users WHERE users.id = @user_id
+ON CONFLICT (chat_id, user_id) DO NOTHING;
+
+-- name: MemberRemove :exec
+DELETE FROM members WHERE chat_id = @chat_id AND user_id = @user_id;
+
+-- name: MemberGet :one
+SELECT * FROM members WHERE chat_id = @chat_id AND user_id = @user_id;
+
+-- name: MembersOfChat :many
+SELECT members.user_id, users.username FROM members
+JOIN users ON users.id = members.user_id
+WHERE members.chat_id = ?
+ORDER BY users.username;
+
+-- name: MemberIDs :many
+SELECT user_id FROM members WHERE chat_id = ? ORDER BY user_id;
+
+-- name: UsersNotInChat :many
+SELECT id, username FROM users
+WHERE id NOT IN (SELECT user_id FROM members WHERE chat_id = ?)
+ORDER BY username;
+
+-- name: UsersAllBasic :many
+SELECT id, username FROM users ORDER BY username;
