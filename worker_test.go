@@ -466,10 +466,3 @@ func TestKindMismatchFails(t *testing.T) {
 	ta.runMedia()
 	ensure.DeepEqual(t, ta.file(id).Status, statusFailed)
 }
-
-func TestVideoNotConvertedYet(t *testing.T) {
-	ta, alice, chat := mediaSetup(t)
-	id := ta.upload(alice, chat, "clip.mp4", tinyMP4)
-	ta.runMedia()
-	ensure.DeepEqual(t, ta.file(id).Status, statusFailed)
-}

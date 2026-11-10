@@ -452,9 +452,13 @@ func fileNode(f File) g.Node {
 			h.Img(h.ID(fmt.Sprintf("f%d", f.ID)), h.Src(src),
 				h.Width(strconv.FormatInt(f.Width, 10)), h.Height(strconv.FormatInt(f.Height, 10)),
 				h.Alt(f.Name), h.Loading("lazy"), g.Attr("decoding", "async")))
-	case converts && f.Status == statusReady:
-		// Task 018 renders the converted video here.
-		return fileDownload(f)
+	case f.Kind == kindVideo && f.Status == statusReady:
+		// preload none: nothing is downloaded until it is played
+		return h.Video(h.ID(fmt.Sprintf("f%d", f.ID)), h.Class("media"),
+			h.Controls(), h.PlaysInline(), h.Preload("none"),
+			h.Poster(filePath(f.ID, "p")),
+			h.Width(strconv.FormatInt(f.Width, 10)), h.Height(strconv.FormatInt(f.Height, 10)),
+			h.Src(filePath(f.ID, "c")))
 	}
 	return fileDownload(f)
 }
@@ -667,9 +671,88 @@ func (a *app) convertImage(ctx context.Context, dir, inFormat string) (mediaResu
 	}, nil
 }
 
+// videoInputs are the only demuxers ffmpeg is ever told to use. ffmpeg never
+// chooses one itself: playlist formats (HLS, concat) can make it read local
+// files or fetch URLs, and forcing the demuxer keeps them out of reach.
+var videoInputs = map[string]bool{"mov": true, "matroska": true, "avi": true}
+
+const ffmpegTimeout = 60 * time.Minute
+
+// videoArgs is the ffmpeg command line that converts dir/in to out.mp4.
+func (a *app) videoArgs(inFormat string) []string {
+	n := a.cfg.VideoResolution
+	// Cap the long edge, keep the aspect ratio, never upscale, and keep
+	// both dimensions even. Rotation is applied before this filter.
+	scale := fmt.Sprintf(
+		"scale='if(gt(iw,ih),trunc(min(%d,iw)/2)*2,-2)':'if(gt(iw,ih),-2,trunc(min(%d,ih)/2)*2)'", n, n)
+	args := []string{
+		"-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", inFormat, "-i", "in",
+		"-map", "0:v:0", "-map", "0:a:0?", // audio is optional
+		"-vf", scale,
+	}
+	if a.cfg.VideoFormat == "av1" {
+		args = append(args, "-c:v", "libsvtav1", "-preset", "8", "-crf", "35", "-pix_fmt", "yuv420p10le")
+	} else {
+		args = append(args, "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-pix_fmt", "yuv420p")
+	}
+	return append(args,
+		"-c:a", "aac", "-b:a", "128k", "-ac", "2",
+		"-map_metadata", "-1", // drops container metadata such as the GPS location
+		"-movflags", "+faststart", // playback can start before the download ends
+		"-f", "mp4", "out.mp4")
+}
+
 func (a *app) convertVideo(ctx context.Context, dir, inFormat string) (mediaResult, error) {
-	// Task 018 implements this.
-	return mediaResult{}, permanent("video conversion is not available")
+	if !videoInputs[inFormat] {
+		return mediaResult{}, permanent("unsupported video format %q", inFormat)
+	}
+	if _, err := a.exec(ctx, dir, ffmpegTimeout, "ffmpeg", a.videoArgs(inFormat)...); err != nil {
+		return mediaResult{}, err
+	}
+
+	// Probe our own output, not the user's file.
+	out, err := a.exec(ctx, dir, time.Minute, "ffprobe", "-v", "error", "-f", "mov",
+		"-select_streams", "v:0", "-show_entries", "stream=width,height:format=duration",
+		"-of", "json", "out.mp4")
+	if err != nil {
+		return mediaResult{}, err
+	}
+	var probe struct {
+		Streams []struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		} `json:"streams"`
+		Format struct {
+			Duration string `json:"duration"`
+		} `json:"format"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil || len(probe.Streams) != 1 ||
+		probe.Streams[0].Width < 1 || probe.Streams[0].Height < 1 {
+		return mediaResult{}, permanent("unreadable video details %q", out)
+	}
+	seconds, _ := strconv.ParseFloat(probe.Format.Duration, 64)
+	duration := max(int(seconds+0.5), 1)
+
+	// The poster is a frame of the converted video, in the image format.
+	_, err = a.exec(ctx, dir, time.Minute, "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+		"-y", "-f", "mov", "-i", "out.mp4", "-frames:v", "1", "-c:v", "png", "-f", "image2", "poster.png")
+	if err != nil {
+		return mediaResult{}, err
+	}
+	_, _, err = a.magickConvert(ctx, dir, "png", "poster.png", "poster", a.cfg.ImageResolution, true)
+	if err != nil {
+		return mediaResult{}, err
+	}
+	return mediaResult{
+		outputs: []mediaOutput{
+			{"converted", filepath.Join(dir, "out.mp4"), "video/mp4"},
+			{"poster", filepath.Join(dir, "poster"), imageTypes[a.cfg.ImageFormat]},
+		},
+		width:    probe.Streams[0].Width,
+		height:   probe.Streams[0].Height,
+		duration: duration,
+	}, nil
 }
 
 func (a *app) tmpDir() string { return filepath.Join(a.cfg.StateDir, "tmp") }
