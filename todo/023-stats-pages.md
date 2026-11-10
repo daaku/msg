@@ -1,4 +1,4 @@
-# 019 Stats pages
+# 023 Stats pages
 
 The counters have been collected since task 002. This task shows them, and
 audits that every counter is wired. Code goes in `stats.go`.
@@ -7,9 +7,10 @@ audits that every counter is wired. Code goes in `stats.go`.
 
 | Stats | Visible to | Where |
 | --- | --- | --- |
-| A user's | that user | a "Your stats" section on `/account` |
+| A user's | that user | a "Stats" section (`id="stats"`) on `/settings` |
 | A user's | admins | `/admin` table columns and `/admin/u/{id}` |
 | A group's | its members and admins | a "Stats" section on `/c/{id}/info` |
+| A direct message's | its two participants only | the same section on its info page |
 | All groups | admins | `GET /admin/groups` |
 
 Nobody else can see them. A member cannot see another user's stats.
@@ -38,7 +39,7 @@ note: "Estimated from media links opened".
 table, and a link to `/admin/groups`. Load with one query that left joins
 `user_stats`.
 
-`GET /admin/groups` (`accAdmin`): every group with member count, created
+`GET /admin/groups` (`accAdmin`): every group (never direct messages) with member count, created
 date, creator and its five stats, each linking to `/c/{id}/info`. One query.
 Back link to `/admin`.
 
@@ -66,9 +67,11 @@ Fix anything the test finds, in the file that owns the behaviour.
 ## Tests
 
 - `TestStatsWiring` as above.
-- Visibility: `/account` shows the viewer's own numbers; `/admin/u/{id}` is
+- Visibility: `/settings` shows the viewer's own numbers; `/admin/u/{id}` is
   admin only; group info shows stats to a member and to an admin, and is 404
   for others; `/admin/groups` is admin only.
+- Direct messages: stats show to both participants, the info page is 404
+  for an admin, and they are not listed on `/admin/groups`.
 - A user or group with no stats row renders zeros.
 - `fmtBytes` table: 0, 999, 1000, 1536, 1048576, 5 GiB.
 

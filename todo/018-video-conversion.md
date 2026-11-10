@@ -1,10 +1,10 @@
-# 015 Video conversion
+# 018 Video conversion
 
 Use fable.
 
 Implement `a.convertVideo` in `media.go` using ffmpeg, produce a poster
 image, and show videos in the chat. The worker, the exec helper and the
-failure policy exist from task 014.
+failure policy exist from task 017.
 
 ## Input safety
 
@@ -38,7 +38,7 @@ scale='if(gt(iw,ih),min(N,iw),-2)':'if(gt(iw,ih),-2,min(N,ih))'
 ffmpeg applies rotation metadata before the filter, so portrait phone video
 comes out upright.
 
-`VIDEO_FORMAT=av1`:
+`VIDEO_FORMAT=h264` is the default and is described below. `VIDEO_FORMAT=av1`:
 
 ```
 ffmpeg -nostdin -hide_banner -loglevel error -y
@@ -128,7 +128,7 @@ ffmpeg -nostdin -loglevel error -y -f lavfi -i testsrc2=size=1080x2400:rate=30:d
   stream, row `ready`.
 - A 640x360 input is not upscaled.
 - An HLS playlist saved as `evil.mp4` that references `/etc/passwd`: sniffed
-  as `other` by task 012, and when forced through `convertVideo` with
+  as `other` by task 015, and when forced through `convertVideo` with
   `inFormat = "mov"` it fails as a permanent error.
 - `inFormat` outside the allow list is rejected without running anything
   (assert no process was started, for example by pointing `PATH` at an empty
@@ -143,7 +143,6 @@ ffmpeg -nostdin -loglevel error -y -f lavfi -i testsrc2=size=1080x2400:rate=30:d
 
 - In a browser, a phone video uploads, shows "Processing…", then plays in
   both members' views, upright, and keeps playing while new messages arrive.
-- Report which browsers you played the AV1 output in. Note for the user:
-  iPhones older than the 15 Pro cannot decode AV1, which is why
-  `VIDEO_FORMAT=h264` exists.
+- Report which browsers you played the output in, for both formats. H.264
+  is the default because iPhones older than the 15 Pro cannot decode AV1.
 - `./.hooks/pre-push` passes.

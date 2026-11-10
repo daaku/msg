@@ -41,16 +41,23 @@ read all of it before starting any task.
 - No data encryption at rest and no end to end encryption.
 - Prefer few, large files. Do not create new Go packages. Do not split a file
   because it is long.
-- Not in scope, do not build: direct messages, message edit or delete, replies
-  or threads, mentions, markdown or rich text, search, avatars or display
-  names, unread counters, per group mute, user deletion, rate limiting, audio
-  messages, paste or drag and drop upload.
+- Not in scope, do not build: replies or threads, mentions, markdown or rich
+  text, search, avatars or display names, unread counters, mute, edit or
+  delete history, user deletion, rate limiting, audio messages, paste or drag
+  and drop upload.
+- Everything personal to a user (passkeys, add passkey links, notifications,
+  stats, sign out) lives on the single `/settings` page. Do not add another
+  personal page.
 
 ## Terminology
 
-The UI says "group". The code and schema say `chat` (`chats`, `chat_id`,
-`/c/{id}`), because `GROUPS` is an SQL keyword. They are the same thing.
-There are only groups. A two person group is how two people talk privately.
+A `chat` (`chats`, `chat_id`, `/c/{id}`) is a conversation. It is either a
+group (named, any number of members, created by someone with the group
+permission) or a direct message (`is_dm`, exactly two members, no name,
+anyone can start one). The UI says "group" and "direct message"; the code
+says `chat` for both, and all features work on both unless stated. The one
+difference in access: admins can view and manage every group, but a direct
+message is visible only to its two participants.
 
 ## Stack
 
@@ -82,11 +89,12 @@ Everything is `package main` in the repository root.
 ```
 main.go        config, app struct, routing, middleware, helpers, run()
 ui.go          page shell, shared components, icons, formatting helpers
-auth.go        sessions, passkeys, invites, bootstrap, account page, admin user pages
-chat.go        groups, members, messages, reactions, SSE hub, events
+auth.go        sessions, passkeys, invites, bootstrap, settings page, admin user pages
+chat.go        groups, direct messages, members, archiving, messages, edit and
+               delete, reactions, SSE hub, events
 s3.go          SigV4 presigning S3 client and the built in fake S3 used in dev and tests
 media.go       upload endpoints, /f/ redirects, conversion worker, link previews
-push.go        push subscriptions, sending, opened tracking
+push.go        push subscriptions, sending, opened tracking, snooze reminders
 stats.go       stats helpers and stats pages
 *_test.go      one test file per source file, plus main_test.go for the harness
 db/NNN_*.sql   migrations (sqlmig)
@@ -130,11 +138,11 @@ All configuration is environment variables, loaded from `.env` in development
 | `S3_BUCKET` | required unless fake | |
 | `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | required unless fake | |
 | `S3_PATH_STYLE` | `true` | `false` selects virtual hosted style URLs |
-| `S3_URL_VALIDITY` | `30d` | Signed URL validity |
+| `S3_URL_VALIDITY` | `7d` | Signed URL validity. 7 days is the most AWS S3, R2 and MinIO accept |
 | `MAX_UPLOAD_SIZE` | `100MB` | Largest accepted upload (1MB is 1048576 bytes) |
 | `IMAGE_FORMAT` | `webp` | `webp`, `avif` or `jpeg` |
 | `IMAGE_RESOLUTION` | `4k` | Long edge cap. See table below |
-| `VIDEO_FORMAT` | `av1` | `av1` or `h264`, always in an MP4 container with AAC audio |
+| `VIDEO_FORMAT` | `h264` | `h264` or `av1`, always in an MP4 container with AAC audio |
 | `VIDEO_RESOLUTION` | `1080p` | Long edge cap |
 | `ADDR`, `PORT`, `LISTEN_FDS`, `TLS_CERT_FILE`, `TLS_KEY_FILE` | | Handled by `lands` |
 
@@ -198,8 +206,14 @@ generated on first start and stored in the `config` table.
   helpers in `auth.go`, never by reading the columns in a handler.
 - Group access goes through `a.chatAccess(ctx, user, chatID)`, which returns
   the chat, whether the user is a member, and whether they may manage it.
-  View: member or admin. Post, react, upload: member only. Manage (rename, add
-  and remove members): admin, or the creator while they hold `perm_group`.
+  Groups: view is member or admin; post, react, upload, archive, snooze are
+  member only; manage (rename, add and remove members) is admin, or the
+  creator while they hold `perm_group`. Direct messages: the two members
+  only, for everything, and nothing to manage.
+- A message is edited by its author only. It is deleted by its author, or by
+  an admin who can view the chat.
+- Archive state (`members.archived`) and snoozes are private to the user.
+  Never render them for, or reveal them to, anyone else.
 
 ### Live updates and the morph contract
 
@@ -243,6 +257,14 @@ generated on first start and stored in the `config` table.
 - `a.afterMessage(ctx, chat, msg)` in `chat.go` runs after a message row is
   committed. It is the only place that fans out side effects of a new message
   (live ping, link preview, push). Add to it, do not call those from handlers.
+- `a.afterEdit(ctx, chat, msg)` is the same for an edited message (live ping,
+  link preview refresh).
+- `a.deleteMessage(ctx, chat, msg)` is the only place a message is removed.
+  It also removes the attached file, the preview image and their S3 objects.
+  Deletes are hard deletes; nothing is kept.
+- `a.messageMenu(...)` builds the per message popover (`m{id}-menu`). New
+  per message actions are added there, not as new controls on the bubble.
+- `a.pushTo(userID, payload)` is the only way a push is sent.
 - `a.bg` is a `sync.WaitGroup` and `a.ctx` is cancelled on shutdown. Every
   background goroutine must be started with `a.bg.Go` and must return when
   `a.ctx` is done. Long lived handlers (SSE) must also watch `a.ctx`.
@@ -278,6 +300,8 @@ caching and has no `fetch` handler.
 - Mobile first. One breakpoint at 48rem switches the two pane layout on.
 - Every `<img>` in a chat has `loading="lazy"`, `decoding="async"`, `width`
   and `height`.
+- A chat's name is always rendered through `a.chatTitle`, which gives the
+  other person's username for a direct message.
 - Every page other than home has a visible back link, because an installed iOS
   app has no browser back button.
 - Use real controls: `<button>` inside `<form>`, `<a>` for navigation, the

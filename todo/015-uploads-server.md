@@ -1,11 +1,11 @@
-# 012 Upload endpoints and file redirects
+# 015 Upload endpoints and file redirects
 
 Use fable.
 
 Server side of file sharing in `media.go`: start a multipart upload, verify
 and finish it, turn it into a message, and serve files by redirecting to
-signed S3 URLs while counting download bytes. The browser side is task 013
-and conversion is tasks 014 and 015. This task is a trust boundary: the
+signed S3 URLs while counting download bytes. The browser side is task 016
+and conversion is tasks 017 and 018. This task is a trust boundary: the
 client's claims about size and type are never believed.
 
 ## Constants
@@ -19,7 +19,7 @@ client's claims about size and type are never believed.
 
 All three are `accUser`, take a form encoded or JSON body (pick one, JSON is
 suggested) and answer JSON. Errors are JSON `{"error": "..."}` with a 4xx
-status. They are called by `fetch` from task 013.
+status. They are called by `fetch` from task 016.
 
 **`POST /upload/init`** `{chat, name, size}`
 
@@ -57,7 +57,7 @@ status. They are called by `fetch` from task 013.
 6. `a.createMessage(ctx, chat, userID, "", fileID)`, which bumps
    `messages_sent` and runs `afterMessage`.
 7. Wake the media worker: `a.wakeMedia()`. Define it now as a non blocking
-   send on a buffered channel `a.mediaWake`; task 014 adds the receiver.
+   send on a buffered channel `a.mediaWake`; task 017 adds the receiver.
 8. Answer `{ok: true}`.
 
 The user must still be a member at complete time; check `a.chatMember` again
@@ -116,9 +116,20 @@ task:
 - `kind` image or video with status `pending` or `processing`: a placeholder
   box with the name and the text "Processing…".
 - `ready` image or video: leave a clearly marked stub that renders the same
-  download row; tasks 014 and 015 replace it.
+  download row; tasks 017 and 018 replace it.
 
 The sidebar snippet for a file message is "username: 📎 name".
+
+## Deleting a message that has a file
+
+Extend `a.deleteMessage` from task 010: after the message row is deleted,
+delete the `files` row, then delete the S3 objects `<prefix>/original`,
+`<prefix>/converted` and `<prefix>/poster` (`del` treats a missing object as
+success; add that if it does not). S3 errors are logged and do not fail the
+request: the database is the source of truth and an orphaned object is
+harmless. Upload counters are not reduced.
+
+A message with a file has no Edit entry in its menu.
 
 ## Cleanup
 
@@ -162,6 +173,9 @@ fake, and calls complete. Later tasks reuse it.
   `Location`.
 - The object's stored metadata is `application/octet-stream` with an
   attachment disposition carrying the name.
+- Deleting a file message removes the message row, the file row and the
+  original object; `/f/{id}/o` is then 404; counters are unchanged; an S3
+  failure during delete still removes the rows.
 - Janitor: a 25 hour old `uploading` row is aborted and deleted, a fresh one
   is kept.
 

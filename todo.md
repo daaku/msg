@@ -7,6 +7,12 @@
 - User with admin permission can do everything
 - User with invite permission can send invites and allow creation of new users
 - User with group create permission can create groups and add existing users to them
+- Any user can start a direct message with any other user
+- The chat list shows direct messages and groups together
+- Chats can be archived (per user)
+- Messages can be edited and deleted by their author (no history of edits or deletes is kept)
+- Individual messages can be snoozed: a user picks a time and gets a reminder push notification for themselves only, other users are not affected
+- Passkey management, notifications, stats etc all live on a single settings page for the user
 - Invites require specifying a unique Username
 - Invites are single use sign up URLs which register a passkey
 - Multiple passkeys for any username can exist
@@ -58,6 +64,6 @@
 - Max File Upload Size (100MB)
 - Default Image Format (webp)
 - Default Image Resolution (4k)
-- Default Video Format (av1)
+- Default Video Format (h264)
 - Default Video Resolution (1080p)
-- Default S3 Signed URL Validity (30d)
+- Default S3 Signed URL Validity (7d)

@@ -134,6 +134,8 @@ CREATE UNIQUE INDEX invites_new_username ON invites (username) WHERE user_id IS 
 CREATE TABLE chats (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL,
+  is_dm BOOLEAN NOT NULL DEFAULT FALSE,
+  dm_key TEXT UNIQUE,
   created_by INTEGER NOT NULL REFERENCES users (id),
   created_at INTEGER NOT NULL,
   last_message_at INTEGER NOT NULL
@@ -143,6 +145,7 @@ CREATE TABLE members (
   chat_id INTEGER NOT NULL REFERENCES chats (id) ON DELETE CASCADE,
   user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
   added_by INTEGER NOT NULL REFERENCES users (id),
+  archived BOOLEAN NOT NULL DEFAULT FALSE,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (chat_id, user_id)
 );
@@ -178,7 +181,8 @@ CREATE TABLE messages (
   user_id INTEGER NOT NULL REFERENCES users (id),
   body TEXT NOT NULL DEFAULT '',
   file_id INTEGER REFERENCES files (id),
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  edited_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX messages_chat_id ON messages (chat_id, id);
@@ -203,6 +207,16 @@ CREATE TABLE reactions (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (message_id, user_id, emoji)
 );
+
+CREATE TABLE snoozes (
+  message_id INTEGER NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  due_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (message_id, user_id)
+);
+
+CREATE INDEX snoozes_due_at ON snoozes (due_at);
 
 CREATE TABLE push_subscriptions (
   id INTEGER PRIMARY KEY,
@@ -249,3 +263,11 @@ Column notes:
 - `files.size`: bytes of the original. `conv_*` and `poster_*` describe the
   converted object and the video poster. `duration` is seconds.
 - `messages.file_id`: the attachment, `NULL` for a text message.
+  `messages.edited_at`: 0 until the message is edited.
+- `chats.is_dm`: a direct message between exactly two users. `chats.dm_key`
+  is `"<lower user id>:<higher user id>"` for a direct message and `NULL` for
+  a group; the unique index guarantees one direct message per pair. `name` is
+  empty for a direct message.
+- `members.archived`: this member has archived the chat. Per member, not
+  shared.
+- `snoozes`: one pending reminder per user per message.

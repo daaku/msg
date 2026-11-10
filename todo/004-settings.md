@@ -1,14 +1,17 @@
-# 004 Account page and managing your own passkeys
+# 004 Settings page and managing your own passkeys
 
-Give a signed in user a page to see their account, add another passkey on the
+Create the single settings page that holds everything personal to a user.
+This task builds the page and its passkey sections; notifications (020) and
+stats (023) are added to the same page later. There must never be a second
+personal page. Here the user can see who they are, add another passkey on the
 current device, create a link to add a passkey on another device, and delete
 passkeys. All code goes in `auth.go`.
 
 ## Behaviour
 
-`GET /account` (`accUser`) renders, top to bottom:
+`GET /settings` (`accUser`) renders, top to bottom:
 
-1. Header with a back link to `/` and the title "Account".
+1. Header with a back link to `/` and the title "Settings".
 2. The username (read only) and the permissions the user holds, as words.
 3. **Passkeys.** One row per credential: label, created date, last used date,
    and a "Delete" button (a form posting to `/passkey/delete` with the row
@@ -19,13 +22,15 @@ passkeys. All code goes in `auth.go`.
    invite page, options from `GET /passkey/options`, posting to
    `POST /passkey/create`.
 5. **Add a passkey on another device.** A button posting to
-   `POST /account/link`. Pending links for this user are listed below it, each
+   `POST /settings/link`. Pending links for this user are listed below it, each
    with a read only text field holding the full URL (`data-copy`), the expiry,
-   and a "Revoke" button posting to `POST /account/link/revoke`.
+   and a "Revoke" button posting to `POST /settings/link/revoke`.
 6. A "Sign out" button.
 
-Later tasks add push and stats sections to this page. Build the page as a
-list of section functions so they can be appended.
+Later tasks add notification and stats sections to this page. Build the page
+as an ordered list of section functions, each rendering a `<section>` with an
+`id` (`passkeys`, `devices`, later `notifications` and `stats`), so they can
+be appended and linked to.
 
 Endpoints, all `accUser`:
 
@@ -33,25 +38,25 @@ Endpoints, all `accUser`:
   existing credentials excluded, resident key required. Session data in the
   `r` cookie from task 003.
 - `POST /passkey/create`: verify, insert the credential, flash, redirect to
-  `/account`.
+  `/settings`.
 - `POST /passkey/delete`: delete where `id = ? AND user_id = current`. Refuse
   with a flash when it is the user's last passkey (count inside the same
   transaction as the delete). Deleting the credential of the current session
   signs this browser out, which is correct.
-- `POST /account/link`: `a.createInvite` with `user_id` = self, the user's own
+- `POST /settings/link`: `a.createInvite` with `user_id` = self, the user's own
   username and handle, ttl 24 hours. At most 5 pending links per user; beyond
   that flash an error.
-- `POST /account/link/revoke`: delete the invite where `id = ?` and
+- `POST /settings/link/revoke`: delete the invite where `id = ?` and
   `user_id = current`.
 
 JavaScript: add the `data-copy` block (item 9 in the inventory): on focus or
 click, select the whole field. Nothing else.
 
-Add a link to `/account` (gear icon) in the home page header.
+Add a link to `/settings` (gear icon) in the home page header.
 
 ## Tests
 
-- Account page lists the user's passkeys and none of another user's.
+- Settings page lists the user's passkeys and none of another user's.
 - Add passkey through options and create with `virtualwebauthn`; the new
   passkey can sign in.
 - Delete: own passkey works; another user's id is a no op; the last passkey is

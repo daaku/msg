@@ -8,7 +8,7 @@ user who lost their passkeys. Code goes in `auth.go`.
 `GET /admin` (`accAdmin`): back link to `/`, title "Admin". A table (a stacked
 list on narrow screens) of all users ordered by username: username, permission
 badges, created date, invited by, number of passkeys. Each row links to
-`/admin/u/{id}`. Task 019 adds stats columns and a link to the groups list.
+`/admin/u/{id}`. Task 023 adds stats columns and a link to the groups list.
 
 `GET /admin/u/{id}` (`accAdmin`): back link to `/admin`, title is the
 username. Sections:
@@ -27,7 +27,7 @@ username. Sections:
 Rules:
 
 - An admin cannot remove their own `admin` permission and cannot delete their
-  own passkeys from this page (they use `/account`). This guarantees there is
+  own passkeys from this page (they use `/settings`). This guarantees there is
   always at least one admin. Enforce on the server and do not render the
   controls.
 - Changing permissions takes effect on the user's next request, because the

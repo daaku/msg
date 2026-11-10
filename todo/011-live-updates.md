@@ -1,4 +1,4 @@
-# 009 Live updates: SSE ping, full page fetch, paxi morph
+# 011 Live updates: SSE ping, full page fetch, paxi morph
 
 Use fable.
 
@@ -28,7 +28,7 @@ func (h *hub) viewing(userID, chatID int64) bool
 
 A send to a full channel is dropped: a ping is already pending, and one
 refresh shows everything. `cancel` removes the conn and deletes empty maps.
-`viewing` is used by task 017 to skip push for people looking at the group.
+`viewing` is used by task 020 to skip push for people looking at the group.
 
 **`a.notifyChat(ctx, chatID)`**: load `MemberIDs`, `notifyUsers` them, and
 `notifyViewers(chatID)` (covers an admin watching a group they are not a
@@ -106,7 +106,7 @@ Keep the coalescing: never run two refreshes at once, and never drop a
 request that arrived while one was running.
 
 **EventSource.** Only on pages whose `#app` has `data-live` (add that
-attribute in `a.chatPage`, so home and group pages have it and account or
+attribute in `a.chatPage`, so home and chat pages have it and settings or
 admin pages do not):
 
 - Connect to `/events`, with `?chat=<id>` when `#app` has `data-chat`.
@@ -115,7 +115,7 @@ admin pages do not):
   catches up after a reconnect.
 - `visibilitychange`: when hidden, close the EventSource; when visible,
   `refresh()` and connect again. Mobile browsers freeze hidden tabs, and task
-  017 relies on "has an open stream for this group" meaning "is looking at
+  020 relies on "has an open stream for this group" meaning "is looking at
   it".
 - `pagehide`: close it.
 

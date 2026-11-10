@@ -1,4 +1,4 @@
-# 018 Installable on the iOS home screen
+# 022 Installable on the iOS home screen
 
 Make the app installable as a standalone web app on iOS (and Android and
 desktop as a side effect): manifest, icons, meta tags and safe area handling.
@@ -71,7 +71,7 @@ No new JavaScript and no offline support.
    - Inputs must have a font size of at least 16px, otherwise iOS zooms the
      page on focus.
 
-6. **Install hint.** On `/account`, in the notifications section, a short
+6. **Install hint.** On `/settings`, in the notifications section, a short
    paragraph: "On iPhone and iPad: tap Share, then Add to Home Screen, and
    open the app from there to enable notifications." Hide it with
    `@media (display-mode: standalone)`.

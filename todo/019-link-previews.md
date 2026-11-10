@@ -1,4 +1,4 @@
-# 016 Link previews
+# 019 Link previews
 
 Use fable.
 
@@ -22,6 +22,18 @@ forgery risk. The HTTP client described below is the core of this task.
 4. After `ready` (not after `failed`), `a.notifyChat`.
 
 A preview with neither title nor image is `failed`.
+
+**Edits.** In `a.afterEdit` (task 010): compare `firstURL` of the new body
+with the existing preview's `url`. Same: do nothing. Different or gone:
+delete the old preview (and its image, as below), and if there is a new URL
+insert a fresh `pending` row and wake the worker.
+
+**Deletes.** In `a.deleteMessage`: the `previews` row goes with the message
+by cascade, but its image is a `files` row and S3 object. Read
+`previews.file_id` before deleting the message, then delete that file row and
+its `converted` object, the same way attached files are removed. If the
+worker finishes a preview for a message that no longer exists, the insert or
+update fails or changes no row: remove the image it just stored.
 
 ## The safe HTTP client
 
@@ -75,7 +87,7 @@ have an empty host, or are longer than 2000 bytes.
   body is dropped (the preview is still shown without an image).
 - `sniffMedia` on the bytes. Only `jpeg`, `png`, `gif`, `webp` are accepted
   here. Never trust the response content type.
-- Write to a temp directory and convert with `a.magickConvert` from task 014
+- Write to a temp directory and convert with `a.magickConvert` from task 017
   with a long edge of 1200, taking only the first frame (the `[0]` suffix on
   the input). If `magickConvert` has no way to ask for the first frame yet,
   add a parameter for it.
@@ -139,6 +151,10 @@ for loopback unless the test is about blocking)
   escaped title text (serve a title containing `<script>`), and the card's
   `href` equals the URL in the message.
 - A file message creates no preview row.
+- Editing: same URL keeps the preview; a different URL replaces it and the
+  old image object is deleted; removing the URL removes the preview.
+- Deleting a message with a ready preview removes the preview row, the image
+  file row and the image object.
 - Two URLs in one message: only the first is fetched.
 
 ## Done when

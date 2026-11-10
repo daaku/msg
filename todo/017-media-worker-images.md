@@ -1,10 +1,10 @@
-# 014 Media worker and image conversion
+# 017 Media worker and image conversion
 
 Use fable.
 
 Add the background worker that converts uploaded media, implement image
 conversion with ImageMagick, and show converted images in the chat. Video is
-task 015 and plugs into the same worker. Code goes in `media.go`.
+task 018 and plugs into the same worker. Code goes in `media.go`.
 
 Running an image decoder on files from users is the riskiest thing this
 server does. Follow the exec rules exactly.
@@ -36,7 +36,7 @@ server does. Follow the exec rules exactly.
   3. Read the first 4096 bytes and run `sniffMedia` again. If the kind no
      longer matches the row, mark `failed`.
   4. Call `a.convertImage` or `a.convertVideo` (stub the latter to return an
-     error wrapped as permanent until task 015).
+     error wrapped as permanent until task 018).
   5. Upload the outputs, update the row to `ready` with sizes, type and
      dimensions, then `a.notifyChat`.
 - Failure policy: an error from running a converter (non zero exit, timeout,
@@ -44,8 +44,11 @@ server does. Follow the exec rules exactly.
   filesystem, database) is transient: set back to `pending` if `attempts <
   3`, else `failed`. Use a `permanentError` wrapper type to tell them apart.
   After any terminal state call `a.notifyChat` so the placeholder is replaced.
+- The message can be deleted while its file is being converted. The final
+  update is `WHERE id = ? AND status = 'processing'`; if no row changed, the
+  file is gone: delete the objects that were just uploaded and stop.
 - A `failed` file renders as a plain download of the original (already done
-  in task 012).
+  in task 015).
 - Shutdown: the exec uses a context derived from `a.ctx`, so Ctrl-C kills a
   running conversion; the file stays `processing` and is reset at next start.
 
@@ -104,8 +107,8 @@ magick -limit memory 512MiB -limit map 1GiB -limit disk 4GiB -limit time 120
 - Result: `conv_type`, `conv_size`, `width`, `height`.
 
 Make the core reusable: `a.magickConvert(ctx, dir, inFormat, inName, outName
-string, maxEdge int) (w, h int, err error)`. Task 015 uses it for posters and
-task 016 for preview images with a smaller `maxEdge`.
+string, maxEdge int) (w, h int, err error)`. Task 018 uses it for posters and
+task 019 for preview images with a smaller `maxEdge`.
 
 ## Rendering
 
@@ -149,6 +152,9 @@ must be run by `bash` or with argv; zsh does not split unquoted variables.
   after 3 transient failures the file is `failed`; `processing` rows are
   reset at startup; two workers never claim the same file (run 20 files
   with `-race`).
+- Deleting the message while the conversion runs (block the converter with
+  a test hook) leaves no file row and no `converted` object.
+- Deleting a converted image message removes the `converted` object too.
 - Rendering: a ready image has `loading="lazy"`, `width` and `height`.
 - `/f/{id}/c` now redirects for the converted image and counts `conv_size`.
 

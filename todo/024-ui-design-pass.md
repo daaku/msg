@@ -1,4 +1,4 @@
-# 020 Design pass for mobile and desktop
+# 024 Design pass for mobile and desktop
 
 Use fable.
 
@@ -44,9 +44,10 @@ and small markup adjustments in the render functions.
 5. **Media.** Images and video sized by their aspect ratio with rounded
    corners; the processing placeholder has the same footprint style so the
    swap is calm; file rows look like something you can click.
-6. **Reactions and picker.** Chips that read at a glance; the picker sheet
-   has 44px targets and a backdrop.
-7. **Forms and admin pages.** Account, invites, admin, group info and new
+6. **Reactions and the message menu.** Chips that read at a glance; the
+   menu sheet (emoji row, remind me, edit, delete) has 44px targets, clear
+   grouping and a backdrop. The snooze marker and the edited label are quiet.
+7. **Forms and admin pages.** Settings, new message, edit message, invites, admin, group info and new
    group share one page layout with a max width, consistent section
    headings, and tables that become stacked cards under 48rem.
 8. **States.** Hover, active, `:focus-visible`, disabled, and the flash
@@ -66,15 +67,16 @@ and small markup adjustments in the render functions.
   --screenshot`, or drive it through a browser tool) and actually look at
   them. Iterate until nothing is misaligned, cramped or clipped.
 - Check keyboard use: tab order is sensible, everything interactive is
-  reachable and shows focus, and the reaction picker can be opened, used and
+  reachable and shows focus, and the message menu can be opened, used and
   closed from the keyboard.
 
 ## Done when
 
 - A screenshot of each of these exists for the final state at phone and
   desktop size, in light and dark, and you have looked at each: sign in,
-  invite acceptance, home with groups, a busy group, the reaction picker
-  open, group info, new group, account, invites, admin users, admin user,
+  invite acceptance, home with groups, a busy group, the message menu
+  open, the archived list, a direct message, group info, new group, new
+  message, edit message, settings, invites, admin users, admin user,
   admin groups. Save them under the scratch directory you were given, not in
   the repository, and list the paths in your report.
 - No horizontal scroll on any page at 320px wide.

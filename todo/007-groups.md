@@ -21,10 +21,10 @@ shared shell for `/` and every `/c/...` page:
   about 20rem wide. Do this in CSS with a class on `#app` (`has-chat`), no
   JavaScript.
 - Sidebar header: the app name, then icon links (each only when permitted):
-  new group (`/new`), invites, admin, account.
+  new group (`/new`), invites, admin, settings.
 - Group list: one `<a id="chat-{id}" class="chat-item" href="/c/{id}">` per
   group the user is a member of, ordered by `last_message_at` descending then
-  id descending. Each shows the group name and, after task 008, a one line
+  id descending. Each shows the group name and, after task 009, a one line
   snippet and time of the latest message. The active group has
   `aria-current="page"`.
 - With no groups: a short empty state. If the user may create groups it links
@@ -55,11 +55,11 @@ manage) so handlers state their requirement in one line.
   that do not exist). Redirect to `/c/{id}`.
 - `GET /c/{id}` (view): for now `#pane` holds a header (back link to `/`
   visible only on narrow screens, the group name linking to the info page)
-  and an empty message area. Task 008 fills it in.
+  and an empty message area. Task 009 fills it in.
 - `GET /c/{id}/info` (view): back link to `/c/{id}`. Shows the name, the
   members (username, and a "Remove" button for managers), and for managers a
   rename form and an "Add members" form with checkboxes for users who are not
-  members. Task 019 adds stats here.
+  members. Task 023 adds stats here.
 - `POST /c/{id}/rename` (manage).
 - `POST /c/{id}/members/add` (manage): adds the selected existing users,
   ignoring ones already present.

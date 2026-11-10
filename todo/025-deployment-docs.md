@@ -1,4 +1,4 @@
-# 021 Readme and deployment documentation
+# 025 Readme and deployment documentation
 
 Write the documentation someone needs to run this in production behind a TLS
 terminating proxy with a real S3 compatible bucket. The output is
@@ -39,11 +39,12 @@ the readme.
      Downloads are plain `<img>` and `<video>` loads and need no CORS.
    - A lifecycle rule to abort incomplete multipart uploads after 2 days, as
      a backstop to the app's own cleanup.
-   - Signed URL validity: AWS S3, Cloudflare R2 and MinIO reject SigV4 URLs
-     valid for more than 7 days, so set `S3_URL_VALIDITY=7d` there. The
-     server checks this at startup and says so. Explain the trade off in one
-     sentence: the browser can reuse a cached file for half the validity
-     period before it needs a fresh URL.
+   - Signed URL validity: `S3_URL_VALIDITY` defaults to `7d`, the most that
+     AWS S3, Cloudflare R2 and MinIO accept for SigV4 URLs. A provider that
+     allows longer can be given a larger value; the server checks the
+     configured value at startup. Explain the trade off in one sentence: the
+     browser can reuse a cached file for half the validity period before it
+     needs a fresh URL.
    - `S3_PATH_STYLE` and which common providers need which value.
 7. **Reverse proxy.** The app speaks plain HTTP and expects TLS in front.
    `PUBLIC_URL` must be the external HTTPS origin (passkeys and push depend
@@ -65,13 +66,14 @@ the readme.
    file. Losing the `config` table loses the cookie secret (everyone is
    signed out) and the VAPID key (every push subscription is void).
 10. **Installing on a phone.** iOS: Share, Add to Home Screen, then enable
-    notifications from Account inside the installed app.
-11. **Video format.** `av1` is the default; iPhones before the 15 Pro and
-    other devices without AV1 hardware decoding cannot play it. Set
-    `VIDEO_FORMAT=h264` for wide compatibility. Changing it affects new
-    uploads only.
+    notifications from Settings inside the installed app.
+11. **Video format.** `h264` is the default because it plays everywhere.
+    `VIDEO_FORMAT=av1` gives smaller files, but iPhones before the 15 Pro and
+    other devices without AV1 hardware decoding cannot play it. Changing it
+    affects new uploads only.
 12. **Known limits.** Single process only (the live update hub is in
-    memory). Download byte counts are estimates. No message deletion.
+    memory). Download byte counts are estimates. Edits and deletes keep no history.
+    Reminders need notifications enabled on at least one device.
 
 ## `.env.sample`
 

@@ -1,9 +1,9 @@
-# 013 Chunked background upload in the browser
+# 016 Chunked background upload in the browser
 
 Add the attach button to the composer and the JavaScript that uploads chosen
 files to S3 in chunks, in the background, with a subtle circular progress
 indicator at the top right. This is item 6 of the JavaScript inventory in
-`agents.md`. The server endpoints exist from task 012.
+`agents.md`. The server endpoints exist from task 015.
 
 ## Markup (`chat.go`)
 

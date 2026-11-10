@@ -1,4 +1,4 @@
-# 022 Final review against the spec
+# 026 Final review against the spec
 
 Use fable.
 
@@ -35,7 +35,10 @@ Specifically try to: read another group's messages, react or upload into a
 group you are not in, fetch `/f/` for a file in another group, complete or
 abort someone else's upload, revoke someone else's invite or link, delete
 someone else's passkey or push subscription, see someone else's stats, and
-reach any admin page.
+reach any admin page, open or act in a direct message as an admin who is not
+in it, edit someone else's message, delete someone else's message as a non
+admin, archive a chat you are not in, and see or cancel someone else's
+snooze.
 
 ## 3. Security review
 
@@ -55,12 +58,15 @@ Check each and write down what you verified:
 - XSS: usernames, group names, message bodies, file names, link preview
   text, push payloads, flash messages. Search for `g.Raw` and justify each
   use. Confirm the CSP is sent on every response and has no `unsafe-inline`.
-- Uploads: the checks in task 012 hold; file names cannot break out of the
+- Uploads: the checks in task 015 hold; file names cannot break out of the
   `Content-Disposition` header; originals are always served as attachments.
 - Converters: every `magick`, `ffmpeg` and `ffprobe` call has an explicit
   input format, a timeout, argv arguments and the minimal environment.
 - Link previews: rerun the SSRF tests; try a redirect chain that ends at
   `169.254.169.254`, and an IPv6 literal for loopback.
+- Deletes: after deleting a message with a file and a preview, no row and
+  no object for it remains (list the fake S3 directory).
+- Privacy: archive state and snoozes never appear in another user's page.
 - S3: nothing from a request reaches an object key; signed URLs are only
   handed to users who passed the group check.
 - Logs: start the server, use every feature, and read the log for tokens,
@@ -90,10 +96,13 @@ Chromium with a virtual authenticator (DevTools, WebAuthn panel, or the
 once:
 
 bootstrap admin, grant permissions, invite a user, accept in a second
-profile, create a group, exchange messages live, react, upload an image, a
-video and a PDF, post a link, enable notifications and receive one, add a
-second passkey through a link, delete a passkey, check stats on the account,
-group and admin pages, sign out and in.
+profile, create a group, start a direct message, exchange messages live in
+both, react, edit a message, delete a message, upload an image, a video and a
+PDF and delete one of them, post a link, archive a chat and see it return
+when the other user posts, enable notifications and receive one, snooze a
+message and receive the reminder, add a second passkey through a link,
+delete a passkey, check stats on the settings, chat info and admin pages,
+sign out and in.
 
 Watch the console for errors and CSP violations throughout. Report what you
 ran and what you could not.

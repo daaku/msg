@@ -1,12 +1,12 @@
-# 008 Sending and showing messages
+# 009 Sending and showing messages
 
 Render a group's messages and let members send text. Everything here is plain
-server rendered HTML with a normal form post; live updating is task 009. Code
+server rendered HTML with a normal form post; live updating is task 011. Code
 goes in `chat.go`, markup helpers may go in `ui.go`.
 
 ## Markup contract
 
-Task 009 morphs this markup, so the ids below are part of the interface. Keep
+Task 011 morphs this markup, so the ids below are part of the interface. Keep
 them exactly.
 
 ```html
@@ -64,7 +64,7 @@ them exactly.
   them as `<a href target="_blank" rel="noopener noreferrer nofollow">`.
   Everything else is text through `g.Text`. Write this as
   `linkify(body string) []g.Node` and also export the first URL through
-  `firstURL(body string) string` for task 016.
+  `firstURL(body string) string` for task 019.
 - The sidebar group list (task 007) now shows a snippet: "username: first 80
   characters" and the time of the latest message. Use one query for the list
   (`ChatsForUserWithLast`), not one per group.
@@ -77,14 +77,14 @@ them exactly.
 - In one transaction: insert the message, set `chats.last_message_at`, and
   `a.statUser` adding 1 to `messages_sent`.
 - After commit call `a.afterMessage(ctx, chat, msg)`. Create that function
-  now with an empty body and a comment saying tasks 009, 016 and 017 add to
+  now with an empty body and a comment saying tasks 011, 019 and 020 add to
   it.
 - Redirect 303 to `/c/{id}`.
 
 Put the insert in a reusable function
 `a.createMessage(ctx, chat Chat, userID int64, body string, fileID
 sql.NullInt64) (Message, error)` which does the transaction and calls
-`afterMessage`. Task 012 uses it for file messages.
+`afterMessage`. Task 015 uses it for file messages.
 
 JavaScript, add to `assets/main.js`:
 

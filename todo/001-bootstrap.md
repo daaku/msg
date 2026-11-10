@@ -21,7 +21,7 @@ Read `agents.md` first. Read `~/workspace/bento/main.go`, its `assets/`, its
      plain bytes; 1MB is 1048576) and `parseDuration` (adds a `d` suffix for
      days on top of `time.ParseDuration`) and `parseResolution` (name to long
      edge pixels). `S3_*` values are parsed and stored now but nothing uses
-     them until task 011; `S3_ENDPOINT` being required is enforced in 011, not
+     them until task 014; `S3_ENDPOINT` being required is enforced in 014, not
      here.
    - `app` struct with `cfg config`, `ctx context.Context`, `bg sync.WaitGroup`,
      `now func() time.Time`. More fields arrive in later tasks.
@@ -72,7 +72,7 @@ Read `agents.md` first. Read `~/workspace/bento/main.go`, its `assets/`, its
    tokens), colour tokens with a dark scheme, and primitives: `.btn` with
    variants, form fields, `.alert`, `.card`, `.list`, `.stack`, `.cluster`,
    page header with back link. Keep it under about 300 lines; the real design
-   pass is task 020.
+   pass is task 024.
 6. `assets/main.js`: only the two global error handlers from bento for now,
    but report with `console.error`, not `alert`.
 7. `assets/robots.txt` disallowing everything.
@@ -89,7 +89,7 @@ Read `agents.md` first. Read `~/workspace/bento/main.go`, its `assets/`, its
    `.github/workflows/go.yml` plus `.github/dependabot.yml` copied from bento.
    Make the hooks executable. The build step in CI must use `CGO_ENABLED=0`.
 10. `readme.md`: one paragraph on what this is, how to run it in development,
-    and `git config core.hooksPath .hooks/`. Task 021 writes the full version.
+    and `git config core.hooksPath .hooks/`. Task 025 writes the full version.
 
 ## Done when
 

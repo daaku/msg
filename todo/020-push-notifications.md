@@ -1,4 +1,4 @@
-# 017 Web Push notifications
+# 020 Web Push notifications
 
 Let a user enable notifications on each of their devices, send a push to the
 other members when a message arrives, and count pushes sent and opened. Code
@@ -27,7 +27,7 @@ Read bento's `push/push.go`, `assets/sw.js` and the push parts of
 
 ## Subscribing
 
-On `/account`, a "Notifications" section:
+On `/settings`, a "Notifications" section:
 
 - A form posting to `POST /push/subscribe` with a hidden `json` input and a
   button "Enable notifications on this device" carrying
@@ -42,9 +42,9 @@ On `/account`, a "Notifications" section:
   `push-prompt`, `push-unavailable`, as bento does) decide which of these
   hints is visible: denied says to allow notifications in the browser's site
   settings; unavailable says that on an iPhone or iPad the app must first be
-  added to the home screen (task 018 covers installing).
+  added to the home screen (task 022 covers installing).
 
-Also show a one line prompt linking to `/account#notifications` at the top
+Also show a one line prompt linking to `/settings#notifications` at the top
 of the sidebar when the body has `push-prompt`. It is plain CSS driven by the
 body class; no extra script.
 
@@ -52,7 +52,7 @@ body class; no extra script.
 `webpush.Subscription`; require an `https` endpoint and non empty keys;
 upsert on `endpoint` (a device that re-subscribes, or a different user on the
 same browser, takes over the row: update `user_id`, `subscription`, `label`).
-Redirect to `/account`.
+Redirect to `/settings`.
 
 `POST /push/unsubscribe` (`accUser`): delete where id and `user_id` match.
 
@@ -71,6 +71,9 @@ does not block the request:
     "tag": "chat-<id>", "data": {"url": "/c/<id>"}}
    ```
 
+   For a direct message the title is the sender's username and the body is
+   just the snippet.
+
    Snippet: the first 120 runes of the body; "📷 Photo", "🎬 Video" or
    "📎 <name>" for files.
 3. For each subscription of each recipient, in a goroutine started with
@@ -81,7 +84,10 @@ does not block the request:
      parse: delete the row.
    - Other errors: log one line with the endpoint host only. Do not retry.
 
-Reactions, membership changes and conversions do not send pushes.
+Reactions, edits, deletes, membership changes and conversions do not send
+pushes. Put the per subscription send, with its concurrency limit, error
+handling and counting, in one function `a.pushTo(userID int64, payload
+[]byte)`; task 021 reuses it for reminders.
 
 ## Service worker (`assets/sw.js`)
 
@@ -113,6 +119,8 @@ Queries: `PushSubUpsert`, `PushSubsByUser`, `PushSubsByUsers` (slice),
   stream for a different chat, or none, they do.
 - A permanent error deletes that subscription and leaves others; a transient
   error keeps it; neither counts as sent.
+- Direct message payload: title is the sender's username, body is the
+  snippet without a prefix.
 - Payload: title is the group name, body has the username and snippet, long
   bodies are cut, file messages use the file wording, `data.url` is the
   group URL.
@@ -127,8 +135,8 @@ Queries: `PushSubUpsert`, `PushSubsByUser`, `PushSubsByUsers` (slice),
 - On a desktop browser against `DEV=1` on localhost: enable notifications,
   send a message from a second profile while the first has the tab hidden,
   the notification appears, clicking it focuses the app on that group, and
-  the account stats later show one sent and one opened.
+  the settings page stats later show one sent and one opened.
 - Report which browsers and devices were tried. Push on iOS needs the
-  installed app from task 018 and a real HTTPS origin; say if that was not
+  installed app from task 022 and a real HTTPS origin; say if that was not
   available.
 - `./.hooks/pre-push` passes.
