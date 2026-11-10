@@ -574,3 +574,11 @@ func (ta *testApp) newChat(creator *testUser, name string, members ...*testUser)
 	ensure.Nil(ta.t, err)
 	return chat
 }
+
+// newDM returns the direct message between two users, creating it.
+func (ta *testApp) newDM(a, b *testUser) Chat {
+	ta.t.Helper()
+	chat, _, err := ta.app.startDM(ta.t.Context(), a.ID, b.ID)
+	ensure.Nil(ta.t, err)
+	return chat
+}

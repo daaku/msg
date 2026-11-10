@@ -547,6 +547,10 @@ body.chat {
   }
 }
 
+.chat-item > .icon {
+  color: var(--color-text-muted);
+}
+
 .chat-name {
   grid-column: 2;
   font-weight: 600;
@@ -622,4 +626,14 @@ fieldset {
     font-weight: 600;
     margin-block-end: var(--space-3xs);
   }
+}
+
+.user-pick {
+  width: 100%;
+  justify-content: flex-start;
+  font-weight: normal;
+}
+
+#dm-users > li {
+  padding: 0;
 }

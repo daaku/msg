@@ -45,6 +45,7 @@ const (
 	pAdminUser          = "/admin/u/"
 	pAssets             = "/assets/"
 	pChat               = "/c/"
+	pDM                 = "/dm"
 	pHome               = "/"
 	pInvite             = "/invite/"
 	pInvites            = "/invites"
@@ -622,6 +623,8 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
 	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
 	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
+	mux.HandleFunc("GET "+pDM, a.wrap(accUser, a.dm))
+	mux.HandleFunc("POST "+pDM, a.wrap(accUser, a.dmPost))
 	mux.HandleFunc("GET "+pNew, a.wrap(accGroup, a.newGroup))
 	mux.HandleFunc("POST "+pNew, a.wrap(accGroup, a.newGroupPost))
 	mux.HandleFunc("GET "+pChat+"{id}", a.wrap(accUser, a.chat))

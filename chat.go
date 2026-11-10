@@ -44,12 +44,52 @@ func (a *app) chatAccess(ctx context.Context, user *User, chatID int64) (chat Ch
 	case !errors.Is(err, sql.ErrNoRows):
 		return chat, false, false, serr.Wrap(err)
 	}
+	if chat.IsDm {
+		// Only the two participants can see a direct message, not even an
+		// admin, and there is nothing to manage.
+		if !member {
+			return chat, false, false, errNotFound
+		}
+		return chat, true, false, nil
+	}
 	admin := allowed(user, accAdmin)
 	if !member && !admin {
 		return chat, false, false, errNotFound
 	}
 	manage = admin || (chat.CreatedBy == user.ID && user.PermGroup)
 	return chat, member, manage, nil
+}
+
+// chatTitle is the name a chat is shown with: the group's name, or for a
+// direct message the other participant's username.
+func (a *app) chatTitle(chat Chat, viewer *User, other string) string {
+	if chat.IsDm {
+		return other
+	}
+	return chat.Name
+}
+
+// chatName is chatTitle for a single chat, loading the other participant of
+// a direct message.
+func (a *app) chatName(ctx context.Context, chat Chat, viewer *User) (string, error) {
+	var other string
+	if chat.IsDm {
+		members, err := a.q.MembersOfChat(ctx, chat.ID)
+		if err != nil {
+			return "", serr.Wrap(err)
+		}
+		for _, m := range members {
+			if m.UserID != viewer.ID {
+				other = m.Username
+			}
+		}
+	}
+	return a.chatTitle(chat, viewer, other), nil
+}
+
+// notifyChat tells everyone who can see the chat that it changed.
+func (a *app) notifyChat(ctx context.Context, chatID int64) {
+	// Task 011 implements this: ping the members and viewers over SSE.
 }
 
 // chatView is a chat as seen by the signed in user.
@@ -74,7 +114,11 @@ func (a *app) chatView(r *http.Request) (chatView, error) {
 	if err != nil {
 		return chatView{}, err
 	}
-	return chatView{Chat: chat, User: user, Member: member, Manage: manage, Title: chat.Name}, nil
+	title, err := a.chatName(ctx, chat, user)
+	if err != nil {
+		return chatView{}, err
+	}
+	return chatView{Chat: chat, User: user, Member: member, Manage: manage, Title: title}, nil
 }
 
 // chatMember is chatView for a user who must be a member.
@@ -110,7 +154,9 @@ func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, activ
 	appAttrs := g.Group{h.Class("chat-layout")}
 	if active != nil {
 		activeID = active.ID
-		title = active.Name
+		if title, err = a.chatName(ctx, *active, user); err != nil {
+			return err
+		}
 		appAttrs = g.Group{h.Class("chat-layout has-chat"),
 			h.Data("chat", strconv.FormatInt(active.ID, 10))}
 	}
@@ -121,24 +167,32 @@ func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, activ
 	}
 	var list g.Node
 	if len(chats) == 0 {
-		var hint g.Node = h.P(g.Text("Someone needs to add you to a group."))
+		var group g.Node = g.Text(" Someone needs to add you to a group.")
 		if allowed(user, accGroup) {
-			hint = h.P(h.A(h.Href(pNew), g.Text("Create a group")), g.Text(" to get started."))
+			group = g.Group{g.Text(" or "), h.A(h.Href(pNew), g.Text("create a group")), g.Text(".")}
 		}
 		list = h.Div(h.ID("chats-empty"), h.Class("empty stack"),
-			h.P(h.Strong(g.Text("No groups yet."))), hint)
+			h.P(h.Strong(g.Text("No chats yet."))),
+			h.P(h.A(h.Href(pDM), g.Text("Start a direct message")), group))
 	} else {
-		list = h.Div(h.ID("chats"), h.Class("chat-list"), g.Map(chats, func(c Chat) g.Node {
-			return h.A(h.ID(fmt.Sprintf("chat-%d", c.ID)), h.Class("chat-item"),
+		list = h.Div(h.ID("chats"), h.Class("chat-list"), g.Map(chats, func(row ChatsForUserRow) g.Node {
+			c := row.Chat
+			kind, kindIcon := "group", "people"
+			if c.IsDm {
+				kind, kindIcon = "dm", "person"
+			}
+			return h.A(h.ID(fmt.Sprintf("chat-%d", c.ID)), h.Class("chat-item "+kind),
 				h.Href(chatPath(c.ID)),
 				g.If(c.ID == activeID, h.Aria("current", "page")),
-				h.Span(h.Class("chat-name"), g.Text(c.Name)))
+				icon(kindIcon),
+				h.Span(h.Class("chat-name"), g.Text(a.chatTitle(c, user, row.Other))))
 		}))
 	}
 	sidebar := h.Nav(h.ID("sidebar"),
 		h.Header(h.Class("sidebar-head"),
 			h.H1(g.Text(a.cfg.AppName)),
 			h.Div(h.Class("cluster"),
+				headerLink(pDM, "New message", "pencil"),
 				g.If(allowed(user, accGroup), headerLink(pNew, "New group", "plus")),
 				g.If(allowed(user, accInvite), headerLink(pInvites, "Invites", "person-plus")),
 				g.If(allowed(user, accAdmin), headerLink(pAdmin, "Admin", "shield")),
@@ -158,7 +212,7 @@ func paneHead(v chatView) g.Node {
 
 func (a *app) home(w http.ResponseWriter, r *http.Request) error {
 	return a.chatPage(w, r, userFrom(r.Context()), nil,
-		h.Div(h.Class("placeholder"), h.P(g.Text("Select a group"))))
+		h.Div(h.Class("placeholder"), h.P(g.Text("Select a group or a direct message"))))
 }
 
 // groups
@@ -343,6 +397,11 @@ func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
+	if v.Chat.IsDm {
+		return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("info"), h.Class("pane-body stack"),
+			pageHeader(v.Title, backLink(base, "Back")),
+			h.P(g.Text("Direct message with "+v.Title+"."))))
+	}
 	return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("info"), h.Class("pane-body stack"),
 		pageHeader(v.Title, backLink(base, "Back")),
 		g.If(!v.Member, h.Form(h.ID("join"), h.Method("post"), h.Action(base+"/members/add"),
@@ -409,5 +468,91 @@ func (a *app) chatMembersRemove(w http.ResponseWriter, r *http.Request) error {
 		return serr.Wrap(err)
 	}
 	http.Redirect(w, r, back, http.StatusSeeOther)
+	return nil
+}
+
+// direct messages
+
+func dmKey(a, b int64) string {
+	return fmt.Sprintf("%d:%d", min(a, b), max(a, b))
+}
+
+// startDM returns the direct message between two users, creating it when
+// there is none yet. created reports whether this call created it.
+func (a *app) startDM(ctx context.Context, userID, otherID int64) (chat Chat, created bool, err error) {
+	key := sql.NullString{String: dmKey(userID, otherID), Valid: true}
+	err = a.tx(ctx, func(q *Queries) error {
+		var err error
+		chat, err = q.ChatByDMKey(ctx, key)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return serr.Wrap(err)
+		}
+		now := a.now().Unix()
+		chat, err = q.ChatCreateDM(ctx, ChatCreateDMParams{
+			DmKey:         key,
+			CreatedBy:     userID,
+			CreatedAt:     now,
+			LastMessageAt: now,
+		})
+		if err != nil {
+			return err // not wrapped: a unique violation is handled below
+		}
+		created = true
+		return a.addMembers(ctx, q, chat.ID, userID, []int64{userID, otherID})
+	})
+	if isUniqueErr(err) {
+		// A concurrent request created it first.
+		chat, err = a.q.ChatByDMKey(ctx, key)
+		return chat, false, serr.Wrap(err)
+	}
+	return chat, created, serr.Wrap(err)
+}
+
+func (a *app) dm(w http.ResponseWriter, r *http.Request) error {
+	user := userFrom(r.Context())
+	all, err := a.q.UsersAllBasic(r.Context())
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	var rows []g.Node
+	for _, u := range all {
+		if u.ID == user.ID {
+			continue
+		}
+		rows = append(rows, h.Li(h.ID(fmt.Sprintf("dm-user-%d", u.ID)),
+			h.Form(h.Method("post"), h.Action(pDM),
+				h.Input(h.Type("hidden"), h.Name("user"), h.Value(strconv.FormatInt(u.ID, 10))),
+				h.Button(h.Class("btn ghost user-pick"), icon("person"), h.Span(g.Text(u.Username))))))
+	}
+	var list g.Node = h.P(h.Class("muted"), g.Text("There is nobody else here yet."))
+	if len(rows) > 0 {
+		list = h.Ul(h.ID("dm-users"), h.Class("list"), g.Group(rows))
+	}
+	return a.pageSimple(w, r, "New message", backLink(pHome, "Home"), list).Render(w)
+}
+
+func (a *app) dmPost(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	otherID, err := strconv.ParseInt(r.PostFormValue("user"), 10, 64)
+	if err != nil || otherID == user.ID {
+		return errNotFound
+	}
+	if _, err := a.q.UserByID(ctx, otherID); errors.Is(err, sql.ErrNoRows) {
+		return errNotFound
+	} else if err != nil {
+		return serr.Wrap(err)
+	}
+	chat, created, err := a.startDM(ctx, user.ID, otherID)
+	if err != nil {
+		return err
+	}
+	if created {
+		a.notifyChat(ctx, chat.ID)
+	}
+	http.Redirect(w, r, chatPath(chat.ID), http.StatusSeeOther)
 	return nil
 }

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/daaku/ensure"
@@ -74,7 +76,7 @@ func TestGroupCreate(t *testing.T) {
 	chats, err := ta.app.q.ChatsForUser(ctx, alice.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(chats), 1)
-	chat := chats[0]
+	chat := chats[0].Chat
 	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
 	ensure.DeepEqual(t, chat.Name, strings.Repeat("é", 64))
 	ensure.False(t, chat.IsDm)
@@ -117,7 +119,7 @@ func TestHomeListsOwnGroups(t *testing.T) {
 	ensure.StringContains(t, body, `id="pane"`)
 	ensure.StringDoesNotContain(t, body, `data-chat=`)
 	ensure.StringDoesNotContain(t, body, "has-chat")
-	ensure.StringContains(t, body, "Select a group")
+	ensure.StringContains(t, body, "Select a group or a direct message")
 	i1 := strings.Index(body, fmt.Sprintf(`id="chat-%d"`, g1.ID))
 	i2 := strings.Index(body, fmt.Sprintf(`id="chat-%d"`, g2.ID))
 	i3 := strings.Index(body, fmt.Sprintf(`id="chat-%d"`, g3.ID))
@@ -154,6 +156,7 @@ func TestHomeEmptyState(t *testing.T) {
 	ensure.StringContains(t, body, `<a href="/new">`)
 	body = ta.get(pHome, ta.as(plain)).Body.String()
 	ensure.StringContains(t, body, `id="chats-empty"`)
+	ensure.StringContains(t, body, `<a href="/dm">`)
 	ensure.StringContains(t, body, "Someone needs to add you to a group.")
 	ensure.StringDoesNotContain(t, body, `href="/new"`)
 }
@@ -188,7 +191,7 @@ func TestGroupPageAccess(t *testing.T) {
 	body := ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()
 	ensure.StringContains(t, body, `id="pane-head"`)
 	ensure.StringContains(t, body, `href="`+chatPath(chat.ID)+`/info"`)
-	ensure.StringContains(t, body, fmt.Sprintf(`id="chat-%d" class="chat-item" href="%s" aria-current="page"`,
+	ensure.StringContains(t, body, fmt.Sprintf(`id="chat-%d" class="chat-item group" href="%s" aria-current="page"`,
 		chat.ID, chatPath(chat.ID)))
 	ensure.StringContains(t, body, "<title>Team &lt;b&gt; · msg</title>")
 
@@ -332,4 +335,179 @@ func TestHeaderLinks(t *testing.T) {
 	for _, href := range []string{"/new", "/invites", "/admin", "/settings"} {
 		ensure.StringContains(t, body, `href="`+href+`"`)
 	}
+}
+
+func TestDMStart(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	// no permissions at all
+	alice := ta.newUser("alice")
+	bob := ta.newUser("bob")
+
+	// the picker lists the other users
+	w := ta.get(pDM, ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusOK)
+	body := w.Body.String()
+	ensure.StringContains(t, body, "New message")
+	ensure.StringContains(t, body, `href="/"`)
+	ensure.StringContains(t, body, `name="user" value="`+idStr(bob.ID)+`"`)
+	ensure.StringDoesNotContain(t, body, `name="user" value="`+idStr(alice.ID)+`"`)
+	ensure.DeepEqual(t, ta.get(pDM).Code, http.StatusSeeOther)
+
+	w = ta.post(pDM, url.Values{"user": {idStr(bob.ID)}}, ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	chat, err := ta.app.q.ChatByDMKey(ctx, sql.NullString{
+		String: fmt.Sprintf("%d:%d", alice.ID, bob.ID), Valid: true})
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
+	ensure.True(t, chat.IsDm)
+	ensure.DeepEqual(t, chat.Name, "")
+	ensure.DeepEqual(t, chat.CreatedBy, alice.ID)
+	ensure.DeepEqual(t, chat.LastMessageAt, testNow.Unix())
+	ensure.DeepEqual(t, memberCount(t, ta, chat.ID), 2)
+	ensure.True(t, isMember(t, ta, chat.ID, alice.ID))
+	ensure.True(t, isMember(t, ta, chat.ID, bob.ID))
+
+	// again from either side is the same chat
+	for _, c := range []struct{ from, to *testUser }{{alice, bob}, {bob, alice}} {
+		w = ta.post(pDM, url.Values{"user": {idStr(c.to.ID)}}, ta.as(c.from))
+		ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
+	}
+	ensure.DeepEqual(t, countRows(t, ta, "chats"), 1)
+	ensure.DeepEqual(t, ta.newDM(bob, alice).ID, chat.ID)
+
+	// with yourself, a missing user or garbage is 404; signed out is 401
+	for _, v := range []string{idStr(alice.ID), "9999", "", "bob"} {
+		ensure.DeepEqual(t, ta.post(pDM, url.Values{"user": {v}}, ta.as(alice)).Code, http.StatusNotFound, v)
+	}
+	ensure.DeepEqual(t, ta.post(pDM, url.Values{"user": {idStr(bob.ID)}}).Code, http.StatusUnauthorized)
+	ensure.DeepEqual(t, countRows(t, ta, "chats"), 1)
+}
+
+func TestDMConcurrentStart(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice")
+	bob := ta.newUser("bob")
+	var wg sync.WaitGroup
+	locs := make([]string, 20)
+	for i := range locs {
+		wg.Go(func() {
+			from, to := alice, bob
+			if i%2 == 1 {
+				from, to = bob, alice
+			}
+			w := ta.post(pDM, url.Values{"user": {idStr(to.ID)}}, ta.as(from))
+			locs[i] = fmt.Sprint(w.Code, " ", w.Header().Get("Location"))
+		})
+	}
+	wg.Wait()
+	ensure.DeepEqual(t, countRows(t, ta, "chats"), 1)
+	ensure.DeepEqual(t, countRows(t, ta, "members"), 2)
+	for _, l := range locs {
+		ensure.DeepEqual(t, l, locs[0])
+	}
+	ensure.StringContains(t, locs[0], "303 /c/")
+}
+
+func TestDMAccess(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	admin := ta.newUser("boss", "admin")
+	dm := ta.newDM(alice, bob)
+	base := chatPath(dm.ID)
+
+	for _, p := range []string{base, base + "/info"} {
+		ensure.DeepEqual(t, ta.get(p, ta.as(alice)).Code, http.StatusOK, p)
+		ensure.DeepEqual(t, ta.get(p, ta.as(bob)).Code, http.StatusOK, p)
+		ensure.DeepEqual(t, ta.get(p, ta.as(carol)).Code, http.StatusNotFound, p)
+		ensure.DeepEqual(t, ta.get(p, ta.as(admin)).Code, http.StatusNotFound, p)
+		ensure.DeepEqual(t, ta.get(p).Code, http.StatusSeeOther, p)
+	}
+
+	// nothing to manage, for a participant or an admin
+	for _, c := range []struct {
+		path string
+		form url.Values
+	}{
+		{base + "/rename", url.Values{"name": {"x"}}},
+		{base + "/members/add", url.Values{"user": {idStr(carol.ID)}}},
+		{base + "/members/add", url.Values{"user": {idStr(admin.ID)}}},
+		{base + "/members/remove", url.Values{"user": {idStr(bob.ID)}}},
+	} {
+		for _, u := range []*testUser{alice, bob, admin} {
+			ensure.DeepEqual(t, ta.post(c.path, c.form, ta.as(u)).Code, http.StatusNotFound, c.path, u.Username)
+		}
+	}
+	ensure.DeepEqual(t, memberCount(t, ta, dm.ID), 2)
+	got, err := ta.app.q.ChatByID(t.Context(), dm.ID)
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, got.Name, "")
+
+	// the info page shows the other user and no controls
+	body := ta.get(base+"/info", ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, "<h1>bob</h1>")
+	for _, s := range []string{"/rename", "/members/add", "/members/remove"} {
+		ensure.StringDoesNotContain(t, body, `action="`+base+s+`"`)
+	}
+	ensure.StringDoesNotContain(t, body, `id="join"`)
+}
+
+func TestDMTitles(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	g1 := ta.newChat(alice, "older group", bob)
+	dm := ta.newDM(alice, bob)
+	g2 := ta.newChat(alice, "newest group", bob)
+	dm2 := ta.newDM(carol, alice)
+	setLastMessageAt(t, ta, g1.ID, testNow.Unix()+10)
+	setLastMessageAt(t, ta, dm.ID, testNow.Unix()+20)
+	setLastMessageAt(t, ta, g2.ID, testNow.Unix()+30)
+	setLastMessageAt(t, ta, dm2.ID, testNow.Unix()+5)
+
+	row := func(c Chat, kind string) string {
+		return fmt.Sprintf(`id="chat-%d" class="chat-item %s" href="%s"`, c.ID, kind, chatPath(c.ID)) +
+			`><svg class="icon icon-` + map[string]string{"dm": "person", "group": "people"}[kind] +
+			`"`
+	}
+	body := ta.get(pHome, ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, row(dm, "dm"))
+	ensure.StringContains(t, body, row(g1, "group"))
+	order := []int{
+		strings.Index(body, fmt.Sprintf(`id="chat-%d"`, g2.ID)),
+		strings.Index(body, fmt.Sprintf(`id="chat-%d"`, dm.ID)),
+		strings.Index(body, fmt.Sprintf(`id="chat-%d"`, g1.ID)),
+		strings.Index(body, fmt.Sprintf(`id="chat-%d"`, dm2.ID)),
+	}
+	for i := 1; i < len(order); i++ {
+		ensure.True(t, order[i-1] > 0 && order[i] > order[i-1], order)
+	}
+	// each viewer sees the other participant's name
+	nameOf := func(body string, c Chat) string {
+		i := strings.Index(body, fmt.Sprintf(`id="chat-%d"`, c.ID))
+		rest := body[i:]
+		j := strings.Index(rest, `<span class="chat-name">`) + len(`<span class="chat-name">`)
+		return rest[j : j+strings.Index(rest[j:], "<")]
+	}
+	ensure.DeepEqual(t, nameOf(body, dm), "bob")
+	ensure.DeepEqual(t, nameOf(body, dm2), "carol")
+	bobHome := ta.get(pHome, ta.as(bob)).Body.String()
+	ensure.DeepEqual(t, nameOf(bobHome, dm), "alice")
+	ensure.StringDoesNotContain(t, bobHome, fmt.Sprintf(`id="chat-%d"`, dm2.ID))
+
+	// the pane header and page title
+	body = ta.get(chatPath(dm.ID), ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, "<title>alice · msg</title>")
+	ensure.StringContains(t, body, `class="pane-title" href="`+chatPath(dm.ID)+`/info">alice</a>`)
+	body = ta.get(chatPath(dm.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, "<title>bob · msg</title>")
+	ensure.StringContains(t, body, `class="pane-title" href="`+chatPath(dm.ID)+`/info">bob</a>`)
+	body = ta.get(chatPath(dm.ID)+"/info", ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, "<title>bob · msg</title>")
+
+	// everyone has the new message link
+	ensure.StringContains(t, ta.get(pHome, ta.as(carol)).Body.String(), `href="/dm"`)
 }

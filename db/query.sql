@@ -154,10 +154,21 @@ RETURNING *;
 SELECT * FROM chats WHERE id = ?;
 
 -- name: ChatsForUser :many
-SELECT chats.* FROM chats
-JOIN members ON members.chat_id = chats.id
-WHERE members.user_id = @user_id
+SELECT sqlc.embed(chats), CAST(coalesce(other_user.username, '') AS TEXT) AS other
+FROM chats
+JOIN members ON members.chat_id = chats.id AND members.user_id = @user_id
+LEFT JOIN members other ON chats.is_dm
+  AND other.chat_id = chats.id AND other.user_id != @user_id
+LEFT JOIN users other_user ON other_user.id = other.user_id
 ORDER BY chats.last_message_at DESC, chats.id DESC;
+
+-- name: ChatByDMKey :one
+SELECT * FROM chats WHERE dm_key = ?;
+
+-- name: ChatCreateDM :one
+INSERT INTO chats (name, is_dm, dm_key, created_by, created_at, last_message_at)
+VALUES ('', TRUE, @dm_key, @created_by, @created_at, @last_message_at)
+RETURNING *;
 
 -- name: ChatRename :exec
 UPDATE chats SET name = @name WHERE id = @id;

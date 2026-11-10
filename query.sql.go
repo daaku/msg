@@ -10,6 +10,25 @@ import (
 	"database/sql"
 )
 
+const chatByDMKey = `-- name: ChatByDMKey :one
+SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at FROM chats WHERE dm_key = ?
+`
+
+func (q *Queries) ChatByDMKey(ctx context.Context, dmKey sql.NullString) (Chat, error) {
+	row := q.db.QueryRowContext(ctx, chatByDMKey, dmKey)
+	var i Chat
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IsDm,
+		&i.DmKey,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.LastMessageAt,
+	)
+	return i, err
+}
+
 const chatByID = `-- name: ChatByID :one
 SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at FROM chats WHERE id = ?
 `
@@ -45,6 +64,39 @@ type ChatCreateParams struct {
 func (q *Queries) ChatCreate(ctx context.Context, arg ChatCreateParams) (Chat, error) {
 	row := q.db.QueryRowContext(ctx, chatCreate,
 		arg.Name,
+		arg.CreatedBy,
+		arg.CreatedAt,
+		arg.LastMessageAt,
+	)
+	var i Chat
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IsDm,
+		&i.DmKey,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.LastMessageAt,
+	)
+	return i, err
+}
+
+const chatCreateDM = `-- name: ChatCreateDM :one
+INSERT INTO chats (name, is_dm, dm_key, created_by, created_at, last_message_at)
+VALUES ('', TRUE, ?1, ?2, ?3, ?4)
+RETURNING id, name, is_dm, dm_key, created_by, created_at, last_message_at
+`
+
+type ChatCreateDMParams struct {
+	DmKey         sql.NullString
+	CreatedBy     int64
+	CreatedAt     int64
+	LastMessageAt int64
+}
+
+func (q *Queries) ChatCreateDM(ctx context.Context, arg ChatCreateDMParams) (Chat, error) {
+	row := q.db.QueryRowContext(ctx, chatCreateDM,
+		arg.DmKey,
 		arg.CreatedBy,
 		arg.CreatedAt,
 		arg.LastMessageAt,
@@ -131,29 +183,38 @@ func (q *Queries) ChatStatsGet(ctx context.Context, chatID int64) (ChatStat, err
 }
 
 const chatsForUser = `-- name: ChatsForUser :many
-SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at FROM chats
-JOIN members ON members.chat_id = chats.id
-WHERE members.user_id = ?1
+SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at, CAST(coalesce(other_user.username, '') AS TEXT) AS other
+FROM chats
+JOIN members ON members.chat_id = chats.id AND members.user_id = ?1
+LEFT JOIN members other ON chats.is_dm
+  AND other.chat_id = chats.id AND other.user_id != ?1
+LEFT JOIN users other_user ON other_user.id = other.user_id
 ORDER BY chats.last_message_at DESC, chats.id DESC
 `
 
-func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]Chat, error) {
+type ChatsForUserRow struct {
+	Chat  Chat
+	Other string
+}
+
+func (q *Queries) ChatsForUser(ctx context.Context, userID int64) ([]ChatsForUserRow, error) {
 	rows, err := q.db.QueryContext(ctx, chatsForUser, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []Chat
+	var items []ChatsForUserRow
 	for rows.Next() {
-		var i Chat
+		var i ChatsForUserRow
 		if err := rows.Scan(
-			&i.ID,
-			&i.Name,
-			&i.IsDm,
-			&i.DmKey,
-			&i.CreatedBy,
-			&i.CreatedAt,
-			&i.LastMessageAt,
+			&i.Chat.ID,
+			&i.Chat.Name,
+			&i.Chat.IsDm,
+			&i.Chat.DmKey,
+			&i.Chat.CreatedBy,
+			&i.Chat.CreatedAt,
+			&i.Chat.LastMessageAt,
+			&i.Other,
 		); err != nil {
 			return nil, err
 		}
