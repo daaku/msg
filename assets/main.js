@@ -157,6 +157,7 @@ document.addEventListener('submit', async ev => {
     const res = await fetch(form.action, { method: 'POST', body, redirect: 'manual' })
     if (res.type !== 'opaqueredirect' && !res.ok) throw new Error(`status ${res.status}`)
     form.reset()
+    form.closest('[popover]')?.hidePopover()
     await refresh()
   } catch (err) {
     console.error(err)

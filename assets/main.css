@@ -785,6 +785,79 @@ fieldset {
   padding: var(--space-3xs) var(--space-s) var(--space-2xs);
 }
 
+/* reactions: chips under the body, and the palette at the top of the menu */
+.reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3xs);
+
+  &:empty {
+    display: none;
+  }
+
+  form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3xs);
+  }
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+  min-height: 1.75rem;
+  padding: 0 var(--space-2xs);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background-color: var(--color-surface-2);
+  font-size: var(--step--1);
+  line-height: 1;
+
+  span {
+    color: var(--color-text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  &.on {
+    border-color: var(--color-accent);
+    background-color: color-mix(in oklab, var(--color-accent) 18%, var(--color-surface));
+  }
+}
+
+button.chip {
+  cursor: pointer;
+}
+
+.picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(2.75rem, 1fr));
+  padding-block-end: var(--space-2xs);
+  margin-block-end: var(--space-3xs);
+  border-bottom: 1px solid var(--color-border);
+
+  button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    border: none;
+    border-radius: var(--radius);
+    background: none;
+    font-size: var(--step-1);
+    cursor: pointer;
+
+    &:hover,
+    &:focus-visible {
+      background-color: var(--color-surface-2);
+    }
+  }
+}
+
+.picker:last-child {
+  padding-block-end: 0;
+  margin-block-end: 0;
+  border-bottom: none;
+}
+
 .msg-who,
 .msg-body {
   flex-basis: 100%;

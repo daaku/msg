@@ -526,6 +526,10 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 		return serr.Wrap(err)
 	}
 	base := chatPath(v.Chat.ID)
+	reactions, err := a.reactionsFor(ctx, v.User.ID, rows)
+	if err != nil {
+		return err
+	}
 
 	// The link is always rendered, hidden when there is nothing earlier, so
 	// that the first child of #messages lines up between renders. Without
@@ -558,7 +562,7 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	return a.chatPage(w, r, v.User, &v.Chat, g.Group{
 		paneHead(v),
 		h.Div(h.ID("scroll"), h.Class("scroll"),
-			h.Div(h.ID("messages"), earlier, a.messageNodes(v, rows, viewerLoc(r)))),
+			h.Div(h.ID("messages"), earlier, a.messageNodes(v, rows, reactions, viewerLoc(r)))),
 		composer,
 	})
 }
@@ -589,7 +593,7 @@ func viewerLoc(r *http.Request) *time.Location {
 
 // messageNodes renders messages, oldest first, with a separator before the
 // first message of each day.
-func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, loc *time.Location) g.Node {
+func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[int64][]reactionGroup, loc *time.Location) g.Node {
 	var nodes g.Group
 	var prevUser int64
 	var prevDay string
@@ -616,6 +620,7 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, loc *time.Locat
 			g.If(first && !mine, h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)),
 				g.Text(row.Username))),
 			h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body))),
+			a.reactionChips(v, m, reactions[m.ID]),
 			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
 			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
 				g.Text(at.Format("15:04"))),
@@ -978,8 +983,16 @@ func canDelete(v chatView, m Message) bool {
 func (a *app) messageMenu(v chatView, m Message) g.Node {
 	id := fmt.Sprintf("m%d", m.ID)
 	base := messagePath(v.Chat.ID, m.ID)
-	// Task 012 adds the emoji row first, task 021 the snooze choices.
+	// Task 021 adds the snooze choices.
 	var entries g.Group
+	if v.Member {
+		entries = append(entries, h.Form(h.ID(id+"-pick"), h.Class("picker"), h.Method("post"),
+			h.Action(chatPath(v.Chat.ID)+"/react"), g.Attr("data-morph"),
+			h.Input(h.Type("hidden"), h.Name("message"), h.Value(strconv.FormatInt(m.ID, 10))),
+			g.Map(reactionPalette, func(e string) g.Node {
+				return h.Button(h.Name("emoji"), h.Value(e), h.Aria("label", "React with "+e), g.Text(e))
+			})))
+	}
 	if canEdit(v, m) {
 		entries = append(entries, h.A(h.ID(id+"-edit"), h.Class("sheet-item"), h.Href(base+"/edit"),
 			g.Text("Edit")))
@@ -1098,5 +1111,143 @@ func (a *app) deleteMessage(ctx context.Context, chat Chat, msg Message) error {
 		return serr.Wrap(err)
 	}
 	a.notifyChat(ctx, chat.ID)
+	return nil
+}
+
+// reactions
+
+// reactionPalette is the fixed list of emoji a message can be reacted with,
+// in the order they are shown.
+var reactionPalette = []string{
+	"👍", "❤️", "😂", "😮", "😢", "🙏", "🎉", "🔥", "👏", "😍", "🤔", "👀", "💯", "✅", "❌", "😡",
+}
+
+// reactionGroup is one emoji on one message, with the users who used it in
+// the order they reacted.
+type reactionGroup struct {
+	Emoji string
+	Users []string
+	Mine  bool
+}
+
+// emojiID is the emoji's code points in hex joined with "-", for element ids.
+func emojiID(e string) string {
+	var parts []string
+	for _, r := range e {
+		parts = append(parts, strconv.FormatInt(int64(r), 16))
+	}
+	return strings.Join(parts, "-")
+}
+
+// reactionsFor loads the reactions of the given messages with one query and
+// groups them by message, each in palette order.
+func (a *app) reactionsFor(ctx context.Context, viewerID int64, rows []MessagesLatestRow) (map[int64][]reactionGroup, error) {
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	ids := make([]int64, len(rows))
+	for i, row := range rows {
+		ids[i] = row.Message.ID
+	}
+	all, err := a.q.ReactionsForMessages(ctx, ids)
+	if err != nil {
+		return nil, serr.Wrap(err)
+	}
+	out := map[int64][]reactionGroup{}
+	for _, rr := range all {
+		i := slices.Index(reactionPalette, rr.Emoji)
+		if i < 0 {
+			continue // not offered any more
+		}
+		groups := out[rr.MessageID]
+		if groups == nil {
+			groups = make([]reactionGroup, len(reactionPalette))
+			out[rr.MessageID] = groups
+		}
+		groups[i].Emoji = rr.Emoji
+		groups[i].Users = append(groups[i].Users, rr.Username)
+		if rr.UserID == viewerID {
+			groups[i].Mine = true
+		}
+	}
+	for id, groups := range out {
+		out[id] = slices.DeleteFunc(groups, func(rg reactionGroup) bool { return len(rg.Users) == 0 })
+	}
+	return out, nil
+}
+
+// reactionChips renders the reactions of a message. The div is always
+// rendered, so its id stays stable for the morph; CSS hides it when empty.
+// Members get a button per emoji that toggles their own reaction.
+func (a *app) reactionChips(v chatView, m Message, groups []reactionGroup) g.Node {
+	id := fmt.Sprintf("m%d", m.ID)
+	if len(groups) == 0 {
+		return h.Div(h.ID(id+"-reactions"), h.Class("reactions"))
+	}
+	chips := g.Map(groups, func(rg reactionGroup) g.Node {
+		class := "chip"
+		if rg.Mine && v.Member {
+			class += " on"
+		}
+		chipID := h.ID(id + "-r-" + emojiID(rg.Emoji))
+		content := g.Group{h.Class(class), h.Title(strings.Join(rg.Users, ", ")),
+			g.Text(rg.Emoji + " "), h.Span(g.Text(strconv.Itoa(len(rg.Users))))}
+		if v.Member {
+			return h.Button(chipID, h.Name("emoji"), h.Value(rg.Emoji), content)
+		}
+		return h.Span(chipID, content)
+	})
+	if !v.Member {
+		return h.Div(h.ID(id+"-reactions"), h.Class("reactions"), chips)
+	}
+	return h.Div(h.ID(id+"-reactions"), h.Class("reactions"),
+		h.Form(h.Method("post"), h.Action(chatPath(v.Chat.ID)+"/react"), g.Attr("data-morph"),
+			h.Input(h.Type("hidden"), h.Name("message"), h.Value(strconv.FormatInt(m.ID, 10))),
+			chips))
+}
+
+// chatReact toggles the user's reaction with one emoji on one message.
+// Reactions do not bump the chat, unarchive it or send a push.
+func (a *app) chatReact(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	v, err := a.chatMember(r)
+	if err != nil {
+		return err
+	}
+	emoji := r.PostFormValue("emoji")
+	if !slices.Contains(reactionPalette, emoji) {
+		return httpErr(http.StatusBadRequest, "Unknown emoji.")
+	}
+	msgID, err := strconv.ParseInt(r.PostFormValue("message"), 10, 64)
+	if err != nil {
+		return errNotFound
+	}
+	_, err = a.q.MessageInChat(ctx, MessageInChatParams{ID: msgID, ChatID: v.Chat.ID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return errNotFound
+	}
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	err = a.tx(ctx, func(q *Queries) error {
+		n, err := q.ReactionDelete(ctx, ReactionDeleteParams{MessageID: msgID, UserID: v.User.ID, Emoji: emoji})
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		if n > 0 {
+			return nil
+		}
+		return serr.Wrap(q.ReactionAdd(ctx, ReactionAddParams{
+			MessageID: msgID,
+			UserID:    v.User.ID,
+			Emoji:     emoji,
+			CreatedAt: a.now().Unix(),
+		}))
+	})
+	if err != nil {
+		return err
+	}
+	a.notifyChat(ctx, v.Chat.ID)
+	http.Redirect(w, r, chatPath(v.Chat.ID), http.StatusSeeOther)
 	return nil
 }

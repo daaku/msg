@@ -634,6 +634,7 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pChat+"{id}", a.wrap(accUser, a.chat))
 	mux.HandleFunc("GET "+pChat+"{id}/info", a.wrap(accUser, a.chatInfo))
 	mux.HandleFunc("POST "+pChat+"{id}/send", a.wrap(accUser, a.chatSend))
+	mux.HandleFunc("POST "+pChat+"{id}/react", a.wrap(accUser, a.chatReact))
 	mux.HandleFunc("GET "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEdit))
 	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEditPost))
 	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/delete", a.wrap(accUser, a.messageDelete))

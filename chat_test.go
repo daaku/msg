@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1009,15 +1011,22 @@ func TestMessageMenu(t *testing.T) {
 	ensure.StringContains(t, body, `<a `+edit+` class="sheet-item" href="`+messagePath(chat.ID, m1.ID)+`/edit">Edit</a>`)
 	ensure.StringContains(t, body, `<details `+del+` class="sheet-confirm"><summary class="sheet-item">Delete</summary>`+
 		`<form method="post" action="`+messagePath(chat.ID, m1.ID)+`/delete" data-morph><button class="btn danger">Delete this message</button></form></details>`)
-	more, menu, _, _ = ids(mb)
-	ensure.StringDoesNotContain(t, body, more)
-	ensure.StringDoesNotContain(t, body, menu)
+	// on bob's message alice's menu holds only the emoji row
+	more, menu, edit, del = ids(mb)
+	ensure.DeepEqual(t, strings.Count(body, more), 1)
+	ensure.DeepEqual(t, strings.Count(body, menu), 1)
+	ensure.StringContains(t, body, `<div `+menu+` popover class="sheet"><form id="m`+idStr(mb.ID)+`-pick" class="picker"`)
+	ensure.StringDoesNotContain(t, body, edit)
+	ensure.StringDoesNotContain(t, body, del)
 
-	// another member sees no menu on alice's messages
+	// and so does bob's on alice's messages
 	body = ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()
-	more, menu, _, _ = ids(m1)
-	ensure.StringDoesNotContain(t, body, more)
-	ensure.StringDoesNotContain(t, body, menu)
+	more, menu, edit, del = ids(m1)
+	ensure.DeepEqual(t, strings.Count(body, more), 1)
+	ensure.DeepEqual(t, strings.Count(body, menu), 1)
+	ensure.StringContains(t, body, `id="m`+idStr(m1.ID)+`-pick"`)
+	ensure.StringDoesNotContain(t, body, edit)
+	ensure.StringDoesNotContain(t, body, del)
 	_, _, edit, del = ids(mb)
 	ensure.StringContains(t, body, edit)
 	ensure.StringContains(t, body, del)
@@ -1030,5 +1039,206 @@ func TestMessageMenu(t *testing.T) {
 		ensure.DeepEqual(t, strings.Count(body, menu), 1)
 		ensure.StringDoesNotContain(t, body, edit)
 		ensure.StringContains(t, body, del)
+		ensure.StringDoesNotContain(t, body, `id="m`+idStr(m.ID)+`-pick"`)
+	}
+}
+
+// reactions
+
+func react(ta *testApp, chat Chat, m Message, emoji string, u *testUser) int {
+	ta.t.Helper()
+	return ta.post(chatPath(chat.ID)+"/react", url.Values{
+		"message": {idStr(m.ID)},
+		"emoji":   {emoji},
+	}, ta.as(u)).Code
+}
+
+func TestReactionToggle(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "team", bob)
+	m := ta.newMessage(chat, alice, "hello")
+	before := lastMessageAt(t, ta, chat.ID)
+	chip := fmt.Sprintf(`id="m%d-r-1f44d"`, m.ID)
+
+	// on, then off
+	w := ta.post(chatPath(chat.ID)+"/react", url.Values{"message": {idStr(m.ID)}, "emoji": {"👍"}}, ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
+	ensure.DeepEqual(t, countRows(t, ta, "reactions"), 1)
+	ensure.DeepEqual(t, react(ta, chat, m, "👍", alice), http.StatusSeeOther)
+	ensure.DeepEqual(t, countRows(t, ta, "reactions"), 0)
+	body := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, fmt.Sprintf(`<div id="m%d-reactions" class="reactions"></div>`, m.ID))
+	ensure.StringDoesNotContain(t, body, chip)
+
+	// two users on the same emoji, bob first
+	ta.app.now = func() time.Time { return testNow.Add(time.Minute) }
+	ensure.DeepEqual(t, react(ta, chat, m, "👍", bob), http.StatusSeeOther)
+	ta.app.now = func() time.Time { return testNow.Add(2 * time.Minute) }
+	ensure.DeepEqual(t, react(ta, chat, m, "👍", alice), http.StatusSeeOther)
+	ensure.DeepEqual(t, react(ta, chat, m, "❤️", bob), http.StatusSeeOther)
+	ensure.DeepEqual(t, countRows(t, ta, "reactions"), 3)
+
+	form := fmt.Sprintf(`<div id="m%d-reactions" class="reactions"><form method="post" action="%s/react" data-morph>`+
+		`<input type="hidden" name="message" value="%d">`, m.ID, chatPath(chat.ID), m.ID)
+	body = ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, form)
+	ensure.StringContains(t, body, `<button `+chip+` name="emoji" value="👍" class="chip on" title="bob, alice">👍 <span>2</span></button>`)
+	ensure.StringContains(t, body, fmt.Sprintf(`<button id="m%d-r-2764-fe0f" name="emoji" value="❤️" class="chip" title="bob">❤️ <span>1</span></button>`, m.ID))
+	// palette order, not reaction order
+	ensure.True(t, strings.Index(body, chip) < strings.Index(body, fmt.Sprintf(`id="m%d-r-2764-fe0f"`, m.ID)))
+
+	body = ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, `<button `+chip+` name="emoji" value="👍" class="chip on" title="bob, alice">`)
+	ensure.StringContains(t, body, fmt.Sprintf(`<button id="m%d-r-2764-fe0f" name="emoji" value="❤️" class="chip on" title="bob">`, m.ID))
+
+	// an admin looking in sees plain spans and no form
+	admin := ta.newUser("boss", "admin")
+	body = ta.get(chatPath(chat.ID), ta.as(admin)).Body.String()
+	ensure.StringContains(t, body, fmt.Sprintf(`<div id="m%d-reactions" class="reactions"><span `+chip+` class="chip" title="bob, alice">👍 <span>2</span></span>`, m.ID))
+	ensure.StringDoesNotContain(t, body, `action="`+chatPath(chat.ID)+`/react"`)
+
+	// reactions do not bump the chat
+	ensure.DeepEqual(t, lastMessageAt(t, ta, chat.ID), before)
+}
+
+func TestReactionAccess(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	admin := ta.newUser("boss", "admin")
+	chat := ta.newChat(alice, "team", bob)
+	other := ta.newChat(alice, "other")
+	m := ta.newMessage(chat, alice, "hello")
+	elsewhere := ta.newMessage(other, alice, "elsewhere")
+
+	ensure.DeepEqual(t, react(ta, chat, m, "🍕", alice), http.StatusBadRequest)
+	ensure.DeepEqual(t, react(ta, chat, m, "", alice), http.StatusBadRequest)
+	ensure.DeepEqual(t, react(ta, chat, m, "❤", alice), http.StatusBadRequest) // without the variation selector
+	ensure.DeepEqual(t, react(ta, chat, elsewhere, "👍", alice), http.StatusNotFound)
+	ensure.DeepEqual(t, react(ta, chat, Message{ID: 9999}, "👍", alice), http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(chatPath(chat.ID)+"/react", url.Values{"message": {"x"}, "emoji": {"👍"}}, ta.as(alice)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, react(ta, chat, m, "👍", carol), http.StatusNotFound)
+	ensure.DeepEqual(t, react(ta, chat, m, "👍", admin), http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(chatPath(chat.ID)+"/react", url.Values{"message": {idStr(m.ID)}, "emoji": {"👍"}}).Code, http.StatusUnauthorized)
+	ensure.DeepEqual(t, countRows(t, ta, "reactions"), 0)
+	ensure.DeepEqual(t, react(ta, chat, m, "👍", bob), http.StatusSeeOther)
+	ensure.DeepEqual(t, countRows(t, ta, "reactions"), 1)
+
+	// direct messages: the two participants only
+	dm := ta.newDM(alice, bob)
+	dmMsg := ta.newMessage(dm, bob, "private")
+	ensure.DeepEqual(t, react(ta, dm, dmMsg, "🎉", admin), http.StatusNotFound)
+	ensure.DeepEqual(t, react(ta, dm, dmMsg, "🎉", carol), http.StatusNotFound)
+	ensure.DeepEqual(t, react(ta, dm, dmMsg, "🎉", alice), http.StatusSeeOther)
+	body := ta.get(chatPath(dm.ID), ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, fmt.Sprintf(`<button id="m%d-r-1f389" name="emoji" value="🎉" class="chip" title="alice">🎉 <span>1</span></button>`, dmMsg.ID))
+	ensure.StringContains(t, body, fmt.Sprintf(`id="m%d-pick"`, dmMsg.ID))
+	ensure.DeepEqual(t, ta.get(chatPath(dm.ID), ta.as(admin)).Code, http.StatusNotFound)
+}
+
+func TestReactionPings(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "team", bob)
+	m := ta.newMessage(chat, alice, "hello")
+	c, cancel := ta.app.hub.subscribe(bob.ID, 0)
+	defer cancel()
+	ensure.DeepEqual(t, react(ta, chat, m, "🔥", alice), http.StatusSeeOther)
+	ensure.True(t, pinged(c))
+	ensure.DeepEqual(t, react(ta, chat, m, "🔥", alice), http.StatusSeeOther)
+	ensure.True(t, pinged(c))
+	// a refused reaction does not
+	ensure.DeepEqual(t, react(ta, chat, m, "🍕", alice), http.StatusBadRequest)
+	ensure.False(t, pinged(c))
+}
+
+func TestReactionsRemovedWithMessage(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "team", bob)
+	m := ta.newMessage(chat, alice, "hello")
+	keep := ta.newMessage(chat, alice, "keep")
+	react(ta, chat, m, "👍", alice)
+	react(ta, chat, m, "👍", bob)
+	react(ta, chat, keep, "👀", bob)
+	ensure.DeepEqual(t, countRows(t, ta, "reactions"), 3)
+	ensure.DeepEqual(t, ta.post(messagePath(chat.ID, m.ID)+"/delete", nil, ta.as(alice)).Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, countRows(t, ta, "reactions"), 1)
+}
+
+func TestEmojiID(t *testing.T) {
+	ensure.DeepEqual(t, emojiID("👍"), "1f44d")
+	ensure.DeepEqual(t, emojiID("❤️"), "2764-fe0f")
+	ensure.DeepEqual(t, emojiID("✅"), "2705")
+	seen := map[string]bool{}
+	for _, e := range reactionPalette {
+		ensure.False(t, seen[emojiID(e)], e)
+		seen[emojiID(e)] = true
+	}
+	ensure.DeepEqual(t, len(reactionPalette), 16)
+}
+
+// countingDB counts the statements run through it.
+type countingDB struct {
+	DBTX
+	n atomic.Int64
+}
+
+func (c *countingDB) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
+	c.n.Add(1)
+	return c.DBTX.ExecContext(ctx, q, args...)
+}
+
+func (c *countingDB) QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error) {
+	c.n.Add(1)
+	return c.DBTX.QueryContext(ctx, q, args...)
+}
+
+func (c *countingDB) QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row {
+	c.n.Add(1)
+	return c.DBTX.QueryRowContext(ctx, q, args...)
+}
+
+func TestReactionsConstantQueries(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "team", bob)
+	counter := &countingDB{DBTX: ta.app.db}
+	ta.app.q = New(counter)
+	queries := func() (int64, string) {
+		counter.n.Store(0)
+		w := ta.get(chatPath(chat.ID), ta.as(alice))
+		ensure.DeepEqual(t, w.Code, http.StatusOK)
+		return counter.n.Load(), w.Body.String()
+	}
+
+	m := ta.newMessage(chat, alice, "first")
+	react(ta, chat, m, "👍", bob)
+	one, _ := queries()
+	for i := range 99 {
+		m := ta.newMessage(chat, bob, fmt.Sprintf("message %d", i))
+		react(ta, chat, m, "👍", alice)
+		react(ta, chat, m, "😂", bob)
+	}
+	hundred, body := queries()
+	ensure.DeepEqual(t, hundred, one)
+	ensure.DeepEqual(t, strings.Count(body, `class="chip on"`), 99)
+	ensure.DeepEqual(t, strings.Count(body, `class="chip"`), 1+99)
+
+	// every message has its reactions div and picker exactly once
+	rows, err := ta.app.q.MessagesLatest(t.Context(), MessagesLatestParams{ChatID: chat.ID, N: 100})
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, len(rows), 100)
+	for _, row := range rows {
+		id := idStr(row.Message.ID)
+		ensure.DeepEqual(t, strings.Count(body, `id="m`+id+`-reactions"`), 1)
+		ensure.DeepEqual(t, strings.Count(body, `id="m`+id+`-pick"`), 1)
 	}
 }

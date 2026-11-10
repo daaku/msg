@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const chatByDMKey = `-- name: ChatByDMKey :one
@@ -947,6 +948,22 @@ func (q *Queries) MessageDelete(ctx context.Context, id int64) error {
 	return err
 }
 
+const messageInChat = `-- name: MessageInChat :one
+SELECT id FROM messages WHERE id = ?1 AND chat_id = ?2
+`
+
+type MessageInChatParams struct {
+	ID     int64
+	ChatID int64
+}
+
+func (q *Queries) MessageInChat(ctx context.Context, arg MessageInChatParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, messageInChat, arg.ID, arg.ChatID)
+	var id int64
+	err := row.Scan(&id)
+	return id, err
+}
+
 const messageUpdateBody = `-- name: MessageUpdateBody :exec
 UPDATE messages SET body = ?1, edited_at = ?2 WHERE id = ?3
 `
@@ -997,6 +1014,99 @@ func (q *Queries) MessagesLatest(ctx context.Context, arg MessagesLatestParams) 
 			&i.Message.FileID,
 			&i.Message.CreatedAt,
 			&i.Message.EditedAt,
+			&i.Username,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const reactionAdd = `-- name: ReactionAdd :exec
+INSERT INTO reactions (message_id, user_id, emoji, created_at)
+VALUES (?1, ?2, ?3, ?4)
+`
+
+type ReactionAddParams struct {
+	MessageID int64
+	UserID    int64
+	Emoji     string
+	CreatedAt int64
+}
+
+func (q *Queries) ReactionAdd(ctx context.Context, arg ReactionAddParams) error {
+	_, err := q.db.ExecContext(ctx, reactionAdd,
+		arg.MessageID,
+		arg.UserID,
+		arg.Emoji,
+		arg.CreatedAt,
+	)
+	return err
+}
+
+const reactionDelete = `-- name: ReactionDelete :execrows
+DELETE FROM reactions
+WHERE message_id = ?1 AND user_id = ?2 AND emoji = ?3
+`
+
+type ReactionDeleteParams struct {
+	MessageID int64
+	UserID    int64
+	Emoji     string
+}
+
+func (q *Queries) ReactionDelete(ctx context.Context, arg ReactionDeleteParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, reactionDelete, arg.MessageID, arg.UserID, arg.Emoji)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const reactionsForMessages = `-- name: ReactionsForMessages :many
+SELECT reactions.message_id, reactions.emoji, reactions.user_id, users.username
+FROM reactions JOIN users ON users.id = reactions.user_id
+WHERE reactions.message_id IN (/*SLICE:ids*/?)
+ORDER BY reactions.created_at, reactions.user_id
+`
+
+type ReactionsForMessagesRow struct {
+	MessageID int64
+	Emoji     string
+	UserID    int64
+	Username  string
+}
+
+func (q *Queries) ReactionsForMessages(ctx context.Context, ids []int64) ([]ReactionsForMessagesRow, error) {
+	query := reactionsForMessages
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ReactionsForMessagesRow
+	for rows.Next() {
+		var i ReactionsForMessagesRow
+		if err := rows.Scan(
+			&i.MessageID,
+			&i.Emoji,
+			&i.UserID,
 			&i.Username,
 		); err != nil {
 			return nil, err

@@ -234,3 +234,20 @@ UPDATE messages SET body = @body, edited_at = @edited_at WHERE id = @id;
 
 -- name: MessageDelete :exec
 DELETE FROM messages WHERE id = ?;
+
+-- name: MessageInChat :one
+SELECT id FROM messages WHERE id = @id AND chat_id = @chat_id;
+
+-- name: ReactionDelete :execrows
+DELETE FROM reactions
+WHERE message_id = @message_id AND user_id = @user_id AND emoji = @emoji;
+
+-- name: ReactionAdd :exec
+INSERT INTO reactions (message_id, user_id, emoji, created_at)
+VALUES (@message_id, @user_id, @emoji, @created_at);
+
+-- name: ReactionsForMessages :many
+SELECT reactions.message_id, reactions.emoji, reactions.user_id, users.username
+FROM reactions JOIN users ON users.id = reactions.user_id
+WHERE reactions.message_id IN (sqlc.slice('ids'))
+ORDER BY reactions.created_at, reactions.user_id;
