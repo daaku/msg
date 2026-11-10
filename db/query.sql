@@ -107,3 +107,27 @@ ORDER BY id DESC;
 
 -- name: InviteRevokeForUser :execrows
 DELETE FROM invites WHERE id = @id AND user_id = @user_id;
+
+-- name: InvitesPendingByCreator :many
+SELECT * FROM invites
+WHERE user_id IS NULL AND created_by = @created_by AND expires_at > @now
+ORDER BY id DESC;
+
+-- name: InvitesPendingAll :many
+SELECT sqlc.embed(invites), users.username AS creator
+FROM invites JOIN users ON users.id = invites.created_by
+WHERE invites.user_id IS NULL AND invites.expires_at > @now
+ORDER BY invites.id DESC;
+
+-- name: InviteDeleteExpiredByUsername :exec
+DELETE FROM invites
+WHERE username = @username AND user_id IS NULL AND expires_at <= @now;
+
+-- name: InvitePendingByUsername :one
+SELECT * FROM invites
+WHERE username = @username AND user_id IS NULL AND expires_at > @now;
+
+-- name: InviteRevoke :execrows
+DELETE FROM invites
+WHERE id = @id AND user_id IS NULL AND created_by IS NOT NULL
+  AND (created_by = @created_by OR CAST(@any_creator AS BOOLEAN));

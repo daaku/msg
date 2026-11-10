@@ -44,6 +44,8 @@ const (
 	pAssets             = "/assets/"
 	pHome               = "/"
 	pInvite             = "/invite/"
+	pInvites            = "/invites"
+	pInvitesRevoke      = "/invites/revoke"
 	pLivereload         = "/livereload"
 	pLivereloadJS       = "/livereload.js"
 	pPasskeyCreate      = "/passkey/create"
@@ -610,6 +612,8 @@ func (a *app) home(w http.ResponseWriter, r *http.Request) error {
 			h.Header(h.Class("home-header"),
 				h.H1(g.Text(a.cfg.AppName)),
 				h.Nav(h.Class("cluster"),
+					g.If(allowed(user, accInvite),
+						h.A(h.Class("btn ghost"), h.Href(pInvites), g.Text("Invites"))),
 					h.A(h.Class("btn ghost"), h.Href(pSettings), h.Title("Settings"),
 						icon("gear"), h.Span(h.Class("visually-hidden"), g.Text("Settings"))))),
 			h.P(g.Text("Signed in as "+user.Username+".")),
@@ -630,6 +634,9 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
 	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
 	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
+	mux.HandleFunc("GET "+pInvites, a.wrap(accInvite, a.invites))
+	mux.HandleFunc("POST "+pInvites, a.wrap(accInvite, a.invitesPost))
+	mux.HandleFunc("POST "+pInvitesRevoke, a.wrap(accInvite, a.invitesRevoke))
 	mux.HandleFunc("GET "+pSettings, a.wrap(accUser, a.settings))
 	mux.HandleFunc("POST "+pSettingsLink, a.wrap(accUser, a.settingsLink))
 	mux.HandleFunc("POST "+pSettingsLinkRevoke, a.wrap(accUser, a.settingsLinkRevoke))

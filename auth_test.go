@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -721,4 +722,233 @@ func TestSettingsSignedOut(t *testing.T) {
 	for _, p := range []string{pPasskeyCreate, pPasskeyDelete, pSettingsLink, pSettingsLinkRevoke} {
 		ensure.DeepEqual(t, ta.post(p, url.Values{"id": {"1"}}).Code, http.StatusUnauthorized, p)
 	}
+}
+
+func TestUsernamePattern(t *testing.T) {
+	// The HTML pattern agrees with the server rule. Browsers anchor it.
+	re := regexp.MustCompile(`^(?:` + usernamePattern + `)$`)
+	for _, s := range []string{"ab", "a.b-c_d", "9lives", strings.Repeat("a", 32),
+		"a", ".ab", "-ab", "Ab", "a b", strings.Repeat("a", 33), "a/b"} {
+		ensure.DeepEqual(t, re.MatchString(s), usernameRe.MatchString(s), s)
+	}
+}
+
+func invitesSent(t *testing.T, ta *testApp, userID int64) int64 {
+	t.Helper()
+	s, err := ta.app.userStats(t.Context(), userID)
+	ensure.Nil(t, err)
+	return s.InvitesSent
+}
+
+func pendingInvite(t *testing.T, ta *testApp, username string) Invite {
+	t.Helper()
+	inv, err := ta.app.q.InvitePendingByUsername(t.Context(), InvitePendingByUsernameParams{
+		Username: username, Now: ta.app.now().Unix()})
+	ensure.Nil(t, err, username)
+	return inv
+}
+
+func TestInvitesAccess(t *testing.T) {
+	ta := newTestApp(t)
+	plain := ta.newUser("plain", "group")
+	inviter := ta.newUser("inviter", "invite")
+	admin := ta.newUser("boss", "admin")
+
+	ensure.DeepEqual(t, ta.get(pInvites, ta.as(plain)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.post(pInvites, url.Values{"username": {"zed"}}, ta.as(plain)).Code,
+		http.StatusNotFound)
+	inv := ta.newInvite("victim", false)
+	ensure.DeepEqual(t, ta.post(pInvitesRevoke, url.Values{"id": {strconv.FormatInt(inv.ID, 10)}},
+		ta.as(plain)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, countRows(t, ta, "invites"), 1)
+
+	w := ta.get(pInvites)
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), pSignIn)
+	ensure.DeepEqual(t, ta.post(pInvites, url.Values{"username": {"zed"}}).Code, http.StatusUnauthorized)
+	ensure.DeepEqual(t, ta.post(pInvitesRevoke, url.Values{"id": {"1"}}).Code, http.StatusUnauthorized)
+
+	// the home page links to invites only for those who may use it
+	ensure.StringDoesNotContain(t, ta.get(pHome, ta.as(plain)).Body.String(), `href="/invites"`)
+	for _, u := range []*testUser{inviter, admin} {
+		ensure.StringContains(t, ta.get(pHome, ta.as(u)).Body.String(), `href="/invites"`)
+		ensure.DeepEqual(t, ta.get(pInvites, ta.as(u)).Code, http.StatusOK)
+	}
+}
+
+func TestInvitesCreate(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	alice := ta.newUser("alice", "invite")
+
+	page := ta.get(pInvites, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, "<h1>Invites</h1>")
+	ensure.StringContains(t, page, `href="/"`)
+	ensure.StringContains(t, page, `name="username"`)
+	ensure.StringContains(t, page, `autocapitalize="none"`)
+	ensure.StringContains(t, page, `autocomplete="off"`)
+	ensure.StringContains(t, page, `spellcheck="false"`)
+	ensure.StringContains(t, page, "required")
+	ensure.StringContains(t, page, `pattern="`+usernamePattern+`"`)
+	ensure.StringContains(t, page, "lowercase letters")
+
+	w := ta.post(pInvites, url.Values{"username": {" Bob "}}, ta.as(alice))
+	ensure.DeepEqual(t, w.Header().Get("Location"), pInvites)
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "Invite created for bob.")
+	ensure.DeepEqual(t, countRows(t, ta, "invites"), 1)
+	ensure.DeepEqual(t, invitesSent(t, ta, alice.ID), int64(1))
+	inv := pendingInvite(t, ta, "bob")
+	ensure.DeepEqual(t, inv.CreatedBy.Int64, alice.ID)
+	ensure.False(t, inv.UserID.Valid)
+	ensure.False(t, inv.PermAdmin)
+	ensure.DeepEqual(t, inv.ExpiresAt, testNow.Add(7*24*time.Hour).Unix())
+
+	page = ta.get(pInvites, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, fmt.Sprintf(`id="invite-%d"`, inv.ID))
+	ensure.StringContains(t, page, `value="`+ta.app.inviteURL(inv)+`"`)
+	ensure.StringContains(t, page, "data-copy")
+	ensure.StringContains(t, page, "expires in 7 days")
+	ensure.StringContains(t, page, `action="/invites/revoke"`)
+
+	// the new link is at the top
+	ta.post(pInvites, url.Values{"username": {"carl"}}, ta.as(alice))
+	page = ta.get(pInvites, ta.as(alice)).Body.String()
+	ensure.True(t, strings.Index(page, ">carl<") < strings.Index(page, ">bob<"), "newest first")
+
+	// the link works end to end
+	aw, _, _ := ta.acceptInvite(inv)
+	ensure.DeepEqual(t, aw.Code, http.StatusSeeOther, aw.Body.String())
+	bob, err := ta.app.q.UserByUsername(ctx, "bob")
+	ensure.Nil(t, err)
+	ensure.False(t, bob.PermAdmin)
+	ensure.False(t, bob.PermInvite)
+	ensure.False(t, bob.PermGroup)
+	ensure.DeepEqual(t, bob.InvitedBy.Int64, alice.ID)
+	ensure.DeepEqual(t, ta.get(pInvites, withCookies(aw)).Code, http.StatusNotFound)
+	ensure.StringDoesNotContain(t, ta.get(pInvites, ta.as(alice)).Body.String(), ">bob<")
+}
+
+func TestInvitesCreateRejected(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "invite")
+	ta.newUser("dora")
+	ta.post(pInvites, url.Values{"username": {"erin"}}, ta.as(alice))
+	ensure.DeepEqual(t, invitesSent(t, ta, alice.ID), int64(1))
+
+	cases := map[string]string{
+		"bad name!": "Usernames are 2 to 32 characters",
+		"x":         "Usernames are 2 to 32 characters",
+		"dora":      "That username is taken.",
+		"Dora":      "That username is taken.",
+		"erin":      "There is already a pending invite for that username.",
+		"ERIN":      "There is already a pending invite for that username.",
+	}
+	for typed, msg := range cases {
+		w := ta.post(pInvites, url.Values{"username": {typed}}, ta.as(alice))
+		ensure.DeepEqual(t, w.Header().Get("Location"),
+			pInvites+"?"+url.Values{"username": {typed}}.Encode(), typed)
+		page := ta.flashOf(w, ta.as(alice))
+		ensure.StringContains(t, page, msg)
+		// the typed value is refilled
+		ensure.StringContains(t, page, `value="`+typed+`"`)
+	}
+	ensure.DeepEqual(t, invitesSent(t, ta, alice.ID), int64(1))
+	ensure.DeepEqual(t, countRows(t, ta, "invites"), 1)
+}
+
+func TestInvitesUniqueIndexBackstop(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "invite")
+	// Simulate a racing request that inserts the same username between the
+	// pending check and the insert.
+	_, err := ta.app.db.ExecContext(t.Context(), `
+		CREATE TRIGGER race BEFORE INSERT ON invites
+		WHEN NEW.username = 'bob' AND NEW.token != 'racer'
+		BEGIN
+			INSERT INTO invites (token, username, handle, created_at, expires_at)
+			VALUES ('racer', 'bob', x'01', 0, 9999999999);
+		END`)
+	ensure.Nil(t, err)
+	w := ta.post(pInvites, url.Values{"username": {"bob"}}, ta.as(alice))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)),
+		"There is already a pending invite for that username.")
+	ensure.DeepEqual(t, invitesSent(t, ta, alice.ID), int64(0))
+	ensure.DeepEqual(t, countRows(t, ta, "invites"), 0)
+}
+
+func TestInvitesExpiredDoesNotBlock(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "invite")
+	ta.post(pInvites, url.Values{"username": {"bob"}}, ta.as(alice))
+	old := pendingInvite(t, ta, "bob")
+
+	ta.app.now = func() time.Time { return testNow.Add(8 * 24 * time.Hour) }
+	// expired rows are not listed
+	ensure.StringDoesNotContain(t, ta.get(pInvites, ta.as(alice)).Body.String(), old.Token)
+	w := ta.post(pInvites, url.Values{"username": {"bob"}}, ta.as(alice))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "Invite created for bob.")
+	ensure.DeepEqual(t, countRows(t, ta, "invites"), 1)
+	ensure.True(t, pendingInvite(t, ta, "bob").Token != old.Token)
+	ensure.DeepEqual(t, invitesSent(t, ta, alice.ID), int64(2))
+}
+
+func TestInvitesRevoke(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "invite")
+	mallory := ta.newUser("mallory", "invite")
+	admin := ta.newUser("boss", "admin")
+	revoke := func(u *testUser, inv Invite) *httptest.ResponseRecorder {
+		return ta.post(pInvitesRevoke, url.Values{"id": {strconv.FormatInt(inv.ID, 10)}}, ta.as(u))
+	}
+	ta.post(pInvites, url.Values{"username": {"bob"}}, ta.as(alice))
+	ta.post(pInvites, url.Values{"username": {"carl"}}, ta.as(alice))
+	bob, carl := pendingInvite(t, ta, "bob"), pendingInvite(t, ta, "carl")
+
+	// own invite
+	w := revoke(alice, bob)
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "Invite revoked.")
+	ensure.DeepEqual(t, ta.get(invitePath(bob.Token)).Code, http.StatusNotFound)
+	ensure.StringContains(t, ta.get(invitePath(bob.Token)).Body.String(), msgInviteInvalid)
+
+	// another user's: refused for a non admin, allowed for an admin
+	ensure.DeepEqual(t, revoke(mallory, carl).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.get(invitePath(carl.Token)).Code, http.StatusOK)
+	ensure.DeepEqual(t, revoke(admin, carl).Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, ta.get(invitePath(carl.Token)).Code, http.StatusNotFound)
+
+	// never an add passkey link or the bootstrap invite
+	link, err := ta.app.createInvite(t.Context(), ta.app.q, inviteParams{
+		User: &alice.User, CreatedBy: alice.ID, TTL: time.Hour})
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, revoke(alice, link).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, revoke(admin, link).Code, http.StatusNotFound)
+	boot := ta.newInvite("root", true)
+	ensure.DeepEqual(t, revoke(admin, boot).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, countRows(t, ta, "invites"), 2)
+}
+
+func TestInvitesList(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "invite")
+	mallory := ta.newUser("mallory", "invite")
+	admin := ta.newUser("boss", "admin")
+	ta.post(pInvites, url.Values{"username": {"bob"}}, ta.as(alice))
+	ta.post(pInvites, url.Values{"username": {"carl"}}, ta.as(mallory))
+	link, err := ta.app.createInvite(t.Context(), ta.app.q, inviteParams{
+		User: &alice.User, CreatedBy: alice.ID, TTL: time.Hour})
+	ensure.Nil(t, err)
+	bob, carl := pendingInvite(t, ta, "bob"), pendingInvite(t, ta, "carl")
+
+	page := ta.get(pInvites, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, bob.Token)
+	ensure.StringDoesNotContain(t, page, carl.Token)
+	ensure.StringDoesNotContain(t, page, link.Token)
+	ensure.StringDoesNotContain(t, page, "by alice")
+
+	page = ta.get(pInvites, ta.as(admin)).Body.String()
+	ensure.StringContains(t, page, bob.Token)
+	ensure.StringContains(t, page, carl.Token)
+	ensure.StringContains(t, page, "by alice")
+	ensure.StringContains(t, page, "by mallory")
+	ensure.StringDoesNotContain(t, page, link.Token)
 }

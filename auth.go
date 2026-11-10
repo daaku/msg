@@ -35,12 +35,19 @@ const (
 	msgInviteInvalid = "This link is invalid or has expired."
 )
 
+const (
+	// usernamePattern is usernameRe for the HTML pattern attribute, which is
+	// implicitly anchored and compiled with the v flag.
+	usernamePattern = `[a-z0-9][a-z0-9_.\-]{1,31}`
+	msgUsernameRule = "Usernames are 2 to 32 characters: lowercase letters, " +
+		"digits, dot, dash and underscore, starting with a letter or digit."
+)
+
 // validUsername normalises a username and checks it against the rule.
 func validUsername(s string) (string, error) {
 	s = strings.ToLower(strings.TrimSpace(s))
 	if !usernameRe.MatchString(s) {
-		return "", errors.New("Usernames are 2 to 32 characters: lowercase letters, " +
-			"digits, dot, dash and underscore, starting with a letter or digit.")
+		return "", errors.New(msgUsernameRule)
 	}
 	return s, nil
 }
@@ -611,6 +618,13 @@ func passkeyList(creds []Credential, current int64, deleteAction string, canDele
 	}))
 }
 
+// copyField is a read only field holding the full URL of an invite, selected
+// as a whole when focused.
+func (a *app) copyField(id string, inv Invite) g.Node {
+	return h.Input(h.ID(id), h.Type("text"), h.ReadOnly(), h.Data("copy", ""),
+		h.Value(a.inviteURL(inv)), h.Aria("label", "Link"))
+}
+
 // linkList renders pending add passkey links, each with a copyable URL, its
 // expiry, and a revoke button posting to revokeAction.
 func (a *app) linkList(links []Invite, revokeAction string) g.Node {
@@ -620,8 +634,7 @@ func (a *app) linkList(links []Invite, revokeAction string) g.Node {
 	return h.Ul(h.Class("list"), g.Map(links, func(inv Invite) g.Node {
 		id := fmt.Sprintf("link-%d", inv.ID)
 		return h.Li(h.ID(id), h.Class("stack-tight"),
-			h.Input(h.ID(id+"-url"), h.Type("text"), h.ReadOnly(), h.Data("copy", ""),
-				h.Value(a.inviteURL(inv)), h.Aria("label", "Link")),
+			a.copyField(id+"-url", inv),
 			h.Div(h.Class("row"),
 				dateCell("Expires", inv.ExpiresAt),
 				h.Form(h.Method("post"), h.Action(revokeAction),
@@ -823,4 +836,168 @@ func (a *app) settingsLinkRevoke(w http.ResponseWriter, r *http.Request) error {
 		return httpErr(http.StatusNotFound, "Not found.")
 	}
 	return a.flash(w, r, pSettings+"#devices", Flash{Kind: flashSuccess, Content: "Link revoked."})
+}
+
+// sending invites
+
+const inviteTTL = 7 * 24 * time.Hour
+
+// expiresIn describes how long until unix, in whole days rounded up.
+func (a *app) expiresIn(unix int64) string {
+	days := (unix - a.now().Unix() + 86399) / 86400
+	if days <= 1 {
+		return "expires in 1 day"
+	}
+	return fmt.Sprintf("expires in %d days", days)
+}
+
+func (a *app) invites(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	w.Header().Set("Cache-Control", "no-store") // holds invite links
+	type row struct {
+		inv     Invite
+		creator string
+	}
+	var rows []row
+	if allowed(user, accAdmin) {
+		all, err := a.q.InvitesPendingAll(ctx, a.now().Unix())
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		for _, r := range all {
+			rows = append(rows, row{r.Invite, r.Creator})
+		}
+	} else {
+		own, err := a.q.InvitesPendingByCreator(ctx, InvitesPendingByCreatorParams{
+			CreatedBy: sql.NullInt64{Int64: user.ID, Valid: true},
+			Now:       a.now().Unix(),
+		})
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		for _, inv := range own {
+			rows = append(rows, row{inv: inv})
+		}
+	}
+
+	var list g.Node = h.P(h.Class("muted"), g.Text("No pending invites."))
+	if len(rows) > 0 {
+		list = h.Ul(h.Class("list"), g.Map(rows, func(rw row) g.Node {
+			id := fmt.Sprintf("invite-%d", rw.inv.ID)
+			return h.Li(h.ID(id), h.Class("stack-tight"),
+				h.Span(h.Class("cluster"),
+					h.Strong(g.Text(rw.inv.Username)),
+					g.If(rw.creator != "", h.Span(h.Class("muted"), g.Text("by "+rw.creator)))),
+				a.copyField(id+"-url", rw.inv),
+				h.Div(h.Class("row"),
+					h.Span(h.Class("muted"), g.Text(a.expiresIn(rw.inv.ExpiresAt))),
+					h.Form(h.Method("post"), h.Action(pInvitesRevoke),
+						h.Input(h.Type("hidden"), h.Name("id"),
+							h.Value(strconv.FormatInt(rw.inv.ID, 10))),
+						h.Button(h.Class("btn secondary"), g.Text("Revoke")))))
+		}))
+	}
+
+	return a.pageSimple(w, r, "Invites", backLink(pHome, "Home"),
+		h.Form(h.Method("post"), h.Action(pInvites), h.Class("stack card"),
+			h.Label(g.Text("Username"),
+				h.Input(h.Type("text"), h.Name("username"), h.ID("username"),
+					h.Value(r.URL.Query().Get("username")),
+					h.AutoComplete("off"), g.Attr("autocapitalize", "none"),
+					g.Attr("spellcheck", "false"), h.Required(),
+					h.Pattern(usernamePattern), h.Aria("describedby", "username-hint"))),
+			h.P(h.ID("username-hint"), h.Class("muted"), g.Text(msgUsernameRule)),
+			h.Button(h.Class("btn"), icon("plus"), h.Span(g.Text("Create invite")))),
+		h.Section(h.ID("invites"), h.Class("stack"),
+			h.H2(g.Text("Pending invites")),
+			list),
+	).Render(w)
+}
+
+func (a *app) invitesPost(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	typed := r.FormValue("username")
+	fail := func(msg string) error {
+		return a.flash(w, r, pInvites+"?"+url.Values{"username": {typed}}.Encode(),
+			Flash{Kind: flashError, Content: msg})
+	}
+	const (
+		msgTaken   = "That username is taken."
+		msgPending = "There is already a pending invite for that username."
+	)
+	username, err := validUsername(typed)
+	if err != nil {
+		return fail(err.Error())
+	}
+	var refused string
+	err = a.tx(ctx, func(q *Queries) error {
+		now := a.now().Unix()
+		err := q.InviteDeleteExpiredByUsername(ctx, InviteDeleteExpiredByUsernameParams{
+			Username: username,
+			Now:      now,
+		})
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		if _, err := q.UserByUsername(ctx, username); err == nil {
+			refused = msgTaken
+			return nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return serr.Wrap(err)
+		}
+		_, err = q.InvitePendingByUsername(ctx, InvitePendingByUsernameParams{
+			Username: username,
+			Now:      now,
+		})
+		if err == nil {
+			refused = msgPending
+			return nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return serr.Wrap(err)
+		}
+		_, err = a.createInvite(ctx, q, inviteParams{
+			Username:  username,
+			CreatedBy: user.ID,
+			TTL:       inviteTTL,
+		})
+		if err != nil {
+			return err
+		}
+		return a.statUser(ctx, q, user.ID, UserStatsAddParams{InvitesSent: 1})
+	})
+	if isUniqueErr(err) {
+		// invites_new_username caught a racing invite for the same username.
+		return fail(msgPending)
+	}
+	if err != nil {
+		return err
+	}
+	if refused != "" {
+		return fail(refused)
+	}
+	return a.flash(w, r, pInvites, Flash{Kind: flashSuccess,
+		Content: "Invite created for " + username + ". Send them the link."})
+}
+
+func (a *app) invitesRevoke(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	id, err := formID(r, "id")
+	if err != nil {
+		return err
+	}
+	n, err := a.q.InviteRevoke(ctx, InviteRevokeParams{
+		ID:         id,
+		CreatedBy:  sql.NullInt64{Int64: user.ID, Valid: true},
+		AnyCreator: allowed(user, accAdmin),
+	})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	if n == 0 {
+		return httpErr(http.StatusNotFound, "Not found.")
+	}
+	return a.flash(w, r, pInvites, Flash{Kind: flashSuccess, Content: "Invite revoked."})
 }

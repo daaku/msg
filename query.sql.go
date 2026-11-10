@@ -303,6 +303,68 @@ func (q *Queries) InviteDeleteBootstrap(ctx context.Context) error {
 	return err
 }
 
+const inviteDeleteExpiredByUsername = `-- name: InviteDeleteExpiredByUsername :exec
+DELETE FROM invites
+WHERE username = ?1 AND user_id IS NULL AND expires_at <= ?2
+`
+
+type InviteDeleteExpiredByUsernameParams struct {
+	Username string
+	Now      int64
+}
+
+func (q *Queries) InviteDeleteExpiredByUsername(ctx context.Context, arg InviteDeleteExpiredByUsernameParams) error {
+	_, err := q.db.ExecContext(ctx, inviteDeleteExpiredByUsername, arg.Username, arg.Now)
+	return err
+}
+
+const invitePendingByUsername = `-- name: InvitePendingByUsername :one
+SELECT id, token, username, handle, user_id, perm_admin, created_by, created_at, expires_at FROM invites
+WHERE username = ?1 AND user_id IS NULL AND expires_at > ?2
+`
+
+type InvitePendingByUsernameParams struct {
+	Username string
+	Now      int64
+}
+
+func (q *Queries) InvitePendingByUsername(ctx context.Context, arg InvitePendingByUsernameParams) (Invite, error) {
+	row := q.db.QueryRowContext(ctx, invitePendingByUsername, arg.Username, arg.Now)
+	var i Invite
+	err := row.Scan(
+		&i.ID,
+		&i.Token,
+		&i.Username,
+		&i.Handle,
+		&i.UserID,
+		&i.PermAdmin,
+		&i.CreatedBy,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const inviteRevoke = `-- name: InviteRevoke :execrows
+DELETE FROM invites
+WHERE id = ?1 AND user_id IS NULL AND created_by IS NOT NULL
+  AND (created_by = ?2 OR CAST(?3 AS BOOLEAN))
+`
+
+type InviteRevokeParams struct {
+	ID         int64
+	CreatedBy  sql.NullInt64
+	AnyCreator bool
+}
+
+func (q *Queries) InviteRevoke(ctx context.Context, arg InviteRevokeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, inviteRevoke, arg.ID, arg.CreatedBy, arg.AnyCreator)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const inviteRevokeForUser = `-- name: InviteRevokeForUser :execrows
 DELETE FROM invites WHERE id = ?1 AND user_id = ?2
 `
@@ -345,6 +407,96 @@ func (q *Queries) InviteUse(ctx context.Context, arg InviteUseParams) (Invite, e
 		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const invitesPendingAll = `-- name: InvitesPendingAll :many
+SELECT invites.id, invites.token, invites.username, invites.handle, invites.user_id, invites.perm_admin, invites.created_by, invites.created_at, invites.expires_at, users.username AS creator
+FROM invites JOIN users ON users.id = invites.created_by
+WHERE invites.user_id IS NULL AND invites.expires_at > ?1
+ORDER BY invites.id DESC
+`
+
+type InvitesPendingAllRow struct {
+	Invite  Invite
+	Creator string
+}
+
+func (q *Queries) InvitesPendingAll(ctx context.Context, now int64) ([]InvitesPendingAllRow, error) {
+	rows, err := q.db.QueryContext(ctx, invitesPendingAll, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InvitesPendingAllRow
+	for rows.Next() {
+		var i InvitesPendingAllRow
+		if err := rows.Scan(
+			&i.Invite.ID,
+			&i.Invite.Token,
+			&i.Invite.Username,
+			&i.Invite.Handle,
+			&i.Invite.UserID,
+			&i.Invite.PermAdmin,
+			&i.Invite.CreatedBy,
+			&i.Invite.CreatedAt,
+			&i.Invite.ExpiresAt,
+			&i.Creator,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const invitesPendingByCreator = `-- name: InvitesPendingByCreator :many
+SELECT id, token, username, handle, user_id, perm_admin, created_by, created_at, expires_at FROM invites
+WHERE user_id IS NULL AND created_by = ?1 AND expires_at > ?2
+ORDER BY id DESC
+`
+
+type InvitesPendingByCreatorParams struct {
+	CreatedBy sql.NullInt64
+	Now       int64
+}
+
+func (q *Queries) InvitesPendingByCreator(ctx context.Context, arg InvitesPendingByCreatorParams) ([]Invite, error) {
+	rows, err := q.db.QueryContext(ctx, invitesPendingByCreator, arg.CreatedBy, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Invite
+	for rows.Next() {
+		var i Invite
+		if err := rows.Scan(
+			&i.ID,
+			&i.Token,
+			&i.Username,
+			&i.Handle,
+			&i.UserID,
+			&i.PermAdmin,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const invitesPendingForUser = `-- name: InvitesPendingForUser :many
