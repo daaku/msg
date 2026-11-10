@@ -304,7 +304,7 @@ func TestConfigBadValues(t *testing.T) {
 		"DEV":              "yes",
 		"S3_ENDPOINT":      "ftp://x",
 		"S3_PATH_STYLE":    "maybe",
-		"S3_URL_VALIDITY":  "8d",
+		"S3_URL_VALIDITY":  "0d",
 		"MAX_UPLOAD_SIZE":  "lots",
 		"IMAGE_FORMAT":     "gif",
 		"IMAGE_RESOLUTION": "8k",
@@ -341,6 +341,12 @@ func TestConfigValues(t *testing.T) {
 	ensure.True(t, cfg.Dev)
 	ensure.False(t, cfg.S3PathStyle)
 	ensure.DeepEqual(t, cfg.S3URLValidity, 24*time.Hour)
+
+	// providers that allow longer than 7 days may be given more
+	env["S3_URL_VALIDITY"] = "30d"
+	cfg, err = parseConfig(func(k string) string { return env[k] })
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, cfg.S3URLValidity, 30*24*time.Hour)
 	ensure.DeepEqual(t, cfg.MaxUploadSize, int64(1<<30))
 	ensure.DeepEqual(t, cfg.ImageFormat, "avif")
 	ensure.DeepEqual(t, cfg.ImageResolution, 2560)

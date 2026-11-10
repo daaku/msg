@@ -171,13 +171,8 @@ func parseConfig(getenv func(string) string) (config, error) {
 		return nil
 	})
 	parse("S3_URL_VALIDITY", "7d", func(v string) (err error) {
-		if c.S3URLValidity, err = parseDuration(v); err != nil {
-			return err
-		}
-		if c.S3URLValidity > 7*24*time.Hour {
-			return errors.New("must be at most 7d")
-		}
-		return nil
+		c.S3URLValidity, err = parseDuration(v)
+		return err
 	})
 
 	parse("MAX_UPLOAD_SIZE", "100MB", func(v string) (err error) {
