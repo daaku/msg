@@ -1,9 +1,12 @@
 package main
 
 import (
+	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -486,4 +489,236 @@ func TestPermissionChangeAppliesToNextRequest(t *testing.T) {
 		"UPDATE users SET perm_admin = TRUE WHERE id = ?", bob.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, call(), http.StatusOK)
+}
+
+// addPasskey registers a second passkey for u through the settings page.
+func (ta *testApp) addPasskey(u *testUser) (*httptest.ResponseRecorder, *virtualwebauthn.Authenticator, virtualwebauthn.Credential) {
+	ta.t.Helper()
+	auth := virtualwebauthn.NewAuthenticatorWithOptions(
+		virtualwebauthn.AuthenticatorOptions{UserHandle: u.Handle})
+	cred := virtualwebauthn.NewCredential(virtualwebauthn.KeyTypeEC2)
+	w := ta.register(pPasskeyOptions, pPasskeyCreate, &auth, cred, ta.as(u))
+	auth.AddCredential(cred)
+	return w, &auth, cred
+}
+
+func pendingLinks(t *testing.T, ta *testApp, userID int64) []Invite {
+	t.Helper()
+	links, err := ta.app.q.InvitesPendingForUser(t.Context(), InvitesPendingForUserParams{
+		UserID: sql.NullInt64{Int64: userID, Valid: true},
+		Now:    ta.app.now().Unix(),
+	})
+	ensure.Nil(t, err)
+	return links
+}
+
+func credCount(t *testing.T, ta *testApp, userID int64) int64 {
+	t.Helper()
+	n, err := ta.app.q.CredentialCountByUser(t.Context(), userID)
+	ensure.Nil(t, err)
+	return n
+}
+
+// flashOf follows a redirect that set a flash and returns the page body.
+func (ta *testApp) flashOf(w *httptest.ResponseRecorder, opts ...reqOpt) string {
+	ta.t.Helper()
+	ensure.DeepEqual(ta.t, w.Code, http.StatusSeeOther, w.Body.String())
+	c := findCookie(w, "flash")
+	ensure.True(ta.t, c != nil, "flash cookie")
+	opts = append(opts, func(r *http.Request) { r.AddCookie(c) })
+	loc, _, _ := strings.Cut(w.Header().Get("Location"), "#")
+	return ta.get(loc, opts...).Body.String()
+}
+
+func TestSettingsPage(t *testing.T) {
+	ta := newTestApp(t)
+	bob := ta.newUser("bob", "invite", "group")
+	carol := ta.newUser("carol")
+
+	ensure.StringContains(t, ta.get(pHome, ta.as(bob)).Body.String(), `href="/settings"`)
+
+	w := ta.get(pSettings, ta.as(bob))
+	ensure.DeepEqual(t, w.Code, http.StatusOK)
+	ensure.DeepEqual(t, w.Header().Get("Cache-Control"), "no-store")
+	body := w.Body.String()
+	ensure.StringContains(t, body, "<h1>Settings</h1>")
+	ensure.StringContains(t, body, `href="/"`)
+	ensure.StringContains(t, body, "<dd>bob</dd>")
+	ensure.StringContains(t, body, "<dd>Invite, Create groups</dd>")
+	for _, id := range []string{"passkeys", "devices"} {
+		ensure.StringContains(t, body, `<section id="`+id+`"`)
+	}
+	ensure.StringContains(t, body, fmt.Sprintf(`id="passkey-%d"`, bob.credID))
+	ensure.StringDoesNotContain(t, body, fmt.Sprintf(`id="passkey-%d"`, carol.credID))
+	ensure.StringContains(t, body, "this device")
+	ensure.StringContains(t, body, `data-pk-create="/passkey/options"`)
+	ensure.StringContains(t, body, `action="/passkey/create"`)
+	ensure.StringContains(t, body, `action="/settings/link"`)
+	ensure.StringContains(t, body, `action="/sign-out"`)
+	// the only passkey cannot be deleted
+	ensure.StringDoesNotContain(t, body, `action="/passkey/delete"`)
+
+	ensure.StringContains(t, ta.get(pSettings, ta.as(carol)).Body.String(), "<dd>None</dd>")
+}
+
+func TestSettingsAddPasskey(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	bob := ta.newUser("bob")
+
+	// the existing passkey is excluded
+	wo := ta.get(pPasskeyOptions, ta.as(bob))
+	ensure.DeepEqual(t, wo.Code, http.StatusOK)
+	ao, err := virtualwebauthn.ParseAttestationOptions(wo.Body.String())
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, len(ao.ExcludeCredentials), 1)
+
+	w, auth, cred := ta.addPasskey(bob)
+	ensure.StringContains(t, ta.flashOf(w, ta.as(bob)), "Passkey added.")
+	ensure.DeepEqual(t, w.Header().Get("Location"), pSettings)
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(2))
+	row, err := ta.app.q.CredentialByCredentialID(ctx, cred.ID)
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, row.UserID, bob.ID)
+
+	// the new passkey signs in as bob
+	si := ta.signIn(auth, cred)
+	ensure.DeepEqual(t, si.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, si.Header().Get("Location"), pHome)
+	page := ta.get(pSettings, withCookies(si)).Body.String()
+	ensure.StringContains(t, page, "<dd>bob</dd>")
+	ensure.StringContains(t, page, `action="/passkey/delete"`)
+
+	// registering the same passkey again is refused
+	w = ta.register(pPasskeyOptions, pPasskeyCreate, auth, cred, ta.as(bob))
+	ensure.DeepEqual(t, w.Header().Get("Location"), pSettings)
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(2))
+
+	// a response without a ceremony is refused with a flash
+	w = ta.post(pPasskeyCreate, url.Values{"json": {"{}"}}, ta.as(bob))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(bob)), "The passkey request expired.")
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(2))
+}
+
+func TestSettingsPasskeyDelete(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	del := func(u *testUser, id int64) *httptest.ResponseRecorder {
+		return ta.post(pPasskeyDelete, url.Values{"id": {strconv.FormatInt(id, 10)}}, ta.as(u))
+	}
+
+	_, _, cred2 := ta.addPasskey(bob)
+	row2, err := ta.app.q.CredentialByCredentialID(ctx, cred2.ID)
+	ensure.Nil(t, err)
+
+	// another user's passkey is a no op
+	w := del(bob, carol.credID)
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, credCount(t, ta, carol.ID), int64(1))
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(2))
+
+	// own passkey
+	w = del(bob, row2.ID)
+	ensure.DeepEqual(t, w.Header().Get("Location"), pSettings)
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(1))
+	ensure.DeepEqual(t, ta.get(pSettings, ta.as(bob)).Code, http.StatusOK)
+
+	// the last passkey is refused
+	w = del(bob, bob.credID)
+	ensure.StringContains(t, ta.flashOf(w, ta.as(bob)), "You cannot delete your only passkey.")
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(1))
+
+	// a bad id
+	ensure.DeepEqual(t, ta.post(pPasskeyDelete, url.Values{"id": {"x"}}, ta.as(bob)).Code,
+		http.StatusBadRequest)
+
+	// deleting the session's passkey signs this browser out
+	_, auth3, cred3 := ta.addPasskey(bob)
+	w = del(bob, bob.credID)
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), pSignIn)
+	ensure.True(t, findCookie(w, "s").MaxAge < 0)
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(1))
+	gone := ta.get(pSettings, ta.as(bob))
+	ensure.DeepEqual(t, gone.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, gone.Header().Get("Location"), pSignIn)
+	// the remaining passkey still works
+	ensure.DeepEqual(t, ta.signIn(auth3, cred3).Header().Get("Location"), pHome)
+}
+
+func TestSettingsLinks(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	create := func() *httptest.ResponseRecorder { return ta.post(pSettingsLink, nil, ta.as(bob)) }
+	revoke := func(u *testUser, id int64) *httptest.ResponseRecorder {
+		return ta.post(pSettingsLinkRevoke, url.Values{"id": {strconv.FormatInt(id, 10)}}, ta.as(u))
+	}
+
+	w := create()
+	ensure.StringContains(t, ta.flashOf(w, ta.as(bob)), "Link created.")
+	links := pendingLinks(t, ta, bob.ID)
+	ensure.DeepEqual(t, len(links), 1)
+	link := links[0]
+	ensure.DeepEqual(t, link.Handle, bob.Handle)
+	ensure.DeepEqual(t, link.Username, "bob")
+	ensure.DeepEqual(t, link.CreatedBy.Int64, bob.ID)
+	ensure.DeepEqual(t, link.ExpiresAt, testNow.Add(24*time.Hour).Unix())
+
+	page := ta.get(pSettings, ta.as(bob)).Body.String()
+	ensure.StringContains(t, page, fmt.Sprintf(`id="link-%d"`, link.ID))
+	ensure.StringContains(t, page, `value="http://localhost:8080/invite/`+link.Token+`"`)
+	ensure.StringContains(t, page, "data-copy")
+	ensure.StringContains(t, page, `action="/settings/link/revoke"`)
+	ensure.StringDoesNotContain(t, ta.get(pSettings, ta.as(carol)).Body.String(), link.Token)
+
+	// the link adds a passkey to bob
+	aw, auth, cred := ta.acceptInvite(link)
+	ensure.DeepEqual(t, aw.Code, http.StatusSeeOther, aw.Body.String())
+	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(2))
+	ensure.DeepEqual(t, countRows(t, ta, "users"), 2)
+	ensure.DeepEqual(t, len(pendingLinks(t, ta, bob.ID)), 0)
+	si := ta.signIn(auth, cred)
+	ensure.StringContains(t, ta.get(pSettings, withCookies(si)).Body.String(), "<dd>bob</dd>")
+
+	// revoke: not by another user, then by the owner
+	create()
+	link = pendingLinks(t, ta, bob.ID)[0]
+	ensure.DeepEqual(t, revoke(carol, link.ID).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, len(pendingLinks(t, ta, bob.ID)), 1)
+	ensure.StringContains(t, ta.flashOf(revoke(bob, link.ID), ta.as(bob)), "Link revoked.")
+	ensure.DeepEqual(t, len(pendingLinks(t, ta, bob.ID)), 0)
+	ensure.DeepEqual(t, ta.get(invitePath(link.Token)).Code, http.StatusNotFound)
+
+	// at most five pending links
+	for range maxPendingLinks {
+		ensure.StringContains(t, ta.flashOf(create(), ta.as(bob)), "Link created.")
+	}
+	ensure.StringContains(t, ta.flashOf(create(), ta.as(bob)), "at most 5 pending links")
+	ensure.DeepEqual(t, len(pendingLinks(t, ta, bob.ID)), maxPendingLinks)
+
+	// expired links do not count
+	ta.app.now = func() time.Time { return testNow.Add(25 * time.Hour) }
+	ensure.StringContains(t, ta.flashOf(create(), ta.as(bob)), "Link created.")
+	ensure.DeepEqual(t, len(pendingLinks(t, ta, bob.ID)), 1)
+
+	// add passkey links are not invites sent
+	stats, err := ta.app.userStats(ctx, bob.ID)
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, stats.InvitesSent, int64(0))
+}
+
+func TestSettingsSignedOut(t *testing.T) {
+	ta := newTestApp(t)
+	for _, p := range []string{pSettings, pPasskeyOptions} {
+		w := ta.get(p)
+		ensure.DeepEqual(t, w.Code, http.StatusSeeOther, p)
+		ensure.DeepEqual(t, w.Header().Get("Location"), pSignIn, p)
+	}
+	for _, p := range []string{pPasskeyCreate, pPasskeyDelete, pSettingsLink, pSettingsLinkRevoke} {
+		ensure.DeepEqual(t, ta.post(p, url.Values{"id": {"1"}}).Code, http.StatusUnauthorized, p)
+	}
 }

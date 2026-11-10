@@ -94,3 +94,16 @@ RETURNING *;
 
 -- name: InviteDeleteBootstrap :exec
 DELETE FROM invites WHERE created_by IS NULL AND user_id IS NULL;
+
+-- name: CredentialCountByUser :one
+SELECT count(*) FROM credentials WHERE user_id = ?;
+
+-- name: CredentialDelete :execrows
+DELETE FROM credentials WHERE id = @id AND user_id = @user_id;
+
+-- name: InvitesPendingForUser :many
+SELECT * FROM invites WHERE user_id = @user_id AND expires_at > @now
+ORDER BY id DESC;
+
+-- name: InviteRevokeForUser :execrows
+DELETE FROM invites WHERE id = @id AND user_id = @user_id;

@@ -109,6 +109,17 @@ func (q *Queries) CredentialByCredentialID(ctx context.Context, credentialID []b
 	return i, err
 }
 
+const credentialCountByUser = `-- name: CredentialCountByUser :one
+SELECT count(*) FROM credentials WHERE user_id = ?
+`
+
+func (q *Queries) CredentialCountByUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, credentialCountByUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const credentialCreate = `-- name: CredentialCreate :one
 INSERT INTO credentials (user_id, credential_id, credential, label, created_at, last_used_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -144,6 +155,23 @@ func (q *Queries) CredentialCreate(ctx context.Context, arg CredentialCreatePara
 		&i.LastUsedAt,
 	)
 	return i, err
+}
+
+const credentialDelete = `-- name: CredentialDelete :execrows
+DELETE FROM credentials WHERE id = ?1 AND user_id = ?2
+`
+
+type CredentialDeleteParams struct {
+	ID     int64
+	UserID int64
+}
+
+func (q *Queries) CredentialDelete(ctx context.Context, arg CredentialDeleteParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, credentialDelete, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const credentialUpdate = `-- name: CredentialUpdate :exec
@@ -275,6 +303,23 @@ func (q *Queries) InviteDeleteBootstrap(ctx context.Context) error {
 	return err
 }
 
+const inviteRevokeForUser = `-- name: InviteRevokeForUser :execrows
+DELETE FROM invites WHERE id = ?1 AND user_id = ?2
+`
+
+type InviteRevokeForUserParams struct {
+	ID     int64
+	UserID sql.NullInt64
+}
+
+func (q *Queries) InviteRevokeForUser(ctx context.Context, arg InviteRevokeForUserParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, inviteRevokeForUser, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const inviteUse = `-- name: InviteUse :one
 DELETE FROM invites WHERE token = ?1 AND expires_at > ?2
 RETURNING id, token, username, handle, user_id, perm_admin, created_by, created_at, expires_at
@@ -300,6 +345,49 @@ func (q *Queries) InviteUse(ctx context.Context, arg InviteUseParams) (Invite, e
 		&i.ExpiresAt,
 	)
 	return i, err
+}
+
+const invitesPendingForUser = `-- name: InvitesPendingForUser :many
+SELECT id, token, username, handle, user_id, perm_admin, created_by, created_at, expires_at FROM invites WHERE user_id = ?1 AND expires_at > ?2
+ORDER BY id DESC
+`
+
+type InvitesPendingForUserParams struct {
+	UserID sql.NullInt64
+	Now    int64
+}
+
+func (q *Queries) InvitesPendingForUser(ctx context.Context, arg InvitesPendingForUserParams) ([]Invite, error) {
+	rows, err := q.db.QueryContext(ctx, invitesPendingForUser, arg.UserID, arg.Now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Invite
+	for rows.Next() {
+		var i Invite
+		if err := rows.Scan(
+			&i.ID,
+			&i.Token,
+			&i.Username,
+			&i.Handle,
+			&i.UserID,
+			&i.PermAdmin,
+			&i.CreatedBy,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const userByHandle = `-- name: UserByHandle :one

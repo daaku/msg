@@ -311,3 +311,59 @@ select {
     display: none;
   }
 }
+
+/* rows and small text */
+.stack-tight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2xs);
+}
+
+.muted {
+  color: var(--color-text-muted);
+  font-size: var(--step--1);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 var(--space-2xs);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background-color: var(--color-surface-2);
+  font-size: var(--step--2);
+  font-weight: 600;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-3xs) var(--space-s);
+
+  dt {
+    color: var(--color-text-muted);
+  }
+}
+
+.home-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-s);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

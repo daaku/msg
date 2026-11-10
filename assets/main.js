@@ -40,3 +40,11 @@ document.addEventListener('click', async ev => {
     if (alertEl) alertEl.textContent = err.message || 'Something went wrong.'
   }
 })
+
+// Copyable link fields: select the whole value on focus or click.
+for (const type of ['focusin', 'click']) {
+  document.addEventListener(type, ev => {
+    const el = ev.target.closest?.('input[data-copy]')
+    if (el) el.select()
+  })
+}

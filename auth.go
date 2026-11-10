@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -551,4 +552,275 @@ func (a *app) bootstrap(ctx context.Context) error {
 	}
 	fmt.Println("Bootstrap admin:", a.inviteURL(inv))
 	return nil
+}
+
+// settings
+
+const (
+	addPasskeyTTL   = 24 * time.Hour
+	maxPendingLinks = 5
+)
+
+// formID reads a row id posted in the named form field.
+func formID(r *http.Request, name string) (int64, error) {
+	id, err := strconv.ParseInt(r.FormValue(name), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, httpErr(http.StatusBadRequest, "Bad request.")
+	}
+	return id, nil
+}
+
+// permNames lists the permissions a user holds, as words.
+func permNames(u User) []string {
+	var names []string
+	if u.PermAdmin {
+		names = append(names, "Admin")
+	}
+	if u.PermInvite {
+		names = append(names, "Invite")
+	}
+	if u.PermGroup {
+		names = append(names, "Create groups")
+	}
+	return names
+}
+
+// dateCell renders a labelled timestamp, as in "Created 2 Jan 2026 03:04".
+func dateCell(label string, unix int64) g.Node {
+	return h.Span(h.Class("muted"), g.Text(label+" "+fmtTime(time.Unix(unix, 0), nil)))
+}
+
+// passkeyList renders passkey rows. current is the row id marked "this
+// device" (0 for none). A delete button posting to deleteAction is rendered
+// for each row when canDelete is true.
+func passkeyList(creds []Credential, current int64, deleteAction string, canDelete bool) g.Node {
+	if len(creds) == 0 {
+		return h.P(h.Class("muted"), g.Text("No passkeys."))
+	}
+	return h.Ul(h.Class("list"), g.Map(creds, func(c Credential) g.Node {
+		return h.Li(h.ID(fmt.Sprintf("passkey-%d", c.ID)), h.Class("row"),
+			h.Div(h.Class("stack-tight"),
+				h.Span(h.Class("cluster"),
+					h.Strong(g.Text(c.Label)),
+					g.If(c.ID == current, h.Span(h.Class("badge"), g.Text("this device")))),
+				dateCell("Created", c.CreatedAt),
+				dateCell("Last used", c.LastUsedAt)),
+			g.If(canDelete, h.Form(h.Method("post"), h.Action(deleteAction),
+				h.Input(h.Type("hidden"), h.Name("id"), h.Value(strconv.FormatInt(c.ID, 10))),
+				h.Button(h.Class("btn danger"), g.Text("Delete")))))
+	}))
+}
+
+// linkList renders pending add passkey links, each with a copyable URL, its
+// expiry, and a revoke button posting to revokeAction.
+func (a *app) linkList(links []Invite, revokeAction string) g.Node {
+	if len(links) == 0 {
+		return h.P(h.Class("muted"), g.Text("No pending links."))
+	}
+	return h.Ul(h.Class("list"), g.Map(links, func(inv Invite) g.Node {
+		id := fmt.Sprintf("link-%d", inv.ID)
+		return h.Li(h.ID(id), h.Class("stack-tight"),
+			h.Input(h.ID(id+"-url"), h.Type("text"), h.ReadOnly(), h.Data("copy", ""),
+				h.Value(a.inviteURL(inv)), h.Aria("label", "Link")),
+			h.Div(h.Class("row"),
+				dateCell("Expires", inv.ExpiresAt),
+				h.Form(h.Method("post"), h.Action(revokeAction),
+					h.Input(h.Type("hidden"), h.Name("id"), h.Value(strconv.FormatInt(inv.ID, 10))),
+					h.Button(h.Class("btn secondary"), g.Text("Revoke")))))
+	}))
+}
+
+// settingsSection renders one section of the settings page.
+type settingsSection func(r *http.Request, u *User) (g.Node, error)
+
+// settingsSections are the sections of the settings page, in order. Later
+// features append to this list.
+func (a *app) settingsSections() []settingsSection {
+	return []settingsSection{a.settingsPasskeys, a.settingsDevices}
+}
+
+func (a *app) settings(w http.ResponseWriter, r *http.Request) error {
+	user := userFrom(r.Context())
+	w.Header().Set("Cache-Control", "no-store") // holds add passkey links
+	perms := "None"
+	if names := permNames(*user); len(names) > 0 {
+		perms = strings.Join(names, ", ")
+	}
+	body := []g.Node{
+		h.Section(h.ID("account"), h.Class("card"),
+			h.Dl(h.Class("facts"),
+				h.Dt(g.Text("Username")), h.Dd(g.Text(user.Username)),
+				h.Dt(g.Text("Permissions")), h.Dd(g.Text(perms)))),
+	}
+	for _, section := range a.settingsSections() {
+		node, err := section(r, user)
+		if err != nil {
+			return err
+		}
+		body = append(body, node)
+	}
+	body = append(body, h.Form(h.Method("post"), h.Action(pSignOut),
+		h.Button(h.Class("btn secondary"), g.Text("Sign out"))))
+	return a.pageSimple(w, r, "Settings", backLink(pHome, "Home"), body...).Render(w)
+}
+
+func (a *app) settingsPasskeys(r *http.Request, u *User) (g.Node, error) {
+	creds, err := a.q.CredentialsByUser(r.Context(), u.ID)
+	if err != nil {
+		return nil, serr.Wrap(err)
+	}
+	return h.Section(h.ID("passkeys"), h.Class("stack"),
+		h.H2(g.Text("Passkeys")),
+		passkeyList(creds, credentialFrom(r.Context()), pPasskeyDelete, len(creds) > 1),
+		a.passkeyForm(pPasskeyCreate, "pk-create", pPasskeyOptions, "Add a passkey on this device"),
+	), nil
+}
+
+func (a *app) settingsDevices(r *http.Request, u *User) (g.Node, error) {
+	links, err := a.q.InvitesPendingForUser(r.Context(), InvitesPendingForUserParams{
+		UserID: sql.NullInt64{Int64: u.ID, Valid: true},
+		Now:    a.now().Unix(),
+	})
+	if err != nil {
+		return nil, serr.Wrap(err)
+	}
+	return h.Section(h.ID("devices"), h.Class("stack"),
+		h.H2(g.Text("Add a passkey on another device")),
+		h.P(h.Class("muted"), g.Text("Create a link, open it on the other device and "+
+			"add a passkey there. A link works once, for 24 hours.")),
+		h.Form(h.Method("post"), h.Action(pSettingsLink),
+			h.Button(h.Class("btn secondary"), icon("plus"), h.Span(g.Text("Create link")))),
+		a.linkList(links, pSettingsLinkRevoke),
+	), nil
+}
+
+func (a *app) passkeyOptions(w http.ResponseWriter, r *http.Request) error {
+	user := userFrom(r.Context())
+	wu, err := a.waUserFor(r.Context(), user.Handle, user.Username, user.ID)
+	if err != nil {
+		return err
+	}
+	return a.registrationOptions(w, wu)
+}
+
+func (a *app) passkeyCreate(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	fail := func(msg string) error {
+		return a.flash(w, r, pSettings, Flash{Kind: flashError, Content: msg})
+	}
+	wu, err := a.waUserFor(ctx, user.Handle, user.Username, user.ID)
+	if err != nil {
+		return err
+	}
+	cred, err := a.finishRegistration(w, r, wu)
+	if he, ok := errors.AsType[*httpError](err); ok {
+		return fail(he.msg)
+	}
+	if err != nil {
+		return err
+	}
+	arg, err := a.credentialParams(r, user.ID, cred)
+	if err != nil {
+		return err
+	}
+	if _, err := a.q.CredentialCreate(ctx, arg); isUniqueErr(err) {
+		return fail("This passkey is already registered.")
+	} else if err != nil {
+		return serr.Wrap(err)
+	}
+	return a.flash(w, r, pSettings, Flash{Kind: flashSuccess, Content: "Passkey added."})
+}
+
+func (a *app) passkeyDelete(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	id, err := formID(r, "id")
+	if err != nil {
+		return err
+	}
+	var last bool
+	var deleted int64
+	err = a.tx(ctx, func(q *Queries) error {
+		n, err := q.CredentialCountByUser(ctx, user.ID)
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		if n <= 1 {
+			last = true
+			return nil
+		}
+		deleted, err = q.CredentialDelete(ctx, CredentialDeleteParams{ID: id, UserID: user.ID})
+		return serr.Wrap(err)
+	})
+	switch {
+	case err != nil:
+		return err
+	case last:
+		return a.flash(w, r, pSettings, Flash{Kind: flashError,
+			Content: "You cannot delete your only passkey."})
+	case deleted == 0:
+		http.Redirect(w, r, pSettings, http.StatusSeeOther)
+		return nil
+	case id == credentialFrom(ctx):
+		// The session was bound to this passkey, so it is over.
+		sookie.Del(w, r, a.cookie("s", sessionMaxAge))
+		return a.flash(w, r, pSignIn, Flash{Kind: flashSuccess,
+			Content: "Passkey deleted. You are signed out on this device."})
+	}
+	return a.flash(w, r, pSettings, Flash{Kind: flashSuccess, Content: "Passkey deleted."})
+}
+
+func (a *app) settingsLink(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	var full bool
+	err := a.tx(ctx, func(q *Queries) error {
+		links, err := q.InvitesPendingForUser(ctx, InvitesPendingForUserParams{
+			UserID: sql.NullInt64{Int64: user.ID, Valid: true},
+			Now:    a.now().Unix(),
+		})
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		if len(links) >= maxPendingLinks {
+			full = true
+			return nil
+		}
+		_, err = a.createInvite(ctx, q, inviteParams{
+			User:      user,
+			CreatedBy: user.ID,
+			TTL:       addPasskeyTTL,
+		})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if full {
+		return a.flash(w, r, pSettings+"#devices", Flash{Kind: flashError,
+			Content: fmt.Sprintf("You can have at most %d pending links. Revoke one first.", maxPendingLinks)})
+	}
+	return a.flash(w, r, pSettings+"#devices", Flash{Kind: flashSuccess,
+		Content: "Link created. Open it on the other device."})
+}
+
+func (a *app) settingsLinkRevoke(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	id, err := formID(r, "id")
+	if err != nil {
+		return err
+	}
+	n, err := a.q.InviteRevokeForUser(ctx, InviteRevokeForUserParams{
+		ID:     id,
+		UserID: sql.NullInt64{Int64: user.ID, Valid: true},
+	})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	if n == 0 {
+		return httpErr(http.StatusNotFound, "Not found.")
+	}
+	return a.flash(w, r, pSettings+"#devices", Flash{Kind: flashSuccess, Content: "Link revoked."})
 }
