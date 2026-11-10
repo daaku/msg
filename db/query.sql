@@ -290,3 +290,24 @@ SELECT * FROM files WHERE status = 'uploading' AND created_at < @before ORDER BY
 
 -- name: FilesByIDs :many
 SELECT * FROM files WHERE id IN (sqlc.slice('ids'));
+
+-- name: FilesResetProcessing :exec
+UPDATE files SET status = 'pending' WHERE status = 'processing';
+
+-- name: FileClaim :one
+UPDATE files SET status = 'processing', attempts = attempts + 1
+WHERE id = (
+  SELECT f.id FROM files f
+  WHERE f.status = 'pending' AND f.kind IN ('image', 'video')
+  ORDER BY f.id LIMIT 1
+)
+RETURNING *;
+
+-- name: FileSetReady :execrows
+UPDATE files SET status = 'ready', conv_type = @conv_type, conv_size = @conv_size,
+  poster_type = @poster_type, poster_size = @poster_size,
+  width = @width, height = @height, duration = @duration
+WHERE id = @id AND status = 'processing';
+
+-- name: FileSetStatus :execrows
+UPDATE files SET status = @status WHERE id = @id AND status = 'processing';

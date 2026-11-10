@@ -490,6 +490,42 @@ func (q *Queries) FileByID(ctx context.Context, id int64) (File, error) {
 	return i, err
 }
 
+const fileClaim = `-- name: FileClaim :one
+UPDATE files SET status = 'processing', attempts = attempts + 1
+WHERE id = (
+  SELECT f.id FROM files f
+  WHERE f.status = 'pending' AND f.kind IN ('image', 'video')
+  ORDER BY f.id LIMIT 1
+)
+RETURNING id, chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, conv_type, conv_size, poster_type, poster_size, width, height, duration, attempts, created_at
+`
+
+func (q *Queries) FileClaim(ctx context.Context) (File, error) {
+	row := q.db.QueryRowContext(ctx, fileClaim)
+	var i File
+	err := row.Scan(
+		&i.ID,
+		&i.ChatID,
+		&i.UserID,
+		&i.Kind,
+		&i.Status,
+		&i.Name,
+		&i.S3Prefix,
+		&i.UploadID,
+		&i.Size,
+		&i.ConvType,
+		&i.ConvSize,
+		&i.PosterType,
+		&i.PosterSize,
+		&i.Width,
+		&i.Height,
+		&i.Duration,
+		&i.Attempts,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const fileCompleteUpload = `-- name: FileCompleteUpload :execrows
 UPDATE files SET kind = ?1, status = ?2, upload_id = ''
 WHERE id = ?3 AND status = 'uploading'
@@ -580,6 +616,58 @@ func (q *Queries) FileDeleteUploading(ctx context.Context, id int64) (int64, err
 	return result.RowsAffected()
 }
 
+const fileSetReady = `-- name: FileSetReady :execrows
+UPDATE files SET status = 'ready', conv_type = ?1, conv_size = ?2,
+  poster_type = ?3, poster_size = ?4,
+  width = ?5, height = ?6, duration = ?7
+WHERE id = ?8 AND status = 'processing'
+`
+
+type FileSetReadyParams struct {
+	ConvType   string
+	ConvSize   int64
+	PosterType string
+	PosterSize int64
+	Width      int64
+	Height     int64
+	Duration   int64
+	ID         int64
+}
+
+func (q *Queries) FileSetReady(ctx context.Context, arg FileSetReadyParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, fileSetReady,
+		arg.ConvType,
+		arg.ConvSize,
+		arg.PosterType,
+		arg.PosterSize,
+		arg.Width,
+		arg.Height,
+		arg.Duration,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const fileSetStatus = `-- name: FileSetStatus :execrows
+UPDATE files SET status = ?1 WHERE id = ?2 AND status = 'processing'
+`
+
+type FileSetStatusParams struct {
+	Status string
+	ID     int64
+}
+
+func (q *Queries) FileSetStatus(ctx context.Context, arg FileSetStatusParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, fileSetStatus, arg.Status, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const filesByIDs = `-- name: FilesByIDs :many
 SELECT id, chat_id, user_id, kind, status, name, s3_prefix, upload_id, size, conv_type, conv_size, poster_type, poster_size, width, height, duration, attempts, created_at FROM files WHERE id IN (/*SLICE:ids*/?)
 `
@@ -634,6 +722,15 @@ func (q *Queries) FilesByIDs(ctx context.Context, ids []int64) ([]File, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const filesResetProcessing = `-- name: FilesResetProcessing :exec
+UPDATE files SET status = 'pending' WHERE status = 'processing'
+`
+
+func (q *Queries) FilesResetProcessing(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, filesResetProcessing)
+	return err
 }
 
 const filesStaleUploads = `-- name: FilesStaleUploads :many

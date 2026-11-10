@@ -316,6 +316,8 @@ type app struct {
 	// mediaWake tells the media worker there is a file to convert.
 	mediaWake chan struct{}
 	fileLocks sync.Map // file id to *sync.Mutex
+	// beforeConvert is a test hook that runs just before a converter.
+	beforeConvert func(File)
 
 	master    []byte
 	secretsMu sync.Mutex
@@ -716,6 +718,12 @@ func run(ctx context.Context) error {
 		return err
 	}
 	a.startJanitor()
+	if err := a.startMedia(); err != nil {
+		cancel()
+		a.bg.Wait()
+		_ = a.close()
+		return err
+	}
 	serveErr := lands.ListenAndServe(a.ctx, defaultAddr, a.handler())
 	cancel()
 	a.bg.Wait()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -10,7 +11,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -442,8 +445,15 @@ func fileNode(f File) g.Node {
 		return h.Div(h.Class("file-processing"),
 			h.Span(h.Class("file-name"), g.Text(f.Name)),
 			h.Span(h.Class("file-note"), g.Text("Processing…")))
+	case f.Kind == kindImage && f.Status == statusReady:
+		// width and height reserve the space, so nothing shifts on load
+		src := filePath(f.ID, "c")
+		return h.A(h.Class("media"), h.Href(src), h.Target("_blank"), h.Rel("noopener"),
+			h.Img(h.ID(fmt.Sprintf("f%d", f.ID)), h.Src(src),
+				h.Width(strconv.FormatInt(f.Width, 10)), h.Height(strconv.FormatInt(f.Height, 10)),
+				h.Alt(f.Name), h.Loading("lazy"), g.Attr("decoding", "async")))
 	case converts && f.Status == statusReady:
-		// Tasks 017 and 018 render the converted image and video here.
+		// Task 018 renders the converted video here.
 		return fileDownload(f)
 	}
 	return fileDownload(f)
@@ -502,4 +512,344 @@ func (a *app) startJanitor() {
 			}
 		}
 	})
+}
+
+// conversion worker
+
+const (
+	mediaWorkers     = 2
+	mediaMaxAttempts = 3
+	magickTimeout    = 2 * time.Minute
+	execStderrCap    = 64 << 10
+)
+
+// permanentError marks a failure that retrying cannot fix: the converter
+// rejected the input, or timed out on it.
+type permanentError struct{ err error }
+
+func (e *permanentError) Error() string { return e.err.Error() }
+func (e *permanentError) Unwrap() error { return e.err }
+
+func permanent(format string, args ...any) error {
+	return &permanentError{serr.WrapSkip(fmt.Errorf(format, args...), 1)}
+}
+
+func isPermanent(err error) bool {
+	_, ok := errors.AsType[*permanentError](err)
+	return ok
+}
+
+// tailBuffer keeps the last max bytes written to it.
+type tailBuffer struct {
+	buf []byte
+	max int
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.max {
+		b.buf = b.buf[len(b.buf)-b.max:]
+	}
+	return len(p), nil
+}
+
+// exec runs an external converter and returns its standard output. It is
+// the only way such a program is started: arguments are an argv slice, never
+// a shell line, the environment is minimal, the working directory is the
+// job's temp directory and there is always a timeout. Any failure is
+// permanent for the file being converted.
+func (a *app) exec(ctx context.Context, dir string, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+		"TMPDIR=" + dir,
+		"LC_ALL=C",
+	}
+	cmd.WaitDelay = 5 * time.Second
+	var stdout bytes.Buffer
+	stderr := &tailBuffer{max: execStderrCap}
+	cmd.Stdout = &stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		tail := strings.TrimSpace(string(stderr.buf))
+		if len(tail) > 2000 {
+			tail = tail[len(tail)-2000:]
+		}
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return nil, permanent("%s: %w: %s", name, err, tail)
+	}
+	return stdout.Bytes(), nil
+}
+
+// mediaOutput is one converted object to store.
+type mediaOutput struct {
+	variant     string // "converted" or "poster"
+	path        string
+	contentType string
+}
+
+type mediaResult struct {
+	outputs  []mediaOutput
+	width    int
+	height   int
+	duration int // seconds, video only
+}
+
+var imageTypes = map[string]string{
+	"webp": "image/webp",
+	"avif": "image/avif",
+	"jpeg": "image/jpeg",
+}
+
+// magickInputs are the only formats ImageMagick is ever asked to decode.
+var magickInputs = map[string]bool{
+	"jpeg": true, "png": true, "gif": true, "webp": true, "heic": true, "avif": true,
+}
+
+// magickConvert converts dir/inName, which must be of inFormat, to the
+// configured image format at dir/outName, shrinking it to maxEdge on the
+// long side. The input format is always given explicitly: letting
+// ImageMagick pick a decoder from the file's content is how its dangerous
+// coders are reached.
+func (a *app) magickConvert(ctx context.Context, dir, inFormat, inName, outName string, maxEdge int, firstFrame bool) (w, h int, err error) {
+	if !magickInputs[inFormat] {
+		return 0, 0, permanent("unsupported image format %q", inFormat)
+	}
+	outFormat := a.cfg.ImageFormat
+	animated := !firstFrame && outFormat == "webp" && (inFormat == "gif" || inFormat == "webp")
+	in := inFormat + ":" + inName
+	if !animated {
+		in += "[0]" // only webp output can hold more than one frame
+	}
+	args := []string{
+		"-limit", "memory", "512MiB", "-limit", "map", "1GiB",
+		"-limit", "disk", "4GiB", "-limit", "time", "120",
+		in,
+	}
+	if animated {
+		args = append(args, "-coalesce")
+	}
+	args = append(args,
+		"-auto-orient",
+		"-resize", fmt.Sprintf("%dx%d>", maxEdge, maxEdge),
+		"+profile", "!icc,*", // drop EXIF, GPS and XMP, keep the colour profile
+		"-quality", "82",
+		outFormat+":"+outName)
+	if _, err := a.exec(ctx, dir, magickTimeout, "magick", args...); err != nil {
+		return 0, 0, err
+	}
+	out, err := a.exec(ctx, dir, magickTimeout, "magick", "identify",
+		"-format", "%w %h\n", outFormat+":"+outName+"[0]")
+	if err != nil {
+		return 0, 0, err
+	}
+	if _, err := fmt.Sscanf(string(out), "%d %d", &w, &h); err != nil || w < 1 || h < 1 {
+		return 0, 0, permanent("unreadable image size %q", out)
+	}
+	return w, h, nil
+}
+
+func (a *app) convertImage(ctx context.Context, dir, inFormat string) (mediaResult, error) {
+	w, h, err := a.magickConvert(ctx, dir, inFormat, "in", "out", a.cfg.ImageResolution, false)
+	if err != nil {
+		return mediaResult{}, err
+	}
+	return mediaResult{
+		outputs: []mediaOutput{{"converted", filepath.Join(dir, "out"), imageTypes[a.cfg.ImageFormat]}},
+		width:   w,
+		height:  h,
+	}, nil
+}
+
+func (a *app) convertVideo(ctx context.Context, dir, inFormat string) (mediaResult, error) {
+	// Task 018 implements this.
+	return mediaResult{}, permanent("video conversion is not available")
+}
+
+func (a *app) tmpDir() string { return filepath.Join(a.cfg.StateDir, "tmp") }
+
+// processFile converts one claimed file and stores the results.
+func (a *app) processFile(ctx context.Context, f File) error {
+	if err := os.MkdirAll(a.tmpDir(), 0o700); err != nil {
+		return serr.Wrap(err)
+	}
+	dir, err := os.MkdirTemp(a.tmpDir(), fmt.Sprintf("f%d-", f.ID))
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	defer os.RemoveAll(dir)
+
+	// download the original
+	rc, err := a.s3.get(ctx, fileKey(f, "original"), "")
+	if err != nil {
+		return err
+	}
+	in, err := os.OpenFile(filepath.Join(dir, "in"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		rc.Close()
+		return serr.Wrap(err)
+	}
+	_, err = io.Copy(in, rc)
+	rc.Close()
+	if cerr := in.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return serr.Wrap(err)
+	}
+
+	// decide the format from the bytes, never from the name
+	head := make([]byte, sniffLength)
+	file, err := os.Open(filepath.Join(dir, "in"))
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	n, _ := io.ReadFull(file, head)
+	file.Close()
+	kind, format := sniffMedia(head[:n])
+	if kind != f.Kind {
+		return permanent("file %d is %s, not %s", f.ID, kind, f.Kind)
+	}
+
+	if a.beforeConvert != nil {
+		a.beforeConvert(f)
+	}
+	var res mediaResult
+	if kind == kindImage {
+		res, err = a.convertImage(ctx, dir, format)
+	} else {
+		res, err = a.convertVideo(ctx, dir, format)
+	}
+	if err != nil {
+		return err
+	}
+
+	// store the outputs
+	arg := FileSetReadyParams{
+		ID:       f.ID,
+		Width:    int64(res.width),
+		Height:   int64(res.height),
+		Duration: int64(res.duration),
+	}
+	var stored []string
+	removeStored := func() {
+		for _, key := range stored {
+			if err := a.s3.del(context.WithoutCancel(ctx), key); err != nil {
+				fmt.Fprintf(os.Stderr, "delete object %s: %v\n", key, err)
+			}
+		}
+	}
+	for _, out := range res.outputs {
+		file, err := os.Open(out.path)
+		if err != nil {
+			removeStored()
+			return serr.Wrap(err)
+		}
+		stat, err := file.Stat()
+		if err == nil {
+			key := fileKey(f, out.variant)
+			stored = append(stored, key)
+			err = a.s3.put(ctx, key, file, stat.Size(), http.Header{
+				"Content-Type":        {out.contentType},
+				"Cache-Control":       {cacheForever},
+				"Content-Disposition": {"inline"},
+			})
+		}
+		file.Close()
+		if err != nil {
+			removeStored()
+			return serr.Wrap(err)
+		}
+		if out.variant == "poster" {
+			arg.PosterType, arg.PosterSize = out.contentType, stat.Size()
+		} else {
+			arg.ConvType, arg.ConvSize = out.contentType, stat.Size()
+		}
+	}
+	changed, err := a.q.FileSetReady(ctx, arg)
+	if err != nil {
+		removeStored()
+		return serr.Wrap(err)
+	}
+	if changed == 0 {
+		// The message was deleted while we worked. Leave nothing behind.
+		removeStored()
+		return nil
+	}
+	a.notifyChat(ctx, f.ChatID)
+	return nil
+}
+
+// mediaOnce claims and processes one pending file. It reports whether there
+// was one.
+func (a *app) mediaOnce(ctx context.Context) bool {
+	f, err := a.q.FileClaim(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	if err != nil {
+		if ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "media claim: %+v\n", serr.Wrap(err))
+		}
+		return false
+	}
+	err = a.processFile(ctx, f)
+	if err == nil {
+		return true
+	}
+	if ctx.Err() != nil {
+		// Shutting down: the file stays processing and is reset at the
+		// next start.
+		return false
+	}
+	status := statusFailed
+	if !isPermanent(err) && f.Attempts < mediaMaxAttempts {
+		status = statusPending
+	}
+	fmt.Fprintf(os.Stderr, "media file %d (attempt %d, now %s): %v\n", f.ID, f.Attempts, status, err)
+	if _, err := a.q.FileSetStatus(ctx, FileSetStatusParams{ID: f.ID, Status: status}); err != nil {
+		fmt.Fprintf(os.Stderr, "media file %d: %+v\n", f.ID, serr.Wrap(err))
+	}
+	if status == statusFailed {
+		a.notifyChat(ctx, f.ChatID) // the placeholder becomes a download
+	}
+	return true
+}
+
+// startMedia recovers from a previous run and starts the workers.
+func (a *app) startMedia() error {
+	if err := os.RemoveAll(a.tmpDir()); err != nil {
+		return serr.Wrap(err)
+	}
+	if err := a.q.FilesResetProcessing(a.ctx); err != nil {
+		return serr.Wrap(err)
+	}
+	for _, name := range []string{"magick", "ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(name); err != nil {
+			fmt.Printf("warning: %s not found; media that needs it will not be converted\n", name)
+		}
+	}
+	for range mediaWorkers {
+		a.bg.Go(func() {
+			tick := time.NewTicker(time.Minute)
+			defer tick.Stop()
+			for {
+				for a.mediaOnce(a.ctx) {
+				}
+				select {
+				case <-a.mediaWake:
+				case <-tick.C:
+				case <-a.ctx.Done():
+					return
+				}
+			}
+		})
+	}
+	return nil
 }

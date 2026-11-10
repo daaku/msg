@@ -992,7 +992,7 @@ button.chip {
 
 .file-note {
   flex: none;
-  color: var(--color-muted);
+  color: var(--color-text-muted);
   font-size: var(--step--1);
 }
 
@@ -1038,4 +1038,27 @@ button.chip {
   &:empty {
     display: none;
   }
+}
+
+/* converted media */
+.media {
+  display: block;
+  max-width: min(100%, 24rem);
+  border-radius: var(--radius);
+  overflow: hidden;
+
+  & img {
+    display: block;
+    max-width: 100%;
+    max-height: 60vh;
+    width: auto;
+    height: auto;
+  }
+}
+
+video.media {
+  max-height: 60vh;
+  width: auto;
+  height: auto;
+  background-color: #000000;
 }
