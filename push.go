@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -365,4 +366,293 @@ func (a *app) dropSub(ctx context.Context, row PushSubscription) {
 	if err := a.q.PushSubDeleteByID(ctx, row.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "delete push subscription %d: %+v\n", row.ID, serr.Wrap(err))
 	}
+}
+
+// snoozes
+
+const (
+	snoozeInterval = 30 * time.Second
+	snoozeHour     = 9 // "morning", in the viewer's time zone
+)
+
+// snoozeChoices are the times a message can be snoozed until, in the order
+// they are offered.
+var snoozeChoices = []struct{ Value, Label string }{
+	{"1h", "In 1 hour"},
+	{"3h", "In 3 hours"},
+	{"tomorrow", "Tomorrow morning"},
+	{"week", "Next week"},
+}
+
+// snoozeDue is when a snooze chosen at now in loc comes due. Calendar days
+// are counted with time.Date in loc, so a daylight saving change in between
+// still gives 09:00 local time.
+func snoozeDue(when string, now time.Time, loc *time.Location) (time.Time, bool) {
+	local := now.In(loc)
+	y, m, d := local.Date()
+	switch when {
+	case "1h":
+		return now.Add(time.Hour), true
+	case "3h":
+		return now.Add(3 * time.Hour), true
+	case "tomorrow":
+		return time.Date(y, m, d+1, snoozeHour, 0, 0, 0, loc), true
+	case "week":
+		return time.Date(y, m, d+7, snoozeHour, 0, 0, 0, loc), true
+	}
+	return time.Time{}, false
+}
+
+// fmtDue describes a due time for the viewer: only the time when it is
+// today, "Tomorrow 09:00" for tomorrow, otherwise the date and the time.
+func fmtDue(due, now time.Time, loc *time.Location) string {
+	due, now = due.In(loc), now.In(loc)
+	y, m, d := now.Date()
+	switch dy, dm, dd := due.Date(); {
+	case dy == y && dm == m && dd == d:
+		return due.Format("15:04")
+	case due.Format("2006-01-02") == time.Date(y, m, d+1, 0, 0, 0, 0, loc).Format("2006-01-02"):
+		return "Tomorrow " + due.Format("15:04")
+	case dy == y:
+		return due.Format("Mon 2 Jan 15:04")
+	}
+	return due.Format("2 Jan 2006 15:04")
+}
+
+// snoozeView is what the chat page needs to render the viewer's snoozes.
+type snoozeView struct {
+	due     map[int64]string // message id to the formatted due time
+	hasPush bool             // the viewer has at least one push subscription
+}
+
+// snoozesFor loads the viewer's snoozes on the rendered messages and whether
+// they can get a reminder at all, with one query each.
+func (a *app) snoozesFor(ctx context.Context, userID int64, rows []MessagesLatestRow, loc *time.Location) (snoozeView, error) {
+	sv := snoozeView{due: map[int64]string{}}
+	n, err := a.q.PushSubCountByUser(ctx, userID)
+	if err != nil {
+		return sv, serr.Wrap(err)
+	}
+	sv.hasPush = n > 0
+	if len(rows) == 0 {
+		return sv, nil
+	}
+	ids := make([]int64, len(rows))
+	for i, row := range rows {
+		ids[i] = row.Message.ID
+	}
+	snoozes, err := a.q.SnoozesForUserMessages(ctx, SnoozesForUserMessagesParams{UserID: userID, Ids: ids})
+	if err != nil {
+		return sv, serr.Wrap(err)
+	}
+	now := a.now()
+	for _, s := range snoozes {
+		sv.due[s.MessageID] = fmtDue(time.Unix(s.DueAt, 0), now, loc)
+	}
+	return sv, nil
+}
+
+// snoozeMarker is the clock on a message the viewer snoozed, nil otherwise.
+func snoozeMarker(v chatView, m Message) g.Node {
+	due, ok := v.Snoozes.due[m.ID]
+	if !ok {
+		return nil
+	}
+	return h.Span(h.ID(fmt.Sprintf("m%d-snooze", m.ID)), h.Class("msg-snooze"),
+		h.Title("Reminder "+due), icon("clock"), g.Text(due))
+}
+
+// snoozeMenu is the "Remind me" section of a message's menu.
+func snoozeMenu(v chatView, m Message) g.Node {
+	if !v.Member {
+		return nil
+	}
+	id := fmt.Sprintf("m%d", m.ID)
+	base := messagePath(v.Chat.ID, m.ID)
+	due, snoozed := v.Snoozes.due[m.ID]
+	var current g.Node
+	if snoozed {
+		current = h.Form(h.ID(id+"-unsnooze"), h.Class("row"), h.Method("post"), h.Action(base+"/unsnooze"),
+			g.Attr("data-morph"),
+			h.Span(h.Class("muted"), g.Text("Reminder "+due)),
+			h.Button(h.Class("btn secondary"), g.Text("Cancel reminder")))
+	}
+	return h.Div(h.ID(id+"-remind"), h.Class("sheet-remind"),
+		h.Div(h.Class("sheet-label"), g.Text("Remind me")),
+		current,
+		g.If(!v.Snoozes.hasPush, h.P(h.Class("muted"),
+			h.A(h.Href(pSettings+"#notifications"), g.Text("Enable notifications in Settings")),
+			g.Text(" to get reminders."))),
+		h.Form(h.ID(id+"-snooze-pick"), h.Method("post"), h.Action(base+"/snooze"), g.Attr("data-morph"),
+			g.Map(snoozeChoices, func(c struct{ Value, Label string }) g.Node {
+				return h.Button(h.Class("sheet-item"), h.Name("when"), h.Value(c.Value), g.Text(c.Label))
+			})))
+}
+
+// snoozedMessage is chatMessage for a member, who may snooze.
+func (a *app) snoozedMessage(r *http.Request) (chatView, Message, error) {
+	v, m, err := a.chatMessage(r)
+	if err == nil && !v.Member {
+		return v, m, errNotFound
+	}
+	return v, m, err
+}
+
+func (a *app) messageSnooze(w http.ResponseWriter, r *http.Request) error {
+	v, m, err := a.snoozedMessage(r)
+	if err != nil {
+		return err
+	}
+	now := a.now()
+	due, ok := snoozeDue(r.PostFormValue("when"), now, viewerLoc(r))
+	if !ok {
+		return httpErr(http.StatusBadRequest, "Unknown reminder time.")
+	}
+	err = a.q.SnoozeUpsert(r.Context(), SnoozeUpsertParams{
+		MessageID: m.ID,
+		UserID:    v.User.ID,
+		DueAt:     due.Unix(),
+		CreatedAt: now.Unix(),
+	})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	a.hub.notifyUsers(v.User.ID) // private: nobody else is told
+	http.Redirect(w, r, chatPath(v.Chat.ID), http.StatusSeeOther)
+	return nil
+}
+
+func (a *app) messageUnsnooze(w http.ResponseWriter, r *http.Request) error {
+	v, m, err := a.snoozedMessage(r)
+	if err != nil {
+		return err
+	}
+	err = a.q.SnoozeDelete(r.Context(), SnoozeDeleteParams{MessageID: m.ID, UserID: v.User.ID})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	a.hub.notifyUsers(v.User.ID)
+	http.Redirect(w, r, chatPath(v.Chat.ID), http.StatusSeeOther)
+	return nil
+}
+
+// startSnoozes fires due reminders now, which covers those that came due
+// while the server was down, and then every snoozeInterval until shutdown.
+func (a *app) startSnoozes() {
+	a.bg.Go(func() {
+		tick := time.NewTicker(snoozeInterval)
+		defer tick.Stop()
+		for {
+			a.snoozeRound(a.ctx)
+			select {
+			case <-tick.C:
+			case <-a.ctx.Done():
+				return
+			}
+		}
+	})
+}
+
+// snoozeRound fires the reminders that are due, oldest first.
+func (a *app) snoozeRound(ctx context.Context) {
+	due, err := a.q.SnoozesDue(ctx, a.now().Unix())
+	if err != nil {
+		if ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "snoozes due: %+v\n", serr.Wrap(err))
+		}
+		return
+	}
+	for _, s := range due {
+		if err := a.fireSnooze(ctx, s); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "snooze %d/%d: %+v\n", s.MessageID, s.UserID, err)
+		}
+	}
+}
+
+// fireSnooze sends one reminder. Taking the row first, guarded by its due
+// time, makes a reminder fire at most once and leaves alone one that was
+// just moved to a later time.
+func (a *app) fireSnooze(ctx context.Context, s Snooze) error {
+	n, err := a.q.SnoozeTake(ctx, SnoozeTakeParams{MessageID: s.MessageID, UserID: s.UserID, DueAt: s.DueAt})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	if n == 0 {
+		return nil
+	}
+	msg, err := a.q.MessageByID(ctx, s.MessageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	_, err = a.q.MemberGet(ctx, MemberGetParams{ChatID: msg.ChatID, UserID: s.UserID})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // no longer a member: dropped silently
+	}
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	payload, err := a.reminderPayload(ctx, s.UserID, msg)
+	if err != nil {
+		return err
+	}
+	a.pushTo(s.UserID, payload)
+	return nil
+}
+
+// reminderPayload is the notification for a snoozed message, titled with
+// the chat as the user sees it.
+func (a *app) reminderPayload(ctx context.Context, userID int64, msg Message) ([]byte, error) {
+	chat, err := a.q.ChatByID(ctx, msg.ChatID)
+	if err != nil {
+		return nil, serr.Wrap(err)
+	}
+	viewer, err := a.q.UserByID(ctx, userID)
+	if err != nil {
+		return nil, serr.Wrap(err)
+	}
+	title, err := a.chatName(ctx, chat, &viewer)
+	if err != nil {
+		return nil, err
+	}
+	author, err := a.q.UserByID(ctx, msg.UserID)
+	if err != nil {
+		return nil, serr.Wrap(err)
+	}
+	text, err := a.pushSnippet(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+	b, err := json.Marshal(pushPayload{
+		Title: "Reminder · " + title,
+		Body:  author.Username + ": " + text,
+		Tag:   fmt.Sprintf("snooze-%d", msg.ID),
+		Data:  pushPayloadData{URL: fmt.Sprintf("%s?m=%d", chatPath(chat.ID), msg.ID)},
+	})
+	return b, serr.Wrap(err)
+}
+
+// jumpToMessage answers /c/{id}?m={mid}, the link in a reminder: it shows
+// enough of the newest messages to include that one, and scrolls to it.
+func (a *app) jumpToMessage(w http.ResponseWriter, r *http.Request, v chatView, mid string) error {
+	ctx := r.Context()
+	to := chatPath(v.Chat.ID)
+	id, err := strconv.ParseInt(mid, 10, 64)
+	if err == nil {
+		_, err = a.q.MessageInChat(ctx, MessageInChatParams{ID: id, ChatID: v.Chat.ID})
+		switch {
+		case err == nil:
+			n, err := a.q.MessagesCountFrom(ctx, MessagesCountFromParams{ChatID: v.Chat.ID, ID: id})
+			if err != nil {
+				return serr.Wrap(err)
+			}
+			to = fmt.Sprintf("%s?n=%d#m%d", to, max(defaultPage, n), id)
+		case !errors.Is(err, sql.ErrNoRows):
+			return serr.Wrap(err)
+		}
+	}
+	http.Redirect(w, r, to, http.StatusSeeOther)
+	return nil
 }

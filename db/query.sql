@@ -331,3 +331,32 @@ DELETE FROM push_subscriptions WHERE id = @id AND user_id = @user_id;
 
 -- name: PushSubDeleteByID :exec
 DELETE FROM push_subscriptions WHERE id = ?;
+
+-- name: SnoozeUpsert :exec
+INSERT INTO snoozes (message_id, user_id, due_at, created_at)
+VALUES (@message_id, @user_id, @due_at, @created_at)
+ON CONFLICT (message_id, user_id) DO UPDATE SET
+  due_at = excluded.due_at,
+  created_at = excluded.created_at;
+
+-- name: SnoozeDelete :exec
+DELETE FROM snoozes WHERE message_id = @message_id AND user_id = @user_id;
+
+-- name: SnoozeTake :execrows
+DELETE FROM snoozes
+WHERE message_id = @message_id AND user_id = @user_id AND due_at = @due_at;
+
+-- name: SnoozesDue :many
+SELECT * FROM snoozes WHERE due_at <= @now
+ORDER BY due_at, message_id, user_id
+LIMIT 100;
+
+-- name: SnoozesForUserMessages :many
+SELECT message_id, due_at FROM snoozes
+WHERE user_id = @user_id AND message_id IN (sqlc.slice('ids'));
+
+-- name: MessagesCountFrom :one
+SELECT count(*) FROM messages WHERE chat_id = @chat_id AND id >= @id;
+
+-- name: PushSubCountByUser :one
+SELECT count(*) FROM push_subscriptions WHERE user_id = ?;

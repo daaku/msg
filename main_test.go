@@ -111,7 +111,10 @@ func newTestAppIn(t *testing.T, dir string) *testApp {
 	ensure.Nil(t, err)
 	a, err := newApp(t.Context(), cfg)
 	ensure.Nil(t, err)
-	t.Cleanup(func() { ensure.Nil(t, a.close()) })
+	t.Cleanup(func() {
+		a.bg.Wait() // background sends stop with t.Context, before the database closes
+		ensure.Nil(t, a.close())
+	})
 	a.now = func() time.Time { return testNow }
 	fp := &fakePush{}
 	a.push = fp

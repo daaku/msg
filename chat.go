@@ -268,6 +268,7 @@ type chatView struct {
 	Manage   bool
 	Archived bool // by this user, private to them
 	Title    string
+	Snoozes  snoozeView // the viewer's own, on the chat page only
 }
 
 // chatView loads the chat named by the {id} path value for a user who may
@@ -622,6 +623,9 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	if m := r.URL.Query().Get("m"); m != "" {
+		return a.jumpToMessage(w, r, v, m)
+	}
 	n := pageSize(r.URL.Query().Get("n"))
 	rows, err := a.q.MessagesLatest(ctx, MessagesLatestParams{ChatID: v.Chat.ID, N: n})
 	if err != nil {
@@ -639,6 +643,9 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	}
 	files, err := a.filesFor(ctx, rows)
 	if err != nil {
+		return err
+	}
+	if v.Snoozes, err = a.snoozesFor(ctx, v.User.ID, rows, viewerLoc(r)); err != nil {
 		return err
 	}
 
@@ -741,6 +748,7 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 				g.Text(row.Username))),
 			content,
 			a.reactionChips(v, m, reactions[m.ID]),
+			snoozeMarker(v, m),
 			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
 			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
 				g.Text(at.Format("15:04"))),
@@ -1120,7 +1128,6 @@ func canDelete(v chatView, m Message) bool {
 func (a *app) messageMenu(v chatView, m Message) g.Node {
 	id := fmt.Sprintf("m%d", m.ID)
 	base := messagePath(v.Chat.ID, m.ID)
-	// Task 021 adds the snooze choices.
 	var entries g.Group
 	if v.Member {
 		entries = append(entries, h.Form(h.ID(id+"-pick"), h.Class("picker"), h.Method("post"),
@@ -1129,6 +1136,7 @@ func (a *app) messageMenu(v chatView, m Message) g.Node {
 			g.Map(reactionPalette, func(e string) g.Node {
 				return h.Button(h.Name("emoji"), h.Value(e), h.Aria("label", "React with "+e), g.Text(e))
 			})))
+		entries = append(entries, snoozeMenu(v, m))
 	}
 	if canEdit(v, m) {
 		entries = append(entries, h.A(h.ID(id+"-edit"), h.Class("sheet-item"), h.Href(base+"/edit"),

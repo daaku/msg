@@ -1353,6 +1353,22 @@ func (q *Queries) MessageUpdateBody(ctx context.Context, arg MessageUpdateBodyPa
 	return err
 }
 
+const messagesCountFrom = `-- name: MessagesCountFrom :one
+SELECT count(*) FROM messages WHERE chat_id = ?1 AND id >= ?2
+`
+
+type MessagesCountFromParams struct {
+	ChatID int64
+	ID     int64
+}
+
+func (q *Queries) MessagesCountFrom(ctx context.Context, arg MessagesCountFromParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, messagesCountFrom, arg.ChatID, arg.ID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const messagesLatest = `-- name: MessagesLatest :many
 SELECT messages.id, messages.chat_id, messages.user_id, messages.body, messages.file_id, messages.created_at, messages.edited_at, users.username
 FROM messages JOIN users ON users.id = messages.user_id
@@ -1401,6 +1417,17 @@ func (q *Queries) MessagesLatest(ctx context.Context, arg MessagesLatestParams) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const pushSubCountByUser = `-- name: PushSubCountByUser :one
+SELECT count(*) FROM push_subscriptions WHERE user_id = ?
+`
+
+func (q *Queries) PushSubCountByUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, pushSubCountByUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const pushSubDelete = `-- name: PushSubDelete :execrows
@@ -1615,6 +1642,147 @@ func (q *Queries) ReactionsForMessages(ctx context.Context, ids []int64) ([]Reac
 			&i.UserID,
 			&i.Username,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const snoozeDelete = `-- name: SnoozeDelete :exec
+DELETE FROM snoozes WHERE message_id = ?1 AND user_id = ?2
+`
+
+type SnoozeDeleteParams struct {
+	MessageID int64
+	UserID    int64
+}
+
+func (q *Queries) SnoozeDelete(ctx context.Context, arg SnoozeDeleteParams) error {
+	_, err := q.db.ExecContext(ctx, snoozeDelete, arg.MessageID, arg.UserID)
+	return err
+}
+
+const snoozeTake = `-- name: SnoozeTake :execrows
+DELETE FROM snoozes
+WHERE message_id = ?1 AND user_id = ?2 AND due_at = ?3
+`
+
+type SnoozeTakeParams struct {
+	MessageID int64
+	UserID    int64
+	DueAt     int64
+}
+
+func (q *Queries) SnoozeTake(ctx context.Context, arg SnoozeTakeParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, snoozeTake, arg.MessageID, arg.UserID, arg.DueAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const snoozeUpsert = `-- name: SnoozeUpsert :exec
+INSERT INTO snoozes (message_id, user_id, due_at, created_at)
+VALUES (?1, ?2, ?3, ?4)
+ON CONFLICT (message_id, user_id) DO UPDATE SET
+  due_at = excluded.due_at,
+  created_at = excluded.created_at
+`
+
+type SnoozeUpsertParams struct {
+	MessageID int64
+	UserID    int64
+	DueAt     int64
+	CreatedAt int64
+}
+
+func (q *Queries) SnoozeUpsert(ctx context.Context, arg SnoozeUpsertParams) error {
+	_, err := q.db.ExecContext(ctx, snoozeUpsert,
+		arg.MessageID,
+		arg.UserID,
+		arg.DueAt,
+		arg.CreatedAt,
+	)
+	return err
+}
+
+const snoozesDue = `-- name: SnoozesDue :many
+SELECT message_id, user_id, due_at, created_at FROM snoozes WHERE due_at <= ?1
+ORDER BY due_at, message_id, user_id
+LIMIT 100
+`
+
+func (q *Queries) SnoozesDue(ctx context.Context, now int64) ([]Snooze, error) {
+	rows, err := q.db.QueryContext(ctx, snoozesDue, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Snooze
+	for rows.Next() {
+		var i Snooze
+		if err := rows.Scan(
+			&i.MessageID,
+			&i.UserID,
+			&i.DueAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const snoozesForUserMessages = `-- name: SnoozesForUserMessages :many
+SELECT message_id, due_at FROM snoozes
+WHERE user_id = ?1 AND message_id IN (/*SLICE:ids*/?)
+`
+
+type SnoozesForUserMessagesParams struct {
+	UserID int64
+	Ids    []int64
+}
+
+type SnoozesForUserMessagesRow struct {
+	MessageID int64
+	DueAt     int64
+}
+
+func (q *Queries) SnoozesForUserMessages(ctx context.Context, arg SnoozesForUserMessagesParams) ([]SnoozesForUserMessagesRow, error) {
+	query := snoozesForUserMessages
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.UserID)
+	if len(arg.Ids) > 0 {
+		for _, v := range arg.Ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(arg.Ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SnoozesForUserMessagesRow
+	for rows.Next() {
+		var i SnoozesForUserMessagesRow
+		if err := rows.Scan(&i.MessageID, &i.DueAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

@@ -356,3 +356,322 @@ func TestPushShutdownWaits(t *testing.T) {
 		t.Fatal("Wait did not return after the send finished")
 	}
 }
+
+// snoozes
+
+func (ta *testApp) snooze(u *testUser, chat Chat, m Message, when string, opts ...reqOpt) int {
+	ta.t.Helper()
+	return ta.post(messagePath(chat.ID, m.ID)+"/snooze", url.Values{"when": {when}},
+		append([]reqOpt{ta.as(u)}, opts...)...).Code
+}
+
+func (ta *testApp) snoozeRows() []Snooze {
+	ta.t.Helper()
+	rows, err := ta.app.q.SnoozesDue(ta.t.Context(), 1<<62)
+	ensure.Nil(ta.t, err)
+	return rows
+}
+
+func withTZ(name string) reqOpt {
+	return func(r *http.Request) { r.AddCookie(&http.Cookie{Name: "tz", Value: name}) }
+}
+
+func TestSnoozeDue(t *testing.T) {
+	dubai, err := time.LoadLocation("Asia/Dubai")
+	ensure.Nil(t, err)
+	ny, err := time.LoadLocation("America/New_York")
+	ensure.Nil(t, err)
+	utc := func(s string) time.Time {
+		v, err := time.Parse("2006-01-02 15:04", s)
+		ensure.Nil(t, err)
+		return v
+	}
+	cases := []struct {
+		now  string
+		loc  *time.Location
+		when string
+		want string
+	}{
+		// 07:04 in Dubai
+		{"2026-01-02 03:04", dubai, "1h", "2026-01-02 04:04"},
+		{"2026-01-02 03:04", dubai, "3h", "2026-01-02 06:04"},
+		{"2026-01-02 03:04", dubai, "tomorrow", "2026-01-03 05:00"},
+		{"2026-01-02 03:04", dubai, "week", "2026-01-09 05:00"},
+		// 23:59 in Dubai: tomorrow is the next calendar day there
+		{"2026-01-02 19:59", dubai, "1h", "2026-01-02 20:59"},
+		{"2026-01-02 19:59", dubai, "tomorrow", "2026-01-03 05:00"},
+		{"2026-01-02 19:59", dubai, "week", "2026-01-09 05:00"},
+		// 00:30 in Dubai on the 3rd, still the 2nd in UTC
+		{"2026-01-02 20:30", dubai, "tomorrow", "2026-01-04 05:00"},
+		// New York the day before summer time starts (8 March 2026)
+		{"2026-03-07 15:00", ny, "1h", "2026-03-07 16:00"},
+		{"2026-03-07 15:00", ny, "tomorrow", "2026-03-08 13:00"},
+		{"2026-03-07 15:00", ny, "week", "2026-03-14 13:00"},
+		{"2026-03-07 15:00", time.UTC, "tomorrow", "2026-03-08 09:00"},
+	}
+	for _, c := range cases {
+		got, ok := snoozeDue(c.when, utc(c.now), c.loc)
+		ensure.True(t, ok, c)
+		ensure.DeepEqual(t, got.UTC().Format("2006-01-02 15:04"), c.want, c)
+	}
+	for _, bad := range []string{"", "2h", "Tomorrow", "1H"} {
+		_, ok := snoozeDue(bad, time.Now(), time.UTC)
+		ensure.False(t, ok, bad)
+	}
+}
+
+func TestFmtDue(t *testing.T) {
+	now := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+	ensure.DeepEqual(t, fmtDue(now.Add(3*time.Hour), now, time.UTC), "13:00")
+	ensure.DeepEqual(t, fmtDue(time.Date(2026, 1, 3, 9, 0, 0, 0, time.UTC), now, time.UTC), "Tomorrow 09:00")
+	ensure.DeepEqual(t, fmtDue(time.Date(2026, 1, 9, 9, 0, 0, 0, time.UTC), now, time.UTC), "Fri 9 Jan 09:00")
+	ensure.DeepEqual(t, fmtDue(time.Date(2027, 1, 1, 9, 0, 0, 0, time.UTC), now, time.UTC), "1 Jan 2027 09:00")
+	dubai, _ := time.LoadLocation("Asia/Dubai")
+	// 22:00 UTC is 02:00 the next day in Dubai
+	ensure.DeepEqual(t, fmtDue(time.Date(2026, 1, 2, 22, 0, 0, 0, time.UTC), now, dubai), "Tomorrow 02:00")
+}
+
+func TestSnoozeRoutes(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	boss := ta.newUser("boss", "admin")
+	chat := ta.newChat(alice, "Team", bob)
+	other := ta.newChat(alice, "Other")
+	m := ta.newMessage(chat, bob, "remember this")
+	mo := ta.newMessage(other, alice, "elsewhere")
+
+	ensure.DeepEqual(t, ta.post(messagePath(chat.ID, m.ID)+"/snooze", url.Values{"when": {"1h"}}).Code,
+		http.StatusUnauthorized)
+	ensure.DeepEqual(t, ta.snooze(carol, chat, m, "1h"), http.StatusNotFound)
+	ensure.DeepEqual(t, ta.snooze(boss, chat, m, "1h"), http.StatusNotFound) // admin, not a member
+	// a message from another chat
+	ensure.DeepEqual(t, ta.post(messagePath(chat.ID, mo.ID)+"/snooze", url.Values{"when": {"1h"}},
+		ta.as(alice)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "soon"), http.StatusBadRequest)
+	ensure.DeepEqual(t, len(ta.snoozeRows()), 0)
+
+	srv := ta.server()
+	aliceS := ta.stream(srv, alice, "")
+	bobS := ta.stream(srv, bob, "")
+	w := ta.post(messagePath(chat.ID, m.ID)+"/snooze", url.Values{"when": {"tomorrow"}},
+		ta.as(alice), withTZ("Asia/Dubai"))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
+	ensure.DeepEqual(t, aliceS.next(), "data: 1")
+	bobS.quiet()
+	rows := ta.snoozeRows()
+	ensure.DeepEqual(t, len(rows), 1)
+	ensure.DeepEqual(t, rows[0], Snooze{MessageID: m.ID, UserID: alice.ID,
+		DueAt: time.Date(2026, 1, 3, 5, 0, 0, 0, time.UTC).Unix(), CreatedAt: testNow.Unix()})
+
+	// again replaces the time; one's own message works too
+	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "1h"), http.StatusSeeOther)
+	ensure.DeepEqual(t, ta.snooze(bob, chat, m, "3h"), http.StatusSeeOther)
+	rows = ta.snoozeRows()
+	ensure.DeepEqual(t, len(rows), 2)
+	ensure.DeepEqual(t, rows[0].UserID, alice.ID)
+	ensure.DeepEqual(t, rows[0].DueAt, testNow.Add(time.Hour).Unix())
+	aliceS.next()
+
+	// unsnooze
+	unsnooze := func(u *testUser, mm Message) int {
+		return ta.post(messagePath(chat.ID, mm.ID)+"/unsnooze", nil, ta.as(u)).Code
+	}
+	ensure.DeepEqual(t, unsnooze(carol, m), http.StatusNotFound)
+	ensure.DeepEqual(t, unsnooze(alice, m), http.StatusSeeOther)
+	ensure.DeepEqual(t, aliceS.next(), "data: 1")
+	rows = ta.snoozeRows()
+	ensure.DeepEqual(t, len(rows), 1)
+	ensure.DeepEqual(t, rows[0].UserID, bob.ID)
+}
+
+func TestSnoozeRender(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	chat := ta.newChat(alice, "Team", bob, carol)
+	m := ta.newMessage(chat, bob, "remember this")
+	marker := `id="m` + idStr(m.ID) + `-snooze"`
+	hint := "Enable notifications in Settings</a> to get reminders."
+
+	body := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, `id="m`+idStr(m.ID)+`-remind"`)
+	ensure.StringContains(t, body, `action="`+messagePath(chat.ID, m.ID)+`/snooze" data-morph`)
+	for _, c := range snoozeChoices {
+		ensure.StringContains(t, body, `name="when" value="`+c.Value+`">`+c.Label+`</button>`)
+	}
+	ensure.StringDoesNotContain(t, body, marker)
+	ensure.StringDoesNotContain(t, body, "Cancel reminder")
+	ensure.StringContains(t, body, hint)
+
+	ta.subscribe(alice, "https://push.example/alice")
+	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "3h"), http.StatusSeeOther)
+	body = ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, `<span `+marker+` class="msg-snooze" title="Reminder 06:04">`)
+	ensure.StringContains(t, body, "Cancel reminder")
+	ensure.StringContains(t, body, `action="`+messagePath(chat.ID, m.ID)+`/unsnooze"`)
+	ensure.StringContains(t, body, `value="tomorrow"`) // the choices stay
+	ensure.StringDoesNotContain(t, body, hint)
+
+	// nobody else sees it
+	for _, u := range []*testUser{bob, carol} {
+		body = ta.get(chatPath(chat.ID), ta.as(u)).Body.String()
+		ensure.StringDoesNotContain(t, body, marker)
+		ensure.StringDoesNotContain(t, body, "Cancel reminder")
+		ensure.StringDoesNotContain(t, body, "Reminder 06:04")
+	}
+	// an admin viewing without being a member gets no snooze section
+	boss := ta.newUser("boss", "admin")
+	ensure.StringDoesNotContain(t, ta.get(chatPath(chat.ID), ta.as(boss)).Body.String(), "-remind")
+}
+
+func TestSnoozeFiring(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "Team", bob)
+	m := ta.newMessage(chat, bob, "remember this")
+	ta.sends() // the message's own push is done before anyone subscribes
+	ta.subscribe(alice, "https://push.example/alice1")
+	ta.subscribe(alice, "https://push.example/alice2")
+	ta.subscribe(bob, "https://push.example/bob")
+	ta.sends()
+	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "1h"), http.StatusSeeOther)
+
+	// not yet due
+	ta.app.now = func() time.Time { return testNow.Add(59 * time.Minute) }
+	ta.app.snoozeRound(ctx)
+	ensure.DeepEqual(t, len(ta.sends()), 0)
+	ensure.DeepEqual(t, len(ta.snoozeRows()), 1)
+
+	// due, even while she is looking at the chat
+	srv := ta.server()
+	ta.stream(srv, alice, "?chat="+idStr(chat.ID))
+	ta.app.now = func() time.Time { return testNow.Add(time.Hour) }
+	ta.app.snoozeRound(ctx)
+	sent := ta.sends()
+	ensure.SameElements(t, endpoints(sent), []string{"https://push.example/alice1", "https://push.example/alice2"})
+	ensure.DeepEqual(t, sent[0].Payload, pushPayload{
+		Title: "Reminder · Team",
+		Body:  "bob: remember this",
+		Tag:   fmt.Sprintf("snooze-%d", m.ID),
+		Data:  pushPayloadData{URL: fmt.Sprintf("%s?m=%d", chatPath(chat.ID), m.ID)},
+	})
+	ensure.DeepEqual(t, len(ta.snoozeRows()), 0)
+	us, _ := ta.stats(alice.ID, chat.ID)
+	ensure.DeepEqual(t, us.PushesSent, int64(2))
+
+	// it fires once
+	ta.app.snoozeRound(ctx)
+	ensure.DeepEqual(t, len(ta.sends()), 0)
+}
+
+func TestSnoozeDropped(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "Team", bob)
+	m1 := ta.newMessage(chat, alice, "one")
+	m2 := ta.newMessage(chat, alice, "two")
+	ta.subscribe(bob, "https://push.example/bob")
+	ta.sends()
+	later := func() time.Time { return testNow.Add(2 * time.Hour) }
+
+	// removed from the chat before it fires
+	ensure.DeepEqual(t, ta.snooze(bob, chat, m1, "1h"), http.StatusSeeOther)
+	ta.post(chatPath(chat.ID)+"/members/remove", url.Values{"user": {idStr(bob.ID)}}, ta.as(alice))
+	ta.app.now = later
+	ta.app.snoozeRound(ctx)
+	ensure.DeepEqual(t, len(ta.sends()), 0)
+	ensure.DeepEqual(t, len(ta.snoozeRows()), 0)
+
+	// the message was deleted
+	ta.app.now = func() time.Time { return testNow }
+	ta.post(chatPath(chat.ID)+"/members/add", url.Values{"user": {idStr(bob.ID)}}, ta.as(alice))
+	ensure.DeepEqual(t, ta.snooze(bob, chat, m2, "1h"), http.StatusSeeOther)
+	ensure.DeepEqual(t, len(ta.snoozeRows()), 1)
+	ensure.DeepEqual(t, ta.post(messagePath(chat.ID, m2.ID)+"/delete", nil, ta.as(alice)).Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, len(ta.snoozeRows()), 0)
+	ta.app.now = later
+	ta.app.snoozeRound(ctx)
+	ensure.DeepEqual(t, len(ta.sends()), 0)
+}
+
+func TestSnoozeMovedBeforeFiring(t *testing.T) {
+	ta := newTestApp(t)
+	ctx := t.Context()
+	alice := ta.newUser("alice", "group")
+	chat := ta.newChat(alice, "Team")
+	m := ta.newMessage(chat, alice, "one")
+	ta.subscribe(alice, "https://push.example/alice")
+	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "1h"), http.StatusSeeOther)
+
+	ta.app.now = func() time.Time { return testNow.Add(time.Hour) }
+	due, err := ta.app.q.SnoozesDue(ctx, ta.app.now().Unix())
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, len(due), 1)
+	// moved to later in between
+	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "3h"), http.StatusSeeOther)
+	ensure.Nil(t, ta.app.fireSnooze(ctx, due[0]))
+	ensure.DeepEqual(t, len(ta.sends()), 0)
+	rows := ta.snoozeRows()
+	ensure.DeepEqual(t, len(rows), 1)
+	ensure.DeepEqual(t, rows[0].DueAt, testNow.Add(4*time.Hour).Unix())
+}
+
+func TestSnoozeDMPayload(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice")
+	bob := ta.newUser("bob")
+	dm := ta.newDM(alice, bob)
+	m := ta.newMessage(dm, alice, strings.Repeat("x", 300))
+	ta.subscribe(alice, "https://push.example/alice")
+	ta.sends()
+	ensure.DeepEqual(t, ta.snooze(alice, dm, m, "1h"), http.StatusSeeOther)
+	ta.app.now = func() time.Time { return testNow.Add(time.Hour) }
+	ta.app.snoozeRound(t.Context())
+	sent := ta.sends()
+	ensure.DeepEqual(t, len(sent), 1)
+	ensure.DeepEqual(t, sent[0].Payload.Title, "Reminder · bob")
+	ensure.DeepEqual(t, sent[0].Payload.Body, "alice: "+strings.Repeat("x", 120))
+	ensure.DeepEqual(t, sent[0].Payload.Data.URL, fmt.Sprintf("%s?m=%d", chatPath(dm.ID), m.ID))
+}
+
+func TestJumpToMessage(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	carol := ta.newUser("carol")
+	chat := ta.newChat(alice, "Team")
+	var msgs []Message
+	for i := range 150 {
+		msgs = append(msgs, ta.newMessage(chat, alice, fmt.Sprintf("m %d", i)))
+	}
+	jump := func(m string) *http.Response {
+		return ta.get(chatPath(chat.ID)+"?m="+m, ta.as(alice)).Result()
+	}
+	old := msgs[9] // 141 messages from it to the newest
+	res := jump(idStr(old.ID))
+	ensure.DeepEqual(t, res.StatusCode, http.StatusSeeOther)
+	ensure.DeepEqual(t, res.Header.Get("Location"), fmt.Sprintf("%s?n=141#m%d", chatPath(chat.ID), old.ID))
+	body := ta.get(fmt.Sprintf("%s?n=141", chatPath(chat.ID)), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, fmt.Sprintf(`<article id="m%d"`, old.ID))
+
+	recent := msgs[140]
+	ensure.DeepEqual(t, jump(idStr(recent.ID)).Header.Get("Location"),
+		fmt.Sprintf("%s?n=100#m%d", chatPath(chat.ID), recent.ID))
+
+	ensure.Nil(t, ta.app.deleteMessage(t.Context(), chat, recent))
+	ensure.DeepEqual(t, jump(idStr(recent.ID)).Header.Get("Location"), chatPath(chat.ID))
+	ensure.DeepEqual(t, jump("x").Header.Get("Location"), chatPath(chat.ID))
+	// a message of another chat is not looked up there
+	other := ta.newChat(alice, "Other")
+	om := ta.newMessage(other, alice, "o")
+	ensure.DeepEqual(t, jump(idStr(om.ID)).Header.Get("Location"), chatPath(chat.ID))
+	// someone who cannot see the chat gets 404, not a redirect
+	ensure.DeepEqual(t, ta.get(chatPath(chat.ID)+"?m="+idStr(old.ID), ta.as(carol)).Code, http.StatusNotFound)
+}

@@ -683,6 +683,8 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEdit))
 	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEditPost))
 	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/delete", a.wrap(accUser, a.messageDelete))
+	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/snooze", a.wrap(accUser, a.messageSnooze))
+	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/unsnooze", a.wrap(accUser, a.messageUnsnooze))
 	mux.HandleFunc("POST "+pChat+"{id}/rename", a.wrap(accUser, a.chatRename))
 	mux.HandleFunc("POST "+pChat+"{id}/members/add", a.wrap(accUser, a.chatMembersAdd))
 	mux.HandleFunc("POST "+pChat+"{id}/members/remove", a.wrap(accUser, a.chatMembersRemove))
@@ -734,6 +736,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	a.startJanitor()
+	a.startSnoozes()
 	if err := a.startMedia(); err != nil {
 		cancel()
 		a.bg.Wait()
