@@ -1,0 +1,69 @@
+[Unit]
+Description=msg chat server
+Requires=msg.socket
+After=msg.socket network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/msg
+# Read by systemd as root; the service user cannot read the file itself.
+EnvironmentFile=/etc/conf.d/msg
+Restart=on-failure
+RestartSec=2s
+
+# A throwaway user that owns nothing but /var/lib/msg, which holds the
+# database and the temporary files of media conversions. systemd sets
+# STATE_DIRECTORY to it.
+DynamicUser=yes
+StateDirectory=msg
+StateDirectoryMode=0700
+UMask=0077
+
+# The file system is read only apart from the state directory, and only the
+# server, the two converters and shared libraries may be executed.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+NoExecPaths=/
+ExecPaths=/usr/bin/msg /usr/bin/magick /usr/bin/ffmpeg /usr/bin/ffprobe /usr/lib
+
+# The listening socket is inherited. The service itself only makes outbound
+# connections: to the bucket, to push services and to linked sites.
+RestrictAddressFamilies=AF_INET AF_INET6
+SocketBindDeny=any
+
+# No privileges, and no way to gain any.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateUsers=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+
+# Nothing of the kernel or of other processes to look at or change.
+ProtectProc=invisible
+ProcSubset=pid
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+# Started at boot as well as by the socket: reminders and media conversions
+# run in the background and must not wait for the first connection.
+WantedBy=multi-user.target

@@ -87,7 +87,7 @@ All configuration is environment variables. See `.env.sample`.
 | --- | --- | --- |
 | `PUBLIC_URL` | `http://localhost:8080` | External origin, like `https://chat.example.com`. Also gives the passkey RP ID (its host name) and origin |
 | `APP_NAME` | `msg` | Page titles, home screen name, passkey RP name |
-| `STATE_DIRECTORY` | `data` | Holds `msg.db`, temporary conversion files and the fake bucket. systemd sets it with `StateDirectory=` |
+| `STATE_DIRECTORY` | `data` | Holds `msg.db`, temporary conversion files and the fake bucket. |
 | `ADMIN_USERNAME` | `admin` | Username of the bootstrap admin |
 | `DEV` | unset | `1` enables live reload and stack traces on error pages. Never in production |
 | `S3_ENDPOINT` | required | `https://host` (no path), or `fake` for the built in development bucket |
@@ -103,7 +103,7 @@ All configuration is environment variables. See `.env.sample`.
 | `VIDEO_RESOLUTION` | `1080p` | Long edge cap for videos |
 | `ADDR` | `localhost:8080` | Listen address, like `127.0.0.1:8080` |
 | `PORT` | unset | Listen on this port on all interfaces. Wins over `ADDR` |
-| `LISTEN_FDS` | unset | Set by systemd socket activation. When `1`, the server uses the inherited socket and ignores `PORT` and `ADDR` |
+| `LISTEN_FDS` | unset | When `1`, the server serves on the socket inherited as file descriptor 3 and ignores `PORT` and `ADDR` |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | unset | Serve HTTPS directly with this certificate and key. Not needed behind a proxy |
 
 Resolution names map to the long edge in pixels: `4k` 3840, `1440p` 2560,
@@ -128,8 +128,6 @@ The link creates the user `ADMIN_USERNAME` with the admin permission and
 registers a passkey for it. It works once and expires after 24 hours. Every
 start while there are still no users replaces it with a new link, so if it
 expired, restart the service. Once a user exists, no link is printed.
-
-With systemd, find it with `journalctl -u msg`.
 
 From there the admin invites people from the Invites page. An admin can also
 make an "add passkey" link for any user, to recover someone who lost their
@@ -283,80 +281,6 @@ server {
 
 nginx compresses `text/html` whenever `gzip on` is set.
 
-## systemd
-
-Build the binary with `CGO_ENABLED=0 go build -trimpath` (or take `msg.tar`
-from a release) and install it as `/usr/local/bin/msg`. Put the
-configuration in `/etc/msg.env`, readable by root only:
-
-```sh
-PUBLIC_URL=https://chat.example.com
-ADDR=127.0.0.1:8080
-S3_ENDPOINT=https://ACCOUNT_ID.r2.cloudflarestorage.com
-S3_REGION=auto
-S3_BUCKET=msg
-S3_ACCESS_KEY_ID=...
-S3_SECRET_ACCESS_KEY=...
-```
-
-`/etc/systemd/system/msg.service`:
-
-```ini
-[Unit]
-Description=msg
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/usr/local/bin/msg
-EnvironmentFile=/etc/msg.env
-DynamicUser=yes
-StateDirectory=msg
-Restart=on-failure
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-PrivateTmp=yes
-PrivateDevices=yes
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```sh
-systemctl enable --now msg
-journalctl -u msg
-```
-
-`DynamicUser=yes` runs the service as a throwaway user that owns nothing
-else on the machine. `StateDirectory=msg` creates `/var/lib/msg`, owned by
-that user, and sets `STATE_DIRECTORY` to it, so the database ends up at
-`/var/lib/msg/msg.db`. `EnvironmentFile=` is read by systemd as root, so the
-service user cannot read it. With `ProtectSystem=strict` the state directory
-is the only writable place, which is all the server, `magick` and `ffmpeg`
-need: conversions run in `/var/lib/msg/tmp`. Do not add
-`MemoryDenyWriteExecute=` or a `SystemCallFilter=` without testing an image
-and a video upload afterwards. The server needs outbound HTTPS to the bucket,
-the push services and the sites it makes link previews for.
-
-### Socket activation
-
-The listener can come from systemd instead, so the port stays open and
-connections wait while the service restarts. With an inherited socket
-`ADDR` and `PORT` are ignored. Add `/etc/systemd/system/msg.socket`:
-
-```ini
-[Socket]
-ListenStream=127.0.0.1:8080
-
-[Install]
-WantedBy=sockets.target
-```
-
-```sh
-systemctl enable --now msg.socket
-```
-
 ## Backups
 
 The whole state is `msg.db` (with its `msg.db-wal` and `msg.db-shm` while the
@@ -364,7 +288,7 @@ server runs) in the state directory, and the bucket. Do not copy the live
 database file. Either use SQLite's online backup:
 
 ```sh
-sqlite3 /var/lib/msg/msg.db ".backup /root/msg-backup.db"
+sqlite3 msg.db ".backup msg-backup.db"
 ```
 
 or stop the service and copy `msg.db`. Back up the bucket with your

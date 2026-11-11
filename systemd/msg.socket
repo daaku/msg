@@ -1,0 +1,21 @@
+[Unit]
+Description=msg chat server socket
+
+[Socket]
+# A unix socket for the TLS terminating proxy in front, for example in Caddy:
+#
+#   reverse_proxy unix//run/msg/msg.sock
+#
+# Any local user can connect, like a port on localhost. The server does its
+# own authentication. To allow only the proxy, add a drop-in with its group:
+#
+#   [Socket]
+#   SocketGroup=caddy
+#   SocketMode=0660
+ListenStream=/run/msg/msg.sock
+SocketMode=0666
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
