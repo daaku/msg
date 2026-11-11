@@ -432,9 +432,13 @@ label.check {
 }
 
 /* chat layout: one pane at a time on narrow screens, two from 48rem */
+/* The chat layout fills the screen edge to edge: the headers pad themselves
+   below the notch and the composer above the home indicator, so their
+   background reaches the edges. Other pages are padded by the body. */
 body.chat {
   height: 100dvh;
   min-height: 0;
+  padding-block: 0;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -473,6 +477,7 @@ body.chat {
 #sidebar {
   background-color: var(--color-surface);
   overflow-y: auto;
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 .chat-layout.has-chat #sidebar,
@@ -507,6 +512,7 @@ body.chat {
   justify-content: space-between;
   gap: var(--space-2xs);
   padding: var(--space-2xs) var(--space-xs);
+  padding-top: calc(var(--space-2xs) + env(safe-area-inset-top));
   background-color: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
 
@@ -603,6 +609,7 @@ body.chat {
   gap: var(--space-2xs);
   min-height: 3.25rem;
   padding: var(--space-3xs) var(--space-xs);
+  padding-top: calc(var(--space-3xs) + env(safe-area-inset-top));
   background-color: var(--color-surface);
   border-bottom: 1px solid var(--color-border);
 
@@ -643,6 +650,7 @@ body.chat {
   min-height: 0;
   overflow-y: auto;
   padding: var(--space-s);
+  padding-bottom: calc(var(--space-s) + env(safe-area-inset-bottom));
 }
 
 .scroll {
@@ -769,7 +777,7 @@ fieldset {
 }
 
 .sheet {
-  inset: auto 0 0;
+  inset: auto env(safe-area-inset-right) 0 env(safe-area-inset-left);
   width: min(100%, 28rem);
   margin: 0 auto;
   padding: var(--space-2xs) var(--space-2xs)
@@ -932,6 +940,7 @@ button.chip {
   align-items: flex-end;
   gap: var(--space-2xs);
   padding: var(--space-2xs) var(--space-xs);
+  padding-bottom: calc(var(--space-2xs) + env(safe-area-inset-bottom));
   background-color: var(--color-surface);
   border-top: 1px solid var(--color-border);
 
@@ -945,6 +954,7 @@ button.chip {
 
 .composer-note {
   padding: var(--space-xs);
+  padding-bottom: calc(var(--space-xs) + env(safe-area-inset-bottom));
   background-color: var(--color-surface);
   border-top: 1px solid var(--color-border);
   color: var(--color-text-muted);
@@ -1152,5 +1162,12 @@ article.msg:target {
   to {
     outline: 3px solid transparent;
     outline-offset: 2px;
+  }
+}
+
+/* the install hint is for the browser, not the installed app */
+@media (display-mode: standalone) {
+  .install-hint {
+    display: none;
   }
 }

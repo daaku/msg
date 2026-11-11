@@ -199,6 +199,8 @@ func (a *app) settingsNotifications(r *http.Request, u *User) (g.Node, error) {
 			"Allow them for this site in the browser's site settings, then reload this page.")),
 		h.P(h.Class("push-hint unavailable"), g.Text("This browser cannot show notifications. "+
 			"On an iPhone or iPad, add the app to the home screen first and open it from there.")),
+		h.P(h.Class("install-hint muted"), g.Text("On iPhone and iPad: tap Share, then Add to Home Screen, "+
+			"and open the app from there to enable notifications.")),
 		h.Form(h.Method("post"), h.Action(pPushSubscribe), h.Class("push-subscribe stack"),
 			h.Input(h.Type("hidden"), h.Name(inputJSON)),
 			h.Button(h.Class("btn"), h.Type("button"), h.Data("push-subscribe", a.vapidPublic),

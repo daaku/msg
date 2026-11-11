@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/daaku/serr"
 	g "maragu.dev/gomponents"
 	h "maragu.dev/gomponents/html"
 )
@@ -19,9 +21,18 @@ func (a *app) shell(w http.ResponseWriter, r *http.Request, title, bodyClass str
 			h.Head(
 				h.Meta(h.Charset("utf-8")),
 				h.Meta(h.Name("viewport"),
-					h.Content("width=device-width, initial-scale=1, viewport-fit=cover")),
+					h.Content("width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content")),
 				h.Meta(h.Name("color-scheme"), h.Content("light dark")),
 				h.TitleEl(g.Text(title+" · "+a.cfg.AppName)),
+				h.Link(h.Rel("manifest"), h.Href(pAppWebManifest)),
+				h.Link(h.Rel("icon"), h.Type("image/png"), h.Href(assetPath("favicon.png"))),
+				h.Link(h.Rel("apple-touch-icon"), h.Href(assetPath("apple-touch-icon.png"))),
+				h.Meta(h.Name("mobile-web-app-capable"), h.Content("yes")),
+				h.Meta(h.Name("apple-mobile-web-app-capable"), h.Content("yes")),
+				h.Meta(h.Name("apple-mobile-web-app-title"), h.Content(a.cfg.AppName)),
+				h.Meta(h.Name("apple-mobile-web-app-status-bar-style"), h.Content("default")),
+				h.Meta(h.Name("theme-color"), h.Content(themeLight), g.Attr("media", "(prefers-color-scheme: light)")),
+				h.Meta(h.Name("theme-color"), h.Content(themeDark), g.Attr("media", "(prefers-color-scheme: dark)")),
 				h.Link(h.Rel("stylesheet"), h.Href(assetPath("main.css"))),
 				h.Script(h.Src(assetPath("paxi.js")), h.Defer()),
 				h.Script(h.Src(assetPath("main.js")), h.Defer()),
@@ -33,6 +44,41 @@ func (a *app) shell(w http.ResponseWriter, r *http.Request, title, bodyClass str
 				h.Main(h.ID("app"),
 					a.renderFlash(w, r),
 					g.Group(body)))))
+}
+
+// The bar colours match --color-surface in main.css, the colour of the page
+// headers, and the background matches --color-bg.
+const (
+	themeLight      = "#ffffff"
+	themeDark       = "#1e1e1c"
+	backgroundLight = "#f7f7f5"
+)
+
+// manifest is the web app manifest that makes the app installable.
+func (a *app) manifest(w http.ResponseWriter, r *http.Request) error {
+	type icon struct {
+		Src     string `json:"src"`
+		Sizes   string `json:"sizes"`
+		Type    string `json:"type"`
+		Purpose string `json:"purpose,omitempty"`
+	}
+	w.Header().Set("Content-Type", "application/manifest+json")
+	w.Header().Set("Cache-Control", "no-cache")
+	return serr.Wrap(json.NewEncoder(w).Encode(map[string]any{
+		"name":             a.cfg.AppName,
+		"short_name":       a.cfg.AppName,
+		"id":               "/",
+		"start_url":        "/",
+		"scope":            "/",
+		"display":          "standalone",
+		"background_color": backgroundLight,
+		"theme_color":      themeLight,
+		"icons": []icon{
+			{Src: assetPath("icon-192.png"), Sizes: "192x192", Type: "image/png"},
+			{Src: assetPath("icon-512.png"), Sizes: "512x512", Type: "image/png"},
+			{Src: assetPath("icon-512.png"), Sizes: "512x512", Type: "image/png", Purpose: "maskable"},
+		},
+	}))
 }
 
 // page is the standard application page.

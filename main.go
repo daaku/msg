@@ -42,6 +42,7 @@ import (
 
 const (
 	pAdmin              = "/admin"
+	pAppWebManifest     = "/app.webmanifest"
 	pAdminUser          = "/admin/u/"
 	pArchived           = "/archived"
 	pAssets             = "/assets/"
@@ -652,6 +653,7 @@ func (a *app) handler() http.Handler {
 	mux.Handle("GET "+pAssets, hashfs.FileServer(assets))
 	mux.HandleFunc("GET "+pRobotsTxt, a.wrap(accPublic, a.static("robots.txt")))
 	mux.HandleFunc("GET "+pSWJS, a.wrap(accPublic, a.serviceWorker))
+	mux.HandleFunc("GET "+pAppWebManifest, a.wrap(accPublic, a.manifest))
 	mux.HandleFunc("GET "+pSignIn, a.wrap(accPublic, a.signIn))
 	mux.HandleFunc("GET "+pSignInOptions, a.wrap(accPublic, a.signInOptions))
 	mux.HandleFunc("POST "+pSignIn, a.wrap(accPublic, a.signInPost))

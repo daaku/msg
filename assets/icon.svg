@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- edge to edge: iOS and maskable launchers round the corners themselves -->
+  <rect width="512" height="512" fill="#2f6fde"/>
+  <!-- a rounded speech bubble, kept well inside the central 80 percent -->
+  <path fill="#ffffff" d="M188 140h136a60 60 0 0 1 60 60v84a60 60 0 0 1-60 60h-92l-62 46a6 6 0 0 1-9.6-5.6l12.6-44.4a60 60 0 0 1-45-56v-84a60 60 0 0 1 60-60z"/>
+  <circle cx="200" cy="242" r="20" fill="#2f6fde"/>
+  <circle cx="256" cy="242" r="20" fill="#2f6fde"/>
+  <circle cx="312" cy="242" r="20" fill="#2f6fde"/>
+</svg>
