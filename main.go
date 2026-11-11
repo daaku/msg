@@ -43,6 +43,7 @@ import (
 const (
 	pAdmin              = "/admin"
 	pAppWebManifest     = "/app.webmanifest"
+	pAdminGroups        = "/admin/groups"
 	pAdminUser          = "/admin/u/"
 	pArchived           = "/archived"
 	pAssets             = "/assets/"
@@ -691,6 +692,7 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("POST "+pChat+"{id}/members/add", a.wrap(accUser, a.chatMembersAdd))
 	mux.HandleFunc("POST "+pChat+"{id}/members/remove", a.wrap(accUser, a.chatMembersRemove))
 	mux.HandleFunc("GET "+pAdmin, a.wrap(accAdmin, a.admin))
+	mux.HandleFunc("GET "+pAdminGroups, a.wrap(accAdmin, a.adminGroups))
 	mux.HandleFunc("GET "+pAdminUser+"{id}", a.wrap(accAdmin, a.adminUser))
 	mux.HandleFunc("POST "+pAdminUser+"{id}/perms", a.wrap(accAdmin, a.adminUserPerms))
 	mux.HandleFunc("POST "+pAdminUser+"{id}/passkey/delete", a.wrap(accAdmin, a.adminUserPasskeyDelete))

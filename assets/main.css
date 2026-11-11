@@ -1171,3 +1171,29 @@ article.msg:target {
     display: none;
   }
 }
+
+/* stats */
+.stats {
+  display: grid;
+  grid-template-columns: 1fr max-content;
+  gap: var(--space-3xs) var(--space-s);
+  padding: var(--space-xs) var(--space-s);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+
+  dt {
+    color: var(--color-text-muted);
+  }
+
+  dd {
+    text-align: end;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.stats-note {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: var(--step--2);
+}

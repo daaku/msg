@@ -15,6 +15,8 @@ import (
 func TestFmtBytes(t *testing.T) {
 	cases := map[int64]string{
 		0:         "0 B",
+		999:       "999 B",
+		1000:      "1000 B",
 		1023:      "1023 B",
 		1024:      "1 KB",
 		1536:      "1.5 KB",
@@ -22,6 +24,7 @@ func TestFmtBytes(t *testing.T) {
 		3 << 19:   "1.5 MB",
 		100 << 20: "100 MB",
 		1<<30 - 1: "1 GB",
+		5 << 30:   "5 GB",
 		5 << 40:   "5 TB",
 	}
 	for in, want := range cases {

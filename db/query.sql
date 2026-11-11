@@ -134,8 +134,13 @@ WHERE id = @id AND user_id IS NULL AND created_by IS NOT NULL
 
 -- name: UsersAll :many
 SELECT sqlc.embed(users), CAST(coalesce(inviter.username, '') AS TEXT) AS inviter,
-  (SELECT count(*) FROM credentials WHERE credentials.user_id = users.id) AS passkeys
-FROM users LEFT JOIN users AS inviter ON inviter.id = users.invited_by
+  (SELECT count(*) FROM credentials WHERE credentials.user_id = users.id) AS passkeys,
+  CAST(coalesce(user_stats.messages_sent, 0) AS INTEGER) AS messages_sent,
+  CAST(coalesce(user_stats.bytes_uploaded, 0) AS INTEGER) AS bytes_uploaded,
+  CAST(coalesce(user_stats.bytes_downloaded, 0) AS INTEGER) AS bytes_downloaded
+FROM users
+LEFT JOIN users AS inviter ON inviter.id = users.invited_by
+LEFT JOIN user_stats ON user_stats.user_id = users.id
 ORDER BY users.username;
 
 -- name: UserSetPerms :exec
@@ -360,3 +365,17 @@ SELECT count(*) FROM messages WHERE chat_id = @chat_id AND id >= @id;
 
 -- name: PushSubCountByUser :one
 SELECT count(*) FROM push_subscriptions WHERE user_id = ?;
+
+-- name: GroupsAllWithStats :many
+SELECT sqlc.embed(chats), users.username AS creator,
+  (SELECT count(*) FROM members WHERE members.chat_id = chats.id) AS member_count,
+  CAST(coalesce(chat_stats.images_uploaded, 0) AS INTEGER) AS images_uploaded,
+  CAST(coalesce(chat_stats.videos_uploaded, 0) AS INTEGER) AS videos_uploaded,
+  CAST(coalesce(chat_stats.files_uploaded, 0) AS INTEGER) AS files_uploaded,
+  CAST(coalesce(chat_stats.bytes_uploaded, 0) AS INTEGER) AS bytes_uploaded,
+  CAST(coalesce(chat_stats.bytes_downloaded, 0) AS INTEGER) AS bytes_downloaded
+FROM chats
+JOIN users ON users.id = chats.created_by
+LEFT JOIN chat_stats ON chat_stats.chat_id = chats.id
+WHERE NOT chats.is_dm
+ORDER BY chats.name, chats.id;

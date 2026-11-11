@@ -779,6 +779,70 @@ func (q *Queries) FilesStaleUploads(ctx context.Context, before int64) ([]File, 
 	return items, nil
 }
 
+const groupsAllWithStats = `-- name: GroupsAllWithStats :many
+SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at, users.username AS creator,
+  (SELECT count(*) FROM members WHERE members.chat_id = chats.id) AS member_count,
+  CAST(coalesce(chat_stats.images_uploaded, 0) AS INTEGER) AS images_uploaded,
+  CAST(coalesce(chat_stats.videos_uploaded, 0) AS INTEGER) AS videos_uploaded,
+  CAST(coalesce(chat_stats.files_uploaded, 0) AS INTEGER) AS files_uploaded,
+  CAST(coalesce(chat_stats.bytes_uploaded, 0) AS INTEGER) AS bytes_uploaded,
+  CAST(coalesce(chat_stats.bytes_downloaded, 0) AS INTEGER) AS bytes_downloaded
+FROM chats
+JOIN users ON users.id = chats.created_by
+LEFT JOIN chat_stats ON chat_stats.chat_id = chats.id
+WHERE NOT chats.is_dm
+ORDER BY chats.name, chats.id
+`
+
+type GroupsAllWithStatsRow struct {
+	Chat            Chat
+	Creator         string
+	MemberCount     int64
+	ImagesUploaded  int64
+	VideosUploaded  int64
+	FilesUploaded   int64
+	BytesUploaded   int64
+	BytesDownloaded int64
+}
+
+func (q *Queries) GroupsAllWithStats(ctx context.Context) ([]GroupsAllWithStatsRow, error) {
+	rows, err := q.db.QueryContext(ctx, groupsAllWithStats)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []GroupsAllWithStatsRow
+	for rows.Next() {
+		var i GroupsAllWithStatsRow
+		if err := rows.Scan(
+			&i.Chat.ID,
+			&i.Chat.Name,
+			&i.Chat.IsDm,
+			&i.Chat.DmKey,
+			&i.Chat.CreatedBy,
+			&i.Chat.CreatedAt,
+			&i.Chat.LastMessageAt,
+			&i.Creator,
+			&i.MemberCount,
+			&i.ImagesUploaded,
+			&i.VideosUploaded,
+			&i.FilesUploaded,
+			&i.BytesUploaded,
+			&i.BytesDownloaded,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const inviteByToken = `-- name: InviteByToken :one
 SELECT id, token, username, handle, user_id, perm_admin, created_by, created_at, expires_at FROM invites WHERE token = ?1 AND expires_at > ?2
 `
@@ -2024,15 +2088,23 @@ func (q *Queries) UserStatsGet(ctx context.Context, userID int64) (UserStat, err
 
 const usersAll = `-- name: UsersAll :many
 SELECT users.id, users.username, users.handle, users.perm_admin, users.perm_invite, users.perm_group, users.invited_by, users.created_at, CAST(coalesce(inviter.username, '') AS TEXT) AS inviter,
-  (SELECT count(*) FROM credentials WHERE credentials.user_id = users.id) AS passkeys
-FROM users LEFT JOIN users AS inviter ON inviter.id = users.invited_by
+  (SELECT count(*) FROM credentials WHERE credentials.user_id = users.id) AS passkeys,
+  CAST(coalesce(user_stats.messages_sent, 0) AS INTEGER) AS messages_sent,
+  CAST(coalesce(user_stats.bytes_uploaded, 0) AS INTEGER) AS bytes_uploaded,
+  CAST(coalesce(user_stats.bytes_downloaded, 0) AS INTEGER) AS bytes_downloaded
+FROM users
+LEFT JOIN users AS inviter ON inviter.id = users.invited_by
+LEFT JOIN user_stats ON user_stats.user_id = users.id
 ORDER BY users.username
 `
 
 type UsersAllRow struct {
-	User     User
-	Inviter  string
-	Passkeys int64
+	User            User
+	Inviter         string
+	Passkeys        int64
+	MessagesSent    int64
+	BytesUploaded   int64
+	BytesDownloaded int64
 }
 
 func (q *Queries) UsersAll(ctx context.Context) ([]UsersAllRow, error) {
@@ -2055,6 +2127,9 @@ func (q *Queries) UsersAll(ctx context.Context) ([]UsersAllRow, error) {
 			&i.User.CreatedAt,
 			&i.Inviter,
 			&i.Passkeys,
+			&i.MessagesSent,
+			&i.BytesUploaded,
+			&i.BytesDownloaded,
 		); err != nil {
 			return nil, err
 		}

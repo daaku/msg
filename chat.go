@@ -938,11 +938,16 @@ func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 
+	stats, err := a.chatStatsSection(ctx, chatID)
+	if err != nil {
+		return err
+	}
 	if v.Chat.IsDm {
 		return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("info"), h.Class("pane-body stack"),
 			pageHeader(v.Title, backLink(base, "Back")),
 			h.P(g.Text("Direct message with "+v.Title+".")),
-			archiveForm(v)))
+			archiveForm(v),
+			stats))
 	}
 	return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("info"), h.Class("pane-body stack"),
 		pageHeader(v.Title, backLink(base, "Back")),
@@ -953,7 +958,8 @@ func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {
 		h.Section(h.Class("stack"),
 			h.H2(g.Text("Members")),
 			memberList),
-		manage))
+		manage,
+		stats))
 }
 
 func (a *app) chatRename(w http.ResponseWriter, r *http.Request) error {

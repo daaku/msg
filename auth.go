@@ -649,7 +649,7 @@ type settingsSection func(r *http.Request, u *User) (g.Node, error)
 // settingsSections are the sections of the settings page, in order. Later
 // features append to this list.
 func (a *app) settingsSections() []settingsSection {
-	return []settingsSection{a.settingsPasskeys, a.settingsDevices, a.settingsNotifications}
+	return []settingsSection{a.settingsPasskeys, a.settingsDevices, a.settingsNotifications, a.settingsStats}
 }
 
 func (a *app) settings(w http.ResponseWriter, r *http.Request) error {
@@ -1030,11 +1030,13 @@ func (a *app) admin(w http.ResponseWriter, r *http.Request) error {
 	return a.page(w, r, "Admin",
 		h.Div(h.Class("stack"),
 			pageHeader("Admin", backLink(pHome, "Home")),
+			h.P(h.A(h.ID("admin-groups"), h.Href(pAdminGroups), g.Text("All groups"))),
 			h.Table(h.ID("users"), h.Class("table"),
 				h.THead(h.Tr(
 					h.Th(g.Text("Username")), h.Th(g.Text("Permissions")),
 					h.Th(g.Text("Created")), h.Th(g.Text("Invited by")),
-					h.Th(g.Text("Passkeys")))),
+					h.Th(g.Text("Passkeys")), h.Th(g.Text("Messages sent")),
+					h.Th(g.Text("Uploaded")), h.Th(g.Text("Downloaded")))),
 				h.TBody(g.Map(rows, func(row UsersAllRow) g.Node {
 					u := row.User
 					inviter := row.Inviter
@@ -1046,7 +1048,10 @@ func (a *app) admin(w http.ResponseWriter, r *http.Request) error {
 						cell("Permissions", permBadges(u)),
 						cell("Created", g.Text(fmtTime(time.Unix(u.CreatedAt, 0), nil))),
 						cell("Invited by", g.Text(inviter)),
-						cell("Passkeys", g.Text(strconv.FormatInt(row.Passkeys, 10))))
+						cell("Passkeys", g.Text(strconv.FormatInt(row.Passkeys, 10))),
+						cell("Messages sent", g.Text(strconv.FormatInt(row.MessagesSent, 10))),
+						cell("Uploaded", g.Text(fmtBytes(row.BytesUploaded))),
+						cell("Downloaded", g.Text(fmtBytes(row.BytesDownloaded))))
 				}))))).Render(w)
 }
 
@@ -1081,6 +1086,10 @@ func (a *app) adminUser(w http.ResponseWriter, r *http.Request) error {
 	})
 	if err != nil {
 		return serr.Wrap(err)
+	}
+	stats, err := a.userStatsSection(ctx, target.ID)
+	if err != nil {
+		return err
 	}
 	base := adminUserPath(target.ID)
 	check := func(name, label string, on bool) g.Node {
@@ -1125,6 +1134,7 @@ func (a *app) adminUser(w http.ResponseWriter, r *http.Request) error {
 			h.Form(h.Method("post"), h.Action(base+"/link"),
 				h.Button(h.Class("btn secondary"), icon("plus"), h.Span(g.Text("Create recovery link")))),
 			a.linkList(links, base+"/link/revoke")),
+		stats,
 	).Render(w)
 }
 
