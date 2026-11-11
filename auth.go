@@ -649,7 +649,7 @@ type settingsSection func(r *http.Request, u *User) (g.Node, error)
 // settingsSections are the sections of the settings page, in order. Later
 // features append to this list.
 func (a *app) settingsSections() []settingsSection {
-	return []settingsSection{a.settingsPasskeys, a.settingsDevices}
+	return []settingsSection{a.settingsPasskeys, a.settingsDevices, a.settingsNotifications}
 }
 
 func (a *app) settings(w http.ResponseWriter, r *http.Request) error {

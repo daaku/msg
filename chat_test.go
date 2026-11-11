@@ -1233,6 +1233,7 @@ func TestReactionsConstantQueries(t *testing.T) {
 	counter := &countingDB{DBTX: ta.app.db}
 	ta.app.q = New(counter)
 	queries := func() (int64, string) {
+		ta.app.bg.Wait() // background push work also queries
 		counter.n.Store(0)
 		w := ta.get(chatPath(chat.ID), ta.as(alice))
 		ensure.DeepEqual(t, w.Code, http.StatusOK)

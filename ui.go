@@ -26,6 +26,8 @@ func (a *app) shell(w http.ResponseWriter, r *http.Request, title, bodyClass str
 				h.Script(h.Src(assetPath("paxi.js")), h.Defer()),
 				h.Script(h.Src(assetPath("main.js")), h.Defer()),
 				g.If(a.cfg.Dev, h.Script(h.Src(pLivereloadJS), h.Defer())),
+				// main.js registers the service worker for signed in users.
+				g.If(userFrom(r.Context()) != nil, h.Meta(h.Data("sw", pSWJS))),
 			),
 			h.Body(g.If(bodyClass != "", h.Class(bodyClass)),
 				h.Main(h.ID("app"),

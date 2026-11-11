@@ -1062,3 +1062,32 @@ video.media {
   height: auto;
   background-color: #000000;
 }
+
+/* notifications: main.js puts push-granted, push-denied, push-prompt or
+   push-unavailable on <body>, and that decides what shows */
+.push-hint,
+.push-subscribe,
+.push-prompt-link {
+  display: none;
+}
+
+.push-denied .push-hint.denied,
+.push-unavailable .push-hint.unavailable {
+  display: block;
+}
+
+.push-granted .push-subscribe,
+.push-prompt .push-subscribe {
+  display: flex;
+}
+
+.push-prompt .push-prompt-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-xs);
+  border-bottom: 1px solid var(--color-border);
+  background-color: color-mix(in oklab, var(--color-accent) 10%, var(--color-surface));
+  font-size: var(--step--1);
+  text-decoration: none;
+}

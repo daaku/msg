@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"net/http"
@@ -9,20 +11,82 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/daaku/ensure"
 	"github.com/daaku/serr"
+	"github.com/daaku/webpush"
 	"github.com/descope/virtualwebauthn"
 )
 
 var testNow = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
 type testApp struct {
-	t   *testing.T
-	app *app
-	h   http.Handler
+	t    *testing.T
+	app  *app
+	h    http.Handler
+	push *fakePush
+}
+
+// fakePush records push sends instead of making them.
+type fakePush struct {
+	mu    sync.Mutex
+	sent  []fakeSend
+	fail  map[string]error // by endpoint
+	block chan struct{}    // when set, Send waits for it to be closed
+	busy  int              // sends in progress
+}
+
+type fakeSend struct {
+	Endpoint string
+	Payload  pushPayload
+}
+
+func (f *fakePush) Send(ctx context.Context, message []byte, s *webpush.Subscription) error {
+	f.mu.Lock()
+	block := f.block
+	f.busy++
+	f.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.busy--
+	if err := f.fail[s.Endpoint]; err != nil {
+		return err
+	}
+	var p pushPayload
+	if err := json.Unmarshal(message, &p); err != nil {
+		return err
+	}
+	f.sent = append(f.sent, fakeSend{Endpoint: s.Endpoint, Payload: p})
+	return nil
+}
+
+// failWith makes sends to the endpoint fail with err.
+func (f *fakePush) failWith(endpoint string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail == nil {
+		f.fail = map[string]error{}
+	}
+	f.fail[endpoint] = err
+}
+
+// sends waits for the background sends and returns those made so far,
+// clearing the record.
+func (ta *testApp) sends() []fakeSend {
+	ta.t.Helper()
+	ta.app.bg.Wait()
+	f := ta.push
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.sent
+	f.sent = nil
+	return out
 }
 
 // newTestApp builds an app with default configuration on a temporary state
@@ -49,7 +113,9 @@ func newTestAppIn(t *testing.T, dir string) *testApp {
 	ensure.Nil(t, err)
 	t.Cleanup(func() { ensure.Nil(t, a.close()) })
 	a.now = func() time.Time { return testNow }
-	return &testApp{t: t, app: a, h: a.handler()}
+	fp := &fakePush{}
+	a.push = fp
+	return &testApp{t: t, app: a, h: a.handler(), push: fp}
 }
 
 type reqOpt func(*http.Request)

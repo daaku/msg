@@ -41,6 +41,63 @@ document.addEventListener('click', async ev => {
   }
 })
 
+// Push: register the service worker for signed in users, mark <body> with
+// the notification permission (push-granted, push-denied, push-prompt or
+// push-unavailable), and subscribe this device when asked.
+{
+  const sw = document.querySelector('meta[data-sw]')?.dataset.sw
+  const mark = state => {
+    document.body.classList.remove('push-granted', 'push-denied', 'push-prompt', 'push-unavailable')
+    document.body.classList.add(`push-${state}`)
+  }
+  if (sw) {
+    ;(async () => {
+      try {
+        const registration = await navigator.serviceWorker.register(sw, { updateViaCache: 'none' })
+        mark(await registration.pushManager?.permissionState({ userVisibleOnly: true }) ?? 'unavailable')
+      } catch (err) {
+        console.error(err)
+        mark('unavailable')
+      }
+    })()
+  }
+
+  document.addEventListener('click', async ev => {
+    const el = ev.target.closest?.('[data-push-subscribe]')
+    if (!el) return
+    ev.preventDefault()
+    const form = el.closest('form')
+    const alertEl = form.querySelector('[role=alert]')
+    if (alertEl) alertEl.textContent = ''
+    try {
+      const registration = await navigator.serviceWorker.ready
+      const options = {
+        userVisibleOnly: true,
+        applicationServerKey: Uint8Array.fromBase64(el.dataset.pushSubscribe, { alphabet: 'base64url' }),
+      }
+      let subscription
+      try {
+        subscription = await registration.pushManager.subscribe(options)
+      } catch (err) {
+        if (err.name !== 'InvalidStateError' && !err.message?.includes('application server key')) throw err
+        // A subscription made with a different key is in the way: drop it
+        // and try again.
+        await (await registration.pushManager.getSubscription())?.unsubscribe()
+        subscription = await registration.pushManager.subscribe(options)
+      }
+      form.json.value = JSON.stringify(subscription)
+      form.submit()
+    } catch (err) {
+      if (err.name === 'NotAllowedError') {
+        mark('denied')
+        return
+      }
+      console.error(err)
+      if (alertEl) alertEl.textContent = err.message || 'Something went wrong.'
+    }
+  })
+}
+
 // Copyable link fields: select the whole value on focus or click.
 for (const type of ['focusin', 'click']) {
   document.addEventListener(type, ev => {

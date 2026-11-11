@@ -63,6 +63,9 @@ const (
 	pPasskeyCreate      = "/passkey/create"
 	pPasskeyDelete      = "/passkey/delete"
 	pPasskeyOptions     = "/passkey/options"
+	pPushOpened         = "/push/opened"
+	pPushSubscribe      = "/push/subscribe"
+	pPushUnsubscribe    = "/push/unsubscribe"
 	pRobotsTxt          = "/robots.txt"
 	pSettings           = "/settings"
 	pSettingsLink       = "/settings/link"
@@ -70,6 +73,7 @@ const (
 	pSignIn             = "/sign-in"
 	pSignInOptions      = "/sign-in/options"
 	pSignOut            = "/sign-out"
+	pSWJS               = "/sw.js"
 )
 
 const defaultAddr = "localhost:8080"
@@ -318,6 +322,9 @@ type app struct {
 	fileLocks sync.Map // file id to *sync.Mutex
 	// beforeConvert is a test hook that runs just before a converter.
 	beforeConvert func(File)
+	push          pushSender
+	vapidPublic   string        // base64url, for pushManager.subscribe
+	pushSem       chan struct{} // limits concurrent push sends
 
 	master    []byte
 	secretsMu sync.Mutex
@@ -347,9 +354,14 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		wa:        wa,
 		hub:       newHub(),
 		mediaWake: make(chan struct{}, 1),
+		pushSem:   make(chan struct{}, pushConcurrency),
 		secrets:   map[string][]byte{},
 	}
 	if err := a.loadMaster(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := a.loadVAPID(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -639,6 +651,7 @@ func (a *app) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET "+pAssets, hashfs.FileServer(assets))
 	mux.HandleFunc("GET "+pRobotsTxt, a.wrap(accPublic, a.static("robots.txt")))
+	mux.HandleFunc("GET "+pSWJS, a.wrap(accPublic, a.serviceWorker))
 	mux.HandleFunc("GET "+pSignIn, a.wrap(accPublic, a.signIn))
 	mux.HandleFunc("GET "+pSignInOptions, a.wrap(accPublic, a.signInOptions))
 	mux.HandleFunc("POST "+pSignIn, a.wrap(accPublic, a.signInPost))
@@ -688,6 +701,9 @@ func (a *app) handler() http.Handler {
 	mux.HandleFunc("GET "+pPasskeyOptions, a.wrap(accUser, a.passkeyOptions))
 	mux.HandleFunc("POST "+pPasskeyCreate, a.wrap(accUser, a.passkeyCreate))
 	mux.HandleFunc("POST "+pPasskeyDelete, a.wrap(accUser, a.passkeyDelete))
+	mux.HandleFunc("POST "+pPushSubscribe, a.wrap(accUser, a.pushSubscribe))
+	mux.HandleFunc("POST "+pPushUnsubscribe, a.wrap(accUser, a.pushUnsubscribe))
+	mux.HandleFunc("POST "+pPushOpened, a.wrap(accUser, a.pushOpened))
 	if a.cfg.Dev {
 		mux.HandleFunc("GET "+pLivereload, livereload.Handler)
 		mux.HandleFunc("GET "+pLivereloadJS, a.wrap(accPublic, a.livereloadJS))

@@ -1403,6 +1403,138 @@ func (q *Queries) MessagesLatest(ctx context.Context, arg MessagesLatestParams) 
 	return items, nil
 }
 
+const pushSubDelete = `-- name: PushSubDelete :execrows
+DELETE FROM push_subscriptions WHERE id = ?1 AND user_id = ?2
+`
+
+type PushSubDeleteParams struct {
+	ID     int64
+	UserID int64
+}
+
+func (q *Queries) PushSubDelete(ctx context.Context, arg PushSubDeleteParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, pushSubDelete, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const pushSubDeleteByID = `-- name: PushSubDeleteByID :exec
+DELETE FROM push_subscriptions WHERE id = ?
+`
+
+func (q *Queries) PushSubDeleteByID(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, pushSubDeleteByID, id)
+	return err
+}
+
+const pushSubUpsert = `-- name: PushSubUpsert :exec
+INSERT INTO push_subscriptions (user_id, endpoint, subscription, label, created_at)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT (endpoint) DO UPDATE SET
+  user_id = excluded.user_id,
+  subscription = excluded.subscription,
+  label = excluded.label
+`
+
+type PushSubUpsertParams struct {
+	UserID       int64
+	Endpoint     string
+	Subscription []byte
+	Label        string
+	CreatedAt    int64
+}
+
+func (q *Queries) PushSubUpsert(ctx context.Context, arg PushSubUpsertParams) error {
+	_, err := q.db.ExecContext(ctx, pushSubUpsert,
+		arg.UserID,
+		arg.Endpoint,
+		arg.Subscription,
+		arg.Label,
+		arg.CreatedAt,
+	)
+	return err
+}
+
+const pushSubsByUser = `-- name: PushSubsByUser :many
+SELECT id, user_id, endpoint, subscription, label, created_at FROM push_subscriptions WHERE user_id = ? ORDER BY id
+`
+
+func (q *Queries) PushSubsByUser(ctx context.Context, userID int64) ([]PushSubscription, error) {
+	rows, err := q.db.QueryContext(ctx, pushSubsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PushSubscription
+	for rows.Next() {
+		var i PushSubscription
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Endpoint,
+			&i.Subscription,
+			&i.Label,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const pushSubsByUsers = `-- name: PushSubsByUsers :many
+SELECT id, user_id, endpoint, subscription, label, created_at FROM push_subscriptions WHERE user_id IN (/*SLICE:ids*/?) ORDER BY id
+`
+
+func (q *Queries) PushSubsByUsers(ctx context.Context, ids []int64) ([]PushSubscription, error) {
+	query := pushSubsByUsers
+	var queryParams []interface{}
+	if len(ids) > 0 {
+		for _, v := range ids {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:ids*/?", strings.Repeat(",?", len(ids))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []PushSubscription
+	for rows.Next() {
+		var i PushSubscription
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Endpoint,
+			&i.Subscription,
+			&i.Label,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const reactionAdd = `-- name: ReactionAdd :exec
 INSERT INTO reactions (message_id, user_id, emoji, created_at)
 VALUES (?1, ?2, ?3, ?4)

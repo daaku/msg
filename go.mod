@@ -11,6 +11,7 @@ require (
 	github.com/daaku/serr v1.0.1
 	github.com/daaku/sookie v0.5.0
 	github.com/daaku/sqlmig v1.0.0
+	github.com/daaku/webpush v0.5.0
 	github.com/descope/virtualwebauthn v1.0.5
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/joho/godotenv v1.5.1

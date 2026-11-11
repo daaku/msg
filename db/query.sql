@@ -311,3 +311,23 @@ WHERE id = @id AND status = 'processing';
 
 -- name: FileSetStatus :execrows
 UPDATE files SET status = @status WHERE id = @id AND status = 'processing';
+
+-- name: PushSubUpsert :exec
+INSERT INTO push_subscriptions (user_id, endpoint, subscription, label, created_at)
+VALUES (@user_id, @endpoint, @subscription, @label, @created_at)
+ON CONFLICT (endpoint) DO UPDATE SET
+  user_id = excluded.user_id,
+  subscription = excluded.subscription,
+  label = excluded.label;
+
+-- name: PushSubsByUser :many
+SELECT * FROM push_subscriptions WHERE user_id = ? ORDER BY id;
+
+-- name: PushSubsByUsers :many
+SELECT * FROM push_subscriptions WHERE user_id IN (sqlc.slice('ids')) ORDER BY id;
+
+-- name: PushSubDelete :execrows
+DELETE FROM push_subscriptions WHERE id = @id AND user_id = @user_id;
+
+-- name: PushSubDeleteByID :exec
+DELETE FROM push_subscriptions WHERE id = ?;

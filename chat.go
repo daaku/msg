@@ -399,7 +399,10 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 			headerLink(pHome, "Back", "back"),
 			h.H1(g.Text("Archived")))
 	}
-	sidebar := h.Nav(h.ID("sidebar"), head, list)
+	// Shown by CSS only while the body has push-prompt.
+	prompt := h.A(h.ID("push-prompt"), h.Class("push-prompt-link"), h.Href(pSettings+"#notifications"),
+		icon("bell"), h.Span(g.Text("Turn on notifications for this device")))
+	sidebar := h.Nav(h.ID("sidebar"), head, prompt, list)
 	return a.shell(w, r, title, "chat", appAttrs, sidebar,
 		h.Section(h.ID("pane"), pane),
 		// Upload progress and errors, driven by main.js. The ring draws from
@@ -857,6 +860,7 @@ func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body s
 // that fans out the side effects of a new message.
 func (a *app) afterMessage(ctx context.Context, chat Chat, msg Message) {
 	a.notifyChat(ctx, chat.ID)
+	a.pushMessage(chat, msg)
 	// Task 019 adds the link preview and task 020 the push notification.
 }
 
