@@ -74,7 +74,15 @@ func (a *app) loadVAPID(ctx context.Context) error {
 	}
 	a.vapidPublic = pub
 	a.push = &webpush.Client{
-		Client:     &http.Client{Timeout: pushTimeout},
+		// A subscription's endpoint comes from the user's browser, so it is
+		// a user supplied URL: public addresses only, and no redirects.
+		Client: &http.Client{
+			Timeout:   pushTimeout,
+			Transport: a.safeTransport(),
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		VAPIDKey:   key,
 		Subscriber: pushSubscriber(a.cfg.PublicURL),
 		TTL:        24 * time.Hour,

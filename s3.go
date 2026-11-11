@@ -205,7 +205,7 @@ func (c *s3Client) do(ctx context.Context, op, method, key string, q url.Values,
 	}
 	res, err := c.hc.Do(req)
 	if err != nil {
-		return nil, serr.Wrap(err)
+		return nil, serr.Wrap(withoutURL(err))
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
 		defer res.Body.Close()
@@ -387,7 +387,7 @@ func (c *s3Client) selfCheck(ctx context.Context, validity time.Duration) error 
 	}
 	res, err := c.hc.Do(req)
 	if err != nil {
-		return fmt.Errorf("S3 self check: fetching through a signed URL failed: %w", err)
+		return fmt.Errorf("S3 self check: fetching through a signed URL failed: %w", withoutURL(err))
 	}
 	defer res.Body.Close()
 	got, _ := io.ReadAll(io.LimitReader(res.Body, 4096))

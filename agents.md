@@ -315,9 +315,13 @@ caching and has no `fetch` handler.
 
 - Check authorisation in every handler through the helpers. Tests for a new
   route must include a signed out request, a non member, and a member.
-- Anything fetched because a user asked for it (link previews) goes through
-  the SSRF safe HTTP client in `media.go`. Never use `http.DefaultClient` for
-  a user supplied URL.
+- Any request to a URL that came from a user (link previews, and push
+  endpoints, which come from the user's browser) goes through
+  `a.safeTransport()` in `media.go`, which only connects to public addresses.
+  Never use `http.DefaultClient` or a plain `http.Client` for such a URL.
+- Log a request by its route pattern (`logRoute`), never its path: paths hold
+  invite tokens. Strip URLs from HTTP client errors with `withoutURL` before
+  logging them.
 - Never let ImageMagick or ffmpeg pick the input format. Sniff the bytes in Go
   and pass an explicit format (`jpeg:path`, `-f mov`). Always pass arguments as
   an argv slice, never through a shell. Always use a timeout.

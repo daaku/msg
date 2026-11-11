@@ -136,7 +136,7 @@ func apiError(w http.ResponseWriter, r *http.Request, err error) {
 	if he, ok := errors.AsType[*httpError](err); ok {
 		code, msg = he.code, he.msg
 	} else {
-		fmt.Fprintf(os.Stderr, "%s %s: %+v\n", r.Method, r.URL.Path, err)
+		fmt.Fprintf(os.Stderr, "%s: %+v\n", logRoute(r), err)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -1005,6 +1005,23 @@ var errPreviewBlocked = errors.New("preview: address not allowed")
 // and redirect. That is what defeats DNS rebinding; checking the host name
 // before the request would not.
 func (a *app) newPreviewClient() *http.Client {
+	return &http.Client{
+		Timeout:   previewTimeout,
+		Transport: a.safeTransport(),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= previewRedirects {
+				return errors.New("preview: too many redirects")
+			}
+			_, err := checkPreviewURL(req.URL.String())
+			return err
+		},
+	}
+}
+
+// safeTransport is the transport for every request to a URL that a user
+// supplied: link previews, and push endpoints. It refuses to connect to
+// anything a.previewAllow rejects, whatever the URL or its redirects say.
+func (a *app) safeTransport() *http.Transport {
 	dialer := &net.Dialer{
 		Timeout: 5 * time.Second,
 		Control: func(network, address string, _ syscall.RawConn) error {
@@ -1015,23 +1032,13 @@ func (a *app) newPreviewClient() *http.Client {
 			return nil
 		},
 	}
-	return &http.Client{
-		Timeout: previewTimeout,
-		Transport: &http.Transport{
-			Proxy:                  nil, // never through a proxy: it would dial for us
-			DialContext:            dialer.DialContext,
-			DisableKeepAlives:      true,
-			TLSHandshakeTimeout:    5 * time.Second,
-			ResponseHeaderTimeout:  10 * time.Second,
-			MaxResponseHeaderBytes: 64 << 10,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= previewRedirects {
-				return errors.New("preview: too many redirects")
-			}
-			_, err := checkPreviewURL(req.URL.String())
-			return err
-		},
+	return &http.Transport{
+		Proxy:                  nil, // never through a proxy: it would dial for us
+		DialContext:            dialer.DialContext,
+		DisableKeepAlives:      true,
+		TLSHandshakeTimeout:    5 * time.Second,
+		ResponseHeaderTimeout:  10 * time.Second,
+		MaxResponseHeaderBytes: 64 << 10,
 	}
 }
 
@@ -1268,7 +1275,7 @@ func (a *app) processPreview(ctx context.Context, p Preview) {
 			if u, perr := url.Parse(p.Url); perr == nil {
 				host = u.Hostname()
 			}
-			fmt.Fprintf(os.Stderr, "preview for message %d (%s): %v\n", p.MessageID, host, err)
+			fmt.Fprintf(os.Stderr, "preview for message %d (%s): %v\n", p.MessageID, host, withoutURL(err))
 		}
 	}
 	msg, err := a.q.MessageByID(ctx, p.MessageID)

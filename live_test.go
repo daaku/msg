@@ -109,7 +109,11 @@ func (ta *testApp) stream(srv *httptest.Server, u *testUser, query string) *stre
 		sc := bufio.NewScanner(res.Body)
 		for sc.Scan() {
 			if line := sc.Text(); line != "" {
-				s.lines <- line
+				select {
+				case s.lines <- line:
+				case <-ctx.Done(): // nobody is reading any more
+					return
+				}
 			}
 		}
 	}()

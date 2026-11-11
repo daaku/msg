@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -674,4 +676,32 @@ func TestJumpToMessage(t *testing.T) {
 	ensure.DeepEqual(t, jump(idStr(om.ID)).Header.Get("Location"), chatPath(chat.ID))
 	// someone who cannot see the chat gets 404, not a redirect
 	ensure.DeepEqual(t, ta.get(chatPath(chat.ID)+"?m="+idStr(old.ID), ta.as(carol)).Code, http.StatusNotFound)
+}
+
+// A push endpoint is a URL supplied by a user. The real sender must refuse
+// to connect to private addresses, like the link preview fetcher does.
+func TestPushSenderRefusesPrivateAddresses(t *testing.T) {
+	ta := newTestApp(t)
+	var hits atomic.Int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer srv.Close()
+	// newTestApp installs a fake sender; put the real one back
+	ensure.Nil(t, ta.app.loadVAPID(t.Context()))
+	client, ok := ta.app.push.(*webpush.Client)
+	ensure.True(t, ok)
+	sub := &webpush.Subscription{
+		Endpoint: srv.URL + "/push",
+		// a valid P-256 point and auth secret, as a browser would send
+		Keys: webpush.Keys{
+			P256dh: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM",
+			Auth:   "tBHItJI5svbpez7KI4CCXg",
+		},
+	}
+	err := client.Send(t.Context(), []byte(`{"title":"x"}`), sub)
+	ensure.True(t, err != nil)
+	ensure.StringContains(t, err.Error(), "address not allowed")
+	ensure.DeepEqual(t, hits.Load(), int64(0))
 }

@@ -288,10 +288,8 @@ func (c config) s3Origin() string {
 	if err != nil {
 		return ""
 	}
-	if !c.S3PathStyle && c.S3Bucket != "" {
-		return u.Scheme + "://" + c.S3Bucket + "." + u.Host
-	}
-	return u.Scheme + "://" + u.Host
+	// The same code that builds the signed URLs, so the two cannot differ.
+	return (&s3Client{endpoint: u, bucket: c.S3Bucket, pathStyle: c.S3PathStyle || c.S3Bucket == ""}).origin()
 }
 
 func (c config) csp() string {
@@ -330,6 +328,8 @@ type app struct {
 	// previewAllow decides which addresses previewClient may connect to.
 	// Tests relax it to reach local servers.
 	previewAllow func(netip.AddrPort) bool
+	// routes lists the patterns registered by handler.
+	routes []string
 	// beforeConvert is a test hook that runs just before a converter.
 	beforeConvert func(File)
 	push          pushSender
@@ -509,7 +509,7 @@ func (a *app) renderError(w http.ResponseWriter, r *http.Request, err error) {
 	if he, ok := errors.AsType[*httpError](err); ok {
 		code, msg = he.code, he.msg
 	} else {
-		fmt.Fprintf(os.Stderr, "%s %s: %+v\n", r.Method, r.URL.Path, err)
+		fmt.Fprintf(os.Stderr, "%s: %+v\n", logRoute(r), err)
 		if a.cfg.Dev {
 			detail = h.Pre(h.Class("stack-trace"), g.Text(fmt.Sprintf("%+v", err)))
 		}
@@ -519,6 +519,24 @@ func (a *app) renderError(w http.ResponseWriter, r *http.Request, err error) {
 	w.WriteHeader(code)
 	_ = a.pageSimple(w, r, http.StatusText(code), backLink(pHome, "Home"),
 		h.P(g.Text(msg)), detail).Render(w)
+}
+
+// logRoute names a request for the log by its route pattern, never by its
+// path: paths can hold invite tokens.
+func logRoute(r *http.Request) string {
+	if r.Pattern != "" {
+		return r.Pattern
+	}
+	return r.Method + " (unmatched)"
+}
+
+// withoutURL drops the URL from an HTTP client error, so that signed URLs
+// and links from messages do not end up in the log.
+func withoutURL(err error) error {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
+		return fmt.Errorf("%s: %w", strings.ToLower(ue.Op), ue.Err)
+	}
+	return err
 }
 
 // access control
@@ -662,68 +680,76 @@ func (a *app) livereloadJS(w http.ResponseWriter, r *http.Request) error {
 // handler builds the complete HTTP handler.
 func (a *app) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET "+pAssets, hashfs.FileServer(assets))
-	mux.HandleFunc("GET "+pRobotsTxt, a.wrap(accPublic, a.static("robots.txt")))
-	mux.HandleFunc("GET "+pSWJS, a.wrap(accPublic, a.serviceWorker))
-	mux.HandleFunc("GET "+pAppWebManifest, a.wrap(accPublic, a.manifest))
-	mux.HandleFunc("GET "+pSignIn, a.wrap(accPublic, a.signIn))
-	mux.HandleFunc("GET "+pSignInOptions, a.wrap(accPublic, a.signInOptions))
-	mux.HandleFunc("POST "+pSignIn, a.wrap(accPublic, a.signInPost))
-	mux.HandleFunc("POST "+pSignOut, a.wrap(accUser, a.signOut))
-	mux.HandleFunc("GET "+pInvite+"{token}", a.wrap(accPublic, a.invite))
-	mux.HandleFunc("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
-	mux.HandleFunc("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
-	mux.HandleFunc("GET "+pHome+"{$}", a.wrap(accUser, a.home))
+	// Every route is registered through handle, which also records the
+	// pattern: the authorisation matrix test fails for a route it does not
+	// know about.
+	a.routes = nil
+	handle := func(pattern string, h http.Handler) {
+		a.routes = append(a.routes, pattern)
+		mux.Handle(pattern, h)
+	}
+	handle("GET "+pAssets, hashfs.FileServer(assets))
+	handle("GET "+pRobotsTxt, a.wrap(accPublic, a.static("robots.txt")))
+	handle("GET "+pSWJS, a.wrap(accPublic, a.serviceWorker))
+	handle("GET "+pAppWebManifest, a.wrap(accPublic, a.manifest))
+	handle("GET "+pSignIn, a.wrap(accPublic, a.signIn))
+	handle("GET "+pSignInOptions, a.wrap(accPublic, a.signInOptions))
+	handle("POST "+pSignIn, a.wrap(accPublic, a.signInPost))
+	handle("POST "+pSignOut, a.wrap(accUser, a.signOut))
+	handle("GET "+pInvite+"{token}", a.wrap(accPublic, a.invite))
+	handle("GET "+pInvite+"{token}/options", a.wrap(accPublic, a.inviteOptions))
+	handle("POST "+pInvite+"{token}", a.wrap(accPublic, a.invitePost))
+	handle("GET "+pHome+"{$}", a.wrap(accUser, a.home))
 	if a.fakeS3 != nil {
 		// Requests carry their own signature, so this is outside a.wrap.
-		mux.Handle(pFakeS3, a.fakeS3)
+		handle(pFakeS3, a.fakeS3)
 	}
-	mux.HandleFunc("GET "+pEvents, a.wrap(accUser, a.events))
-	mux.HandleFunc("POST "+pUploadInit, a.wrap(accUser, api(a.uploadInit)))
-	mux.HandleFunc("POST "+pUploadComplete, a.wrap(accUser, api(a.uploadComplete)))
-	mux.HandleFunc("POST "+pUploadAbort, a.wrap(accUser, api(a.uploadAbort)))
-	mux.HandleFunc("GET "+pFile+"{id}/{variant}", a.wrap(accUser, a.fileRedirect))
-	mux.HandleFunc("GET "+pArchived, a.wrap(accUser, a.archived))
-	mux.HandleFunc("GET "+pDM, a.wrap(accUser, a.dm))
-	mux.HandleFunc("POST "+pDM, a.wrap(accUser, a.dmPost))
-	mux.HandleFunc("GET "+pNew, a.wrap(accGroup, a.newGroup))
-	mux.HandleFunc("POST "+pNew, a.wrap(accGroup, a.newGroupPost))
-	mux.HandleFunc("GET "+pChat+"{id}", a.wrap(accUser, a.chat))
-	mux.HandleFunc("GET "+pChat+"{id}/info", a.wrap(accUser, a.chatInfo))
-	mux.HandleFunc("POST "+pChat+"{id}/send", a.wrap(accUser, a.chatSend))
-	mux.HandleFunc("POST "+pChat+"{id}/react", a.wrap(accUser, a.chatReact))
-	mux.HandleFunc("POST "+pChat+"{id}/archive", a.wrap(accUser, a.chatArchive))
-	mux.HandleFunc("POST "+pChat+"{id}/unarchive", a.wrap(accUser, a.chatUnarchive))
-	mux.HandleFunc("GET "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEdit))
-	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEditPost))
-	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/delete", a.wrap(accUser, a.messageDelete))
-	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/snooze", a.wrap(accUser, a.messageSnooze))
-	mux.HandleFunc("POST "+pChat+"{id}/m/{mid}/unsnooze", a.wrap(accUser, a.messageUnsnooze))
-	mux.HandleFunc("POST "+pChat+"{id}/rename", a.wrap(accUser, a.chatRename))
-	mux.HandleFunc("POST "+pChat+"{id}/members/add", a.wrap(accUser, a.chatMembersAdd))
-	mux.HandleFunc("POST "+pChat+"{id}/members/remove", a.wrap(accUser, a.chatMembersRemove))
-	mux.HandleFunc("GET "+pAdmin, a.wrap(accAdmin, a.admin))
-	mux.HandleFunc("GET "+pAdminGroups, a.wrap(accAdmin, a.adminGroups))
-	mux.HandleFunc("GET "+pAdminUser+"{id}", a.wrap(accAdmin, a.adminUser))
-	mux.HandleFunc("POST "+pAdminUser+"{id}/perms", a.wrap(accAdmin, a.adminUserPerms))
-	mux.HandleFunc("POST "+pAdminUser+"{id}/passkey/delete", a.wrap(accAdmin, a.adminUserPasskeyDelete))
-	mux.HandleFunc("POST "+pAdminUser+"{id}/link", a.wrap(accAdmin, a.adminUserLink))
-	mux.HandleFunc("POST "+pAdminUser+"{id}/link/revoke", a.wrap(accAdmin, a.adminUserLinkRevoke))
-	mux.HandleFunc("GET "+pInvites, a.wrap(accInvite, a.invites))
-	mux.HandleFunc("POST "+pInvites, a.wrap(accInvite, a.invitesPost))
-	mux.HandleFunc("POST "+pInvitesRevoke, a.wrap(accInvite, a.invitesRevoke))
-	mux.HandleFunc("GET "+pSettings, a.wrap(accUser, a.settings))
-	mux.HandleFunc("POST "+pSettingsLink, a.wrap(accUser, a.settingsLink))
-	mux.HandleFunc("POST "+pSettingsLinkRevoke, a.wrap(accUser, a.settingsLinkRevoke))
-	mux.HandleFunc("GET "+pPasskeyOptions, a.wrap(accUser, a.passkeyOptions))
-	mux.HandleFunc("POST "+pPasskeyCreate, a.wrap(accUser, a.passkeyCreate))
-	mux.HandleFunc("POST "+pPasskeyDelete, a.wrap(accUser, a.passkeyDelete))
-	mux.HandleFunc("POST "+pPushSubscribe, a.wrap(accUser, a.pushSubscribe))
-	mux.HandleFunc("POST "+pPushUnsubscribe, a.wrap(accUser, a.pushUnsubscribe))
-	mux.HandleFunc("POST "+pPushOpened, a.wrap(accUser, a.pushOpened))
+	handle("GET "+pEvents, a.wrap(accUser, a.events))
+	handle("POST "+pUploadInit, a.wrap(accUser, api(a.uploadInit)))
+	handle("POST "+pUploadComplete, a.wrap(accUser, api(a.uploadComplete)))
+	handle("POST "+pUploadAbort, a.wrap(accUser, api(a.uploadAbort)))
+	handle("GET "+pFile+"{id}/{variant}", a.wrap(accUser, a.fileRedirect))
+	handle("GET "+pArchived, a.wrap(accUser, a.archived))
+	handle("GET "+pDM, a.wrap(accUser, a.dm))
+	handle("POST "+pDM, a.wrap(accUser, a.dmPost))
+	handle("GET "+pNew, a.wrap(accGroup, a.newGroup))
+	handle("POST "+pNew, a.wrap(accGroup, a.newGroupPost))
+	handle("GET "+pChat+"{id}", a.wrap(accUser, a.chat))
+	handle("GET "+pChat+"{id}/info", a.wrap(accUser, a.chatInfo))
+	handle("POST "+pChat+"{id}/send", a.wrap(accUser, a.chatSend))
+	handle("POST "+pChat+"{id}/react", a.wrap(accUser, a.chatReact))
+	handle("POST "+pChat+"{id}/archive", a.wrap(accUser, a.chatArchive))
+	handle("POST "+pChat+"{id}/unarchive", a.wrap(accUser, a.chatUnarchive))
+	handle("GET "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEdit))
+	handle("POST "+pChat+"{id}/m/{mid}/edit", a.wrap(accUser, a.messageEditPost))
+	handle("POST "+pChat+"{id}/m/{mid}/delete", a.wrap(accUser, a.messageDelete))
+	handle("POST "+pChat+"{id}/m/{mid}/snooze", a.wrap(accUser, a.messageSnooze))
+	handle("POST "+pChat+"{id}/m/{mid}/unsnooze", a.wrap(accUser, a.messageUnsnooze))
+	handle("POST "+pChat+"{id}/rename", a.wrap(accUser, a.chatRename))
+	handle("POST "+pChat+"{id}/members/add", a.wrap(accUser, a.chatMembersAdd))
+	handle("POST "+pChat+"{id}/members/remove", a.wrap(accUser, a.chatMembersRemove))
+	handle("GET "+pAdmin, a.wrap(accAdmin, a.admin))
+	handle("GET "+pAdminGroups, a.wrap(accAdmin, a.adminGroups))
+	handle("GET "+pAdminUser+"{id}", a.wrap(accAdmin, a.adminUser))
+	handle("POST "+pAdminUser+"{id}/perms", a.wrap(accAdmin, a.adminUserPerms))
+	handle("POST "+pAdminUser+"{id}/passkey/delete", a.wrap(accAdmin, a.adminUserPasskeyDelete))
+	handle("POST "+pAdminUser+"{id}/link", a.wrap(accAdmin, a.adminUserLink))
+	handle("POST "+pAdminUser+"{id}/link/revoke", a.wrap(accAdmin, a.adminUserLinkRevoke))
+	handle("GET "+pInvites, a.wrap(accInvite, a.invites))
+	handle("POST "+pInvites, a.wrap(accInvite, a.invitesPost))
+	handle("POST "+pInvitesRevoke, a.wrap(accInvite, a.invitesRevoke))
+	handle("GET "+pSettings, a.wrap(accUser, a.settings))
+	handle("POST "+pSettingsLink, a.wrap(accUser, a.settingsLink))
+	handle("POST "+pSettingsLinkRevoke, a.wrap(accUser, a.settingsLinkRevoke))
+	handle("GET "+pPasskeyOptions, a.wrap(accUser, a.passkeyOptions))
+	handle("POST "+pPasskeyCreate, a.wrap(accUser, a.passkeyCreate))
+	handle("POST "+pPasskeyDelete, a.wrap(accUser, a.passkeyDelete))
+	handle("POST "+pPushSubscribe, a.wrap(accUser, a.pushSubscribe))
+	handle("POST "+pPushUnsubscribe, a.wrap(accUser, a.pushUnsubscribe))
+	handle("POST "+pPushOpened, a.wrap(accUser, a.pushOpened))
 	if a.cfg.Dev {
-		mux.HandleFunc("GET "+pLivereload, livereload.Handler)
-		mux.HandleFunc("GET "+pLivereloadJS, a.wrap(accPublic, a.livereloadJS))
+		handle("GET "+pLivereload, http.HandlerFunc(livereload.Handler))
+		handle("GET "+pLivereloadJS, a.wrap(accPublic, a.livereloadJS))
 	}
 	return secureHandler(a.cfg.csp(), http.NewCrossOriginProtection().Handler(mux))
 }
