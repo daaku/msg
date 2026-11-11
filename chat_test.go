@@ -595,7 +595,7 @@ func TestComposerAttach(t *testing.T) {
 
 	body := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
 	ensure.StringContains(t, body, `<label id="composer-attach"`)
-	ensure.StringContains(t, body, `<input id="composer-files" type="file" multiple hidden="" data-upload="`+
+	ensure.StringContains(t, body, `<input id="composer-files" class="visually-hidden" type="file" multiple data-upload="`+
 		idStr(chat.ID)+`" data-max="`+strconv.FormatInt(ta.app.cfg.MaxUploadSize, 10)+`">`)
 	ensure.StringContains(t, body, `id="upload-ring"`)
 	ensure.StringContains(t, body, `id="upload-error"`)
@@ -1448,4 +1448,24 @@ func TestArchiveAccess(t *testing.T) {
 	// the archived page needs a session
 	ensure.DeepEqual(t, ta.get(pArchived).Code, http.StatusSeeOther)
 	ensure.DeepEqual(t, ta.get(pArchived, ta.as(carol)).Code, http.StatusOK)
+}
+
+func TestEmojiOnly(t *testing.T) {
+	for _, s := range []string{"👍", "❤️", "🎉🎉🎉", "👍 🔥", "👨‍👩‍👧", "👍🏽", "🇦🇪", "✅", "1️⃣"} {
+		_ = s
+	}
+	for s, want := range map[string]bool{
+		"👍": true, "❤️": true, "🎉🎉🎉": true, "👍 🔥": true, "👨‍👩‍👧": true, "👍🏽": true, "✅": true,
+		"🎉🎉🎉🎉": false, "ok 👍": false, "👍!": false, "": false, " ": false, "hello": false, "1": false,
+	} {
+		ensure.DeepEqual(t, emojiOnly(s), want, s)
+	}
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	chat := ta.newChat(alice, "Team")
+	m1 := ta.newMessage(chat, alice, "🎉")
+	m2 := ta.newMessage(chat, alice, "party 🎉")
+	body := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, `<article id="m`+idStr(m1.ID)+`" class="msg mine first emoji-only">`)
+	ensure.StringContains(t, body, `<article id="m`+idStr(m2.ID)+`" class="msg mine">`)
 }

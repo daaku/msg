@@ -672,7 +672,7 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 			g.Attr("data-morph"),
 			h.Label(h.ID("composer-attach"), h.Class("btn ghost icon-btn"), h.Aria("label", "Attach files"),
 				icon("paperclip"),
-				h.Input(h.ID("composer-files"), h.Type("file"), h.Multiple(), h.Hidden(""),
+				h.Input(h.ID("composer-files"), h.Class("visually-hidden"), h.Type("file"), h.Multiple(),
 					h.Data("upload", strconv.FormatInt(v.Chat.ID, 10)),
 					h.Data("max", strconv.FormatInt(a.cfg.MaxUploadSize, 10)))),
 			h.Textarea(h.ID("composer-body"), h.Name("body"), h.Rows("1"), h.Required(),
@@ -742,6 +742,9 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 		if first {
 			class += " first"
 		}
+		if !m.FileID.Valid && emojiOnly(m.Body) {
+			class += " emoji-only"
+		}
 		id := fmt.Sprintf("m%d", m.ID)
 		content := h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body)))
 		if f, ok := files[m.FileID.Int64]; ok && m.FileID.Valid {
@@ -755,12 +758,15 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 			g.If(first && !mine, h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)),
 				g.Text(row.Username))),
 			content,
+			// The meta line floats at the end of the text, on its last
+			// line when there is room.
+			h.Div(h.ID(id+"-meta"), h.Class("msg-meta"),
+				snoozeMarker(v, m),
+				g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
+				h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
+					g.Text(at.Format("15:04")))),
 			preview,
 			a.reactionChips(v, m, reactions[m.ID]),
-			snoozeMarker(v, m),
-			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
-			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
-				g.Text(at.Format("15:04"))),
 			a.messageMenu(v, m)))
 	}
 	return nodes
@@ -773,6 +779,35 @@ func lastSnippet(row ChatsForUserWithLastRow) string {
 		return fileSnippet(row.LastFileKind, row.LastFileName)
 	}
 	return snippet(row.LastBody)
+}
+
+// emojiOnly reports whether a message is one to three emoji and nothing
+// else. Such messages are shown larger and without a bubble.
+func emojiOnly(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	count := 0
+	joined := false // the previous rune was a zero width joiner
+	for _, r := range s {
+		switch {
+		case r == 0x200D:
+			joined = true
+			continue
+		case r == 0xFE0F, r == 0x20E3, r >= 0x1F3FB && r <= 0x1F3FF, r == ' ':
+			// variation selector, keycap, skin tone, space
+		case (r >= 0x1F000 && r <= 0x1FAFF) || (r >= 0x2600 && r <= 0x27BF) ||
+			(r >= 0x2B00 && r <= 0x2BFF) || (r >= 0x2190 && r <= 0x21FF) ||
+			r == 0x00A9 || r == 0x00AE || r == 0x203C || r == 0x2049:
+			if !joined {
+				count++
+			}
+		default:
+			return false
+		}
+		joined = false
+	}
+	return count >= 1 && count <= 3
 }
 
 func snippet(body string) string {

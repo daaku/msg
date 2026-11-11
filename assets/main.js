@@ -241,8 +241,11 @@ function showUploadError() {
   const queue = []
   let total = 0 // bytes queued since the queue was last empty
   let sent = 0 // bytes of finished parts and finished or failed files
-  const progress = loaded =>
-    root.style.setProperty('--upload', total ? Math.min(100, (100 * (sent + loaded)) / total) : 0)
+  const progress = loaded => {
+    const pct = total ? Math.min(100, (100 * (sent + loaded)) / total) : 0
+    root.style.setProperty('--upload', pct)
+    document.getElementById('upload-ring')?.setAttribute('aria-valuenow', Math.round(pct))
+  }
   const addError = msg => {
     uploadError = uploadError ? `${uploadError}\n${msg}` : msg
     showUploadError()
