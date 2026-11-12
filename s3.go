@@ -713,6 +713,13 @@ func (f *fakeS3) getObject(w http.ResponseWriter, r *http.Request, key string) e
 	if err != nil {
 		return err
 	}
+	if stat.IsDir() {
+		// A prefix of other keys, kept as a directory even once they are
+		// gone. It is not an object, and reading a directory succeeds on
+		// some file systems.
+		fakeError(w, http.StatusNotFound, "NoSuchKey", "The specified key does not exist.")
+		return nil
+	}
 	var meta fakeMeta
 	_ = readJSONFile(f.metaPath(key), &meta)
 	for name, v := range meta.Header {

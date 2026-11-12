@@ -389,12 +389,29 @@ func TestS3ErrorCarriesStatusAndBody(t *testing.T) {
 	ensure.StringContains(t, err.Error(), "AccessDenied")
 }
 
+// A key that is only the prefix of other keys is not an object. The fake
+// keeps such a prefix as a directory, and what reading one does depends on
+// the file system.
+func TestFakeS3PrefixIsNotAnObject(t *testing.T) {
+	ta := newTestApp(t)
+	c := ta.app.s3
+	ensure.Nil(t, c.put(t.Context(), "dir/file", strings.NewReader("x"), 1, nil))
+	for _, key := range []string{"dir", "dir/"} {
+		_, err := c.get(t.Context(), key, "")
+		ensure.DeepEqual(t, s3Status(err), http.StatusNotFound, key)
+	}
+	// and it stays one after the object under it is gone
+	ensure.Nil(t, c.del(t.Context(), "dir/file"))
+	_, err := c.get(t.Context(), "dir", "")
+	ensure.DeepEqual(t, s3Status(err), http.StatusNotFound)
+}
+
 func TestS3SelfCheck(t *testing.T) {
 	ta := newTestApp(t)
 	ensure.Nil(t, ta.app.s3.selfCheck(t.Context(), 7*24*time.Hour))
 	// it cleans up after itself
 	_, err := ta.app.s3.get(t.Context(), "selfcheck", "")
-	ensure.True(t, err != nil)
+	ensure.DeepEqual(t, s3Status(err), http.StatusNotFound)
 
 	// a provider that refuses the signed URL gets the validity hint
 	store := map[string]string{}
