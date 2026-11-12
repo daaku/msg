@@ -1064,14 +1064,15 @@ body.chat {
   overflow-wrap: anywhere;
 }
 
-/* one to three emoji on their own: bigger, and no bubble */
+/* one to three emoji on their own: three times the size of message text,
+   and no bubble */
 .msg.emoji-only {
   --bubble: transparent;
 
   padding-inline: 0.25rem;
 
   .msg-body {
-    font-size: var(--step-5);
+    font-size: 3em;
     line-height: 1.15;
   }
 }
