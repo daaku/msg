@@ -171,6 +171,52 @@ This is the form the Cloudflare R2 dashboard takes. For the AWS CLI wrap it
 as `{"CORSRules": [...]}` and run
 `aws s3api put-bucket-cors --bucket BUCKET --cors-configuration file://cors.json`.
 
+#### Backblaze B2
+
+Backblaze keeps CORS rules in its own format and they are set with its
+official command line tool, `b2` (version 4 or newer). Sign in with an
+application key that has the `writeBuckets` capability, such as the master
+key. The key the server runs with does not need it.
+
+```sh
+b2 account authorize
+```
+
+It asks for the key ID and the key, or reads them from
+`B2_APPLICATION_KEY_ID` and `B2_APPLICATION_KEY`. Then set the rule, with the
+origin exactly as in `PUBLIC_URL`:
+
+```sh
+b2 bucket update --cors-rules '[{
+  "corsRuleName": "msg-uploads",
+  "allowedOrigins": ["https://chat.example.com"],
+  "allowedOperations": ["s3_put"],
+  "allowedHeaders": ["*"],
+  "maxAgeSeconds": 3600
+}]' BUCKET allPrivate
+```
+
+- `s3_put` allows `PUT` through the S3 compatible API, which is how upload
+  parts are sent. Nothing else is needed.
+- `--cors-rules` replaces every CORS rule the bucket has. To keep other
+  rules, list them in the same array.
+- `allPrivate` restates the bucket type. Never pass `allPublic`.
+- `maxAgeSeconds` can be at most 86400.
+
+Check the result with
+
+```sh
+b2 bucket get BUCKET
+```
+
+which prints the bucket with its `corsRules`. Rules set this way are not
+returned by `aws s3api get-bucket-cors`.
+
+Version 3 of the tool spells the command
+`b2 update-bucket --corsRules '[...]' BUCKET allPrivate`.
+
+#### Every provider
+
 Downloads are plain `<img>` and `<video>` loads and need no CORS. The start
 up check does not test CORS: a missing rule shows up as uploads that fail in
 the browser.
@@ -213,6 +259,9 @@ With `S3_PATH_STYLE=true` (the default) URLs look like
 - Cloudflare R2: `true`, with
   `S3_ENDPOINT=https://ACCOUNT_ID.r2.cloudflarestorage.com` and
   `S3_REGION=auto`.
+- Backblaze B2: either, with
+  `S3_ENDPOINT=https://s3.REGION.backblazeb2.com` and `S3_REGION` set to the
+  region in the bucket's endpoint, like `us-west-004`.
 - MinIO: `true`, unless the server is set up for virtual hosts
   (`MINIO_DOMAIN`).
 - Bucket names containing a dot need `true` on HTTPS, because

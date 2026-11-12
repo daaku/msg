@@ -1,1 +1,0 @@
-- Add instructions for configuring Backblaze for CORS using their official CLI to our readme.
