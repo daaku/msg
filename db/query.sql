@@ -436,3 +436,18 @@ WHERE users.id = @user_id AND users.avatar = @avatar;
 
 -- name: UserSetAvatar :exec
 UPDATE users SET avatar = @avatar WHERE id = @id;
+
+-- name: ChatIconSet :exec
+INSERT INTO chat_icons (chat_id, image) VALUES (@chat_id, @image)
+ON CONFLICT (chat_id) DO UPDATE SET image = excluded.image;
+
+-- name: ChatIconDelete :exec
+DELETE FROM chat_icons WHERE chat_id = ?;
+
+-- name: ChatIconGet :one
+SELECT chat_icons.image FROM chat_icons
+JOIN chats ON chats.id = chat_icons.chat_id
+WHERE chats.id = @chat_id AND chats.icon = @icon;
+
+-- name: ChatSetIcon :exec
+UPDATE chats SET icon = @icon WHERE id = @id;

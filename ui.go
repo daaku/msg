@@ -127,8 +127,68 @@ func avatar(userID int64, username, name, size string) g.Node {
 		return h.Span(h.Class(fmt.Sprintf("%s hue-%d", class, userID%12)),
 			g.Attr("aria-hidden", "true"), g.Text(initial))
 	}
-	return h.Img(h.Class(class), h.Src(avatarPath(userID, name)), h.Alt(""),
+	return pictureImg(class, avatarPath(userID, name))
+}
+
+// pictureImg is the <img> of a profile picture or a group icon.
+func pictureImg(class, src string) g.Node {
+	return h.Img(h.Class(class), h.Src(src), h.Alt(""),
 		h.Width("64"), h.Height("64"), h.Loading("lazy"), g.Attr("decoding", "async"))
+}
+
+// chatIconPath is the URL of a group's icon. Like avatarPath, the name
+// changes with the image.
+func chatIconPath(c Chat) string {
+	return chatPath(c.ID) + "/icon/" + c.Icon
+}
+
+// groupIcon renders a group's icon as a circle, or the people mark when the
+// group has none. size is "" or one of the avatar-* classes.
+func groupIcon(c Chat, size string) g.Node {
+	class := "avatar"
+	if size != "" {
+		class += " " + size
+	}
+	if c.Icon == "" {
+		return h.Span(h.Class(class+" group-mark"), g.Attr("aria-hidden", "true"), icon("people"))
+	}
+	return pictureImg(class, chatIconPath(c))
+}
+
+// picturePicker is the control that chooses, crops and removes a picture:
+// the current one, a file input, and the crop dialog that main.js drives.
+// The cropped square is posted to action as the form field "image". There
+// is at most one on a page.
+func picturePicker(current g.Node, has bool, action, removeAction string) g.Node {
+	handle := func(corner string) g.Node {
+		return h.Span(h.Class("crop-handle "+corner), h.Data("corner", corner))
+	}
+	return g.Group{
+		h.Div(h.Class("card picture"),
+			current,
+			h.Div(h.Class("stack-tight"),
+				h.Div(h.Class("cluster"),
+					h.Label(h.Class("btn secondary"), g.Text("Choose a picture"),
+						h.Input(h.Class("visually-hidden"), h.Type("file"), h.Accept("image/*"),
+							h.Data("avatar", "crop"))),
+					g.If(has, h.Form(h.Method("post"), h.Action(removeAction),
+						h.Button(h.Class("btn secondary"), g.Text("Remove"))))),
+				h.P(h.ID("avatar-error"), h.Class("form-error"), h.Role("alert")))),
+		g.El("dialog", h.ID("crop"), h.Class("crop"), h.Aria("labelledby", "crop-title"),
+			h.Form(h.Method("post"), h.Action(action), h.Class("stack"),
+				h.H2(h.ID("crop-title"), g.Text("Crop the picture")),
+				h.Div(h.Class("crop-stage"),
+					h.Canvas(h.ID("crop-canvas")),
+					h.Div(h.ID("crop-box"), h.Class("crop-box"), h.TabIndex("0"), h.Role("group"),
+						h.Aria("label", "Selection. Arrow keys move it, plus and minus resize it."),
+						handle("nw"), handle("ne"), handle("sw"), handle("se"))),
+				h.P(h.Class("muted"), g.Text("Drag the square to move it and its corners to resize it. "+
+					"The circle is what everyone else sees.")),
+				h.Input(h.Type("hidden"), h.Name("image")),
+				h.Div(h.Class("row"),
+					h.Button(h.Class("btn secondary"), h.FormMethod("dialog"), h.FormNoValidate(), g.Text("Cancel")),
+					h.Button(h.Class("btn"), g.Text("Save"))))),
+	}
 }
 
 // fmtBytes formats a byte count with binary units, as in "1.5 MB".

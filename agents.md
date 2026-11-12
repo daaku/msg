@@ -256,7 +256,7 @@ generated on first start and stored in the `config` table.
   variant. It is an estimate, because the bytes themselves never pass through
   this server.
 
-### Profile pictures
+### Profile pictures and group icons
 
 - A profile picture is chosen and cropped in the browser (`#crop` on the
   settings page, driven by `main.js` with no library). Only the chosen square
@@ -272,6 +272,14 @@ generated on first start and stored in the `config` table.
 - Always render a user's picture through `avatar(...)` in `ui.go`, which
   falls back to the initial of the username. Queries that list users select
   `users.avatar` next to the username.
+- A group's icon works the same way, with the same code: `chat_icons` and
+  `chats.icon`, set on the group's info page by whoever may manage the
+  group, rendered through `groupIcon(...)` and served from
+  `/c/{id}/icon/{chats.icon}` to those who may view the group. A direct
+  message has no icon; it shows the other person's picture.
+- `picturePicker(...)` in `ui.go` is the one control for choosing and
+  cropping a picture. There is at most one on a page. While its dialog is
+  open, `refresh()` waits: a morph would wipe the canvas and the selection.
 
 ### Hooks other tasks extend
 
@@ -307,7 +315,7 @@ event handler attributes (the CSP forbids them).
 7. Enter to send in the composer on devices with a fine pointer.
 8. Setting the `tz` cookie from the browser time zone.
 9. Select all on focus for copyable link fields.
-10. The profile picture crop dialog: drawing the chosen image on a canvas,
+10. The crop dialog for profile pictures and group icons: drawing the chosen image on a canvas,
     moving and resizing the square selection, and posting the cropped JPEG.
 
 `assets/sw.js` handles `push` and `notificationclick` only. It does no

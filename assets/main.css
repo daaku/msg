@@ -1557,8 +1557,13 @@ video.media {
   user-select: none;
 }
 
-img.avatar {
+img.avatar,
+.group-mark {
   background-color: var(--color-surface-3);
+}
+
+.group-mark {
+  color: var(--color-text-muted);
 }
 
 .avatar-s {

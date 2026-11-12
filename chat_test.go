@@ -1468,3 +1468,120 @@ func TestEmojiOnly(t *testing.T) {
 	ensure.StringContains(t, body, `<article id="m`+idStr(m1.ID)+`" class="msg mine first emoji-only">`)
 	ensure.StringContains(t, body, `<article id="m`+idStr(m2.ID)+`" class="msg mine">`)
 }
+
+// group icon
+
+// setChatIcon posts an icon for the group as u and returns the chat as it
+// is afterwards.
+func (ta *testApp) setChatIcon(u *testUser, chat Chat) Chat {
+	ta.t.Helper()
+	w := ta.post(chatPath(chat.ID)+"/icon", url.Values{"image": {jpegDataURL(ta.t, 64, 64)}}, ta.as(u))
+	ensure.DeepEqual(ta.t, w.Code, http.StatusSeeOther, w.Body.String())
+	c, err := ta.app.q.ChatByID(ta.t.Context(), chat.ID)
+	ensure.Nil(ta.t, err)
+	return c
+}
+
+func TestGroupIcon(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	admin := ta.newUser("boss", "admin")
+	group := ta.newChat(alice, "G", bob)
+	other := ta.newChat(alice, "Other", bob)
+	dm := ta.newDM(alice, bob)
+	base := chatPath(group.ID)
+	info := base + "/info"
+	icon := func() string {
+		c, err := ta.app.q.ChatByID(t.Context(), group.ID)
+		ensure.Nil(t, err)
+		return c.Icon
+	}
+
+	// the creator gets the picker, with the people mark while there is no icon
+	page := ta.get(info, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, `<section id="icon"`)
+	ensure.StringContains(t, page, `<span class="avatar avatar-l group-mark" aria-hidden="true"><svg class="icon icon-people"`)
+	ensure.StringContains(t, page, `data-avatar="crop"`)
+	ensure.StringContains(t, page, `<dialog id="crop"`)
+	ensure.StringContains(t, page, `action="`+base+`/icon"`)
+	ensure.StringDoesNotContain(t, page, `action="`+base+`/icon/remove"`)
+	// a plain member does not
+	ensure.StringDoesNotContain(t, ta.get(info, ta.as(bob)).Body.String(), `id="icon"`)
+
+	// only a manager may set it
+	form := url.Values{"image": {jpegDataURL(t, 64, 64)}}
+	for _, u := range []*testUser{bob, carol} {
+		ensure.DeepEqual(t, ta.post(base+"/icon", form, ta.as(u)).Code, http.StatusNotFound)
+		ensure.DeepEqual(t, ta.post(base+"/icon/remove", nil, ta.as(u)).Code, http.StatusNotFound)
+	}
+	ensure.DeepEqual(t, ta.post(base+"/icon", form).Code, http.StatusUnauthorized)
+	ensure.DeepEqual(t, icon(), "")
+	ensure.DeepEqual(t, ta.post(chatPath(dm.ID)+"/icon", form, ta.as(alice)).Code, http.StatusNotFound)
+
+	// a picture that is not a small square JPEG is refused
+	w := ta.post(base+"/icon", url.Values{"image": {jpegDataURL(t, 64, 32)}}, ta.as(alice))
+	ensure.DeepEqual(t, w.Header().Get("Location"), info)
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), msgBadPicture)
+	ensure.DeepEqual(t, icon(), "")
+
+	w = ta.post(base+"/icon", form, ta.as(alice))
+	ensure.DeepEqual(t, w.Header().Get("Location"), info)
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "Group icon saved.")
+	first := icon()
+	ensure.DeepEqual(t, len(first), 16)
+	group.Icon = first
+	src := `src="` + chatIconPath(group) + `"`
+
+	// shown in the chat list, the header and the picker; other groups keep the mark
+	page = ta.get(base, ta.as(bob)).Body.String()
+	ensure.StringContains(t, page, fmt.Sprintf(`id="chat-%d" class="chat-item group" href="%s" aria-current="page"><img class="avatar" %s`, group.ID, base, src))
+	ensure.StringContains(t, page, fmt.Sprintf(`id="chat-%d" class="chat-item group" href="%s"><svg class="icon icon-people"`, other.ID, chatPath(other.ID)))
+	ensure.StringContains(t, page, `class="pane-title" href="`+info+`"><img class="avatar avatar-s" `+src)
+	page = ta.get(info, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, `<img class="avatar avatar-l" `+src)
+	ensure.StringContains(t, page, `action="`+base+`/icon/remove"`)
+
+	// served to those who can see the group, and to nobody else
+	for _, u := range []*testUser{alice, bob, admin} {
+		w = ta.get(chatIconPath(group), ta.as(u))
+		ensure.DeepEqual(t, w.Code, http.StatusOK, u.Username)
+		ensure.DeepEqual(t, w.Header().Get("Content-Type"), "image/jpeg")
+		ensure.DeepEqual(t, w.Header().Get("Cache-Control"), "private, max-age=31536000, immutable")
+	}
+	ensure.DeepEqual(t, ta.get(chatIconPath(group), ta.as(carol)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.get(chatIconPath(group)).Header().Get("Location"), pSignIn)
+	ensure.DeepEqual(t, ta.get(base+"/icon/nope", ta.as(bob)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.get(chatPath(other.ID)+"/icon/"+first, ta.as(bob)).Code, http.StatusNotFound)
+
+	// an admin manages every group; a new icon has a new name
+	w = ta.post(base+"/icon", url.Values{"image": {jpegDataURL(t, 100, 100)}}, ta.as(admin))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	second := icon()
+	ensure.True(t, second != first && second != "")
+	ensure.DeepEqual(t, ta.get(chatIconPath(group), ta.as(bob)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, countRows(t, ta, "chat_icons"), 1)
+
+	w = ta.post(base+"/icon/remove", nil, ta.as(alice))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "Group icon removed.")
+	ensure.DeepEqual(t, icon(), "")
+	ensure.DeepEqual(t, countRows(t, ta, "chat_icons"), 0)
+	ensure.StringDoesNotContain(t, ta.get(base, ta.as(bob)).Body.String(), `/icon/`)
+}
+
+// Changing the icon pings the people looking at the group.
+func TestGroupIconNotifies(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	group := ta.newChat(alice, "G", bob)
+	conn, cancel := ta.app.hub.subscribe(bob.ID, 0)
+	defer cancel()
+	ta.setChatIcon(alice, group)
+	select {
+	case <-conn.ch:
+	case <-time.After(time.Second):
+		t.Fatal("no ping after the icon changed")
+	}
+}

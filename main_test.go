@@ -440,7 +440,7 @@ func TestMigrations(t *testing.T) {
 	// every table exists and is empty
 	for _, table := range []string{"config", "users", "credentials", "invites",
 		"chats", "members", "files", "messages", "previews", "reactions",
-		"snoozes", "push_subscriptions", "user_stats", "chat_stats", "avatars"} {
+		"snoozes", "push_subscriptions", "user_stats", "chat_stats", "avatars", "chat_icons"} {
 		var n int
 		ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
 			"SELECT count(*) FROM "+table).Scan(&n), table)

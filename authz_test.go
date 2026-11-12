@@ -248,6 +248,15 @@ func TestAuthorisationMatrix(t *testing.T) {
 			return m.form(http.MethodPost, m.msgPath("/unsnooze"))
 		}},
 		"POST /c/{id}/rename": {allowed: managers, req: m.post(g+"/rename", "name", "G")},
+		"POST /c/{id}/icon":   {allowed: managers, req: m.post(g+"/icon", "image", jpegDataURL(t, 32, 32))},
+		"POST /c/{id}/icon/remove": {allowed: managers, req: func(role) *http.Request {
+			ta.setChatIcon(creator, m.g)
+			return m.form(http.MethodPost, g+"/icon/remove")
+		}},
+		// the icon of a group is for those who can see the group
+		"GET /c/{id}/icon/{name}": {allowed: viewers, req: func(role) *http.Request {
+			return m.form(http.MethodGet, chatIconPath(ta.setChatIcon(creator, m.g)))
+		}},
 		"POST /c/{id}/members/add": {allowed: managers,
 			req: func(role) *http.Request {
 				m.setMember(m.g, victim, false)
@@ -426,6 +435,7 @@ func TestAuthorisationMatrix(t *testing.T) {
 		"GET edit":     {allowed: roles(rMember), req: m.get(messagePath(m.dm.ID, dmMsg.ID) + "/edit")},
 		"GET file":     {allowed: dmOnly, req: m.get(filePath(dmFile, "o"))},
 		"POST rename":  {allowed: 0, req: m.post(dm+"/rename", "name", "x")},
+		"POST icon":    {allowed: 0, req: m.post(dm+"/icon", "image", jpegDataURL(t, 32, 32))},
 		"POST add":     {allowed: 0, req: m.post(dm+"/members/add", "user", idStr(victim.ID))},
 		"POST remove":  {allowed: 0, req: m.post(dm+"/members/remove", "user", idStr(member.ID))},
 		"POST upload": {allowed: dmOnly, req: func(role) *http.Request {

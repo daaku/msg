@@ -21,6 +21,12 @@ type Chat struct {
 	CreatedBy     int64
 	CreatedAt     int64
 	LastMessageAt int64
+	Icon          string
+}
+
+type ChatIcon struct {
+	ChatID int64
+	Image  []byte
 }
 
 type ChatStat struct {

@@ -690,47 +690,34 @@ const (
 	// maxAvatarForm bounds the form that carries the picture as a data URL.
 	maxAvatarForm = 1 << 20
 	avatarPrefix  = "data:image/jpeg;base64,"
+
+	msgBadPicture = "That picture could not be used."
 )
 
 // settingsPicture shows the user's profile picture with the controls to
 // change it. The file never leaves the browser: main.js opens it in the crop
 // dialog and posts only the chosen square, as a small JPEG.
 func (a *app) settingsPicture(r *http.Request, u *User) (g.Node, error) {
-	handle := func(corner string) g.Node {
-		return h.Span(h.Class("crop-handle "+corner), h.Data("corner", corner))
-	}
 	return h.Section(h.ID("picture"), h.Class("stack"),
 		h.H2(g.Text("Profile picture")),
-		h.Div(h.Class("card picture"),
-			avatar(u.ID, u.Username, u.Avatar, "avatar-l"),
-			h.Div(h.Class("stack-tight"),
-				h.Div(h.Class("cluster"),
-					h.Label(h.Class("btn secondary"), g.Text("Choose a picture"),
-						h.Input(h.Class("visually-hidden"), h.Type("file"), h.Accept("image/*"),
-							h.Data("avatar", "crop"))),
-					g.If(u.Avatar != "", h.Form(h.Method("post"), h.Action(pSettingsAvatarDel),
-						h.Button(h.Class("btn secondary"), g.Text("Remove"))))),
-				h.P(h.ID("avatar-error"), h.Class("form-error"), h.Role("alert")))),
-		g.El("dialog", h.ID("crop"), h.Class("crop"), h.Aria("labelledby", "crop-title"),
-			h.Form(h.Method("post"), h.Action(pSettingsAvatar), h.Class("stack"),
-				h.H2(h.ID("crop-title"), g.Text("Crop your picture")),
-				h.Div(h.Class("crop-stage"),
-					h.Canvas(h.ID("crop-canvas")),
-					h.Div(h.ID("crop-box"), h.Class("crop-box"), h.TabIndex("0"), h.Role("group"),
-						h.Aria("label", "Selection. Arrow keys move it, plus and minus resize it."),
-						handle("nw"), handle("ne"), handle("sw"), handle("se"))),
-				h.P(h.Class("muted"), g.Text("Drag the square to move it and its corners to resize it. "+
-					"The circle is what everyone else sees.")),
-				h.Input(h.Type("hidden"), h.Name("image")),
-				h.Div(h.Class("row"),
-					h.Button(h.Class("btn secondary"), h.FormMethod("dialog"), h.FormNoValidate(), g.Text("Cancel")),
-					h.Button(h.Class("btn"), g.Text("Save"))))),
+		picturePicker(avatar(u.ID, u.Username, u.Avatar, "avatar-l"), u.Avatar != "",
+			pSettingsAvatar, pSettingsAvatarDel),
 	), nil
 }
 
 // decodeAvatar checks a picture cropped by the browser and encodes it again,
 // so that what is stored and served is always a JPEG written by this server.
-func decodeAvatar(dataURL string) ([]byte, error) {
+// It also returns the name the picture is served under.
+func decodeAvatar(dataURL string) (img []byte, name string, err error) {
+	img, err = decodePicture(dataURL)
+	if err != nil {
+		return nil, "", err
+	}
+	sum := sha256.Sum256(img)
+	return img, hex.EncodeToString(sum[:8]), nil
+}
+
+func decodePicture(dataURL string) ([]byte, error) {
 	enc, ok := strings.CutPrefix(dataURL, avatarPrefix)
 	if !ok {
 		return nil, errors.New("not a JPEG data URL")
@@ -763,18 +750,16 @@ func (a *app) settingsAvatar(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	user := userFrom(ctx)
 	r.Body = http.MaxBytesReader(w, r.Body, maxAvatarForm)
-	img, err := decodeAvatar(r.PostFormValue("image"))
+	img, name, err := decodeAvatar(r.PostFormValue("image"))
 	if err != nil {
-		return a.flash(w, r, pSettings, Flash{Kind: flashError,
-			Content: "That picture could not be used."})
+		return a.flash(w, r, pSettings, Flash{Kind: flashError, Content: msgBadPicture})
 	}
-	sum := sha256.Sum256(img)
 	err = a.tx(ctx, func(q *Queries) error {
 		if err := q.AvatarSet(ctx, AvatarSetParams{UserID: user.ID, Image: img}); err != nil {
 			return serr.Wrap(err)
 		}
 		return serr.Wrap(q.UserSetAvatar(ctx, UserSetAvatarParams{
-			ID: user.ID, Avatar: hex.EncodeToString(sum[:8])}))
+			ID: user.ID, Avatar: name}))
 	})
 	if err != nil {
 		return err
@@ -812,10 +797,16 @@ func (a *app) avatarImage(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return serr.Wrap(err)
 	}
+	servePicture(w, img)
+	return nil
+}
+
+// servePicture writes a stored picture. Its URL changes when the picture
+// does, so it is cached for good.
+func servePicture(w http.ResponseWriter, img []byte) {
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	_, _ = w.Write(img)
-	return nil
 }
 
 func (a *app) settingsPasskeys(r *http.Request, u *User) (g.Node, error) {

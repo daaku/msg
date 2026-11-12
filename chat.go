@@ -378,6 +378,8 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 			kind, mark := "group", icon("people")
 			if c.IsDm {
 				kind, mark = "dm", avatar(row.OtherID, row.Other, row.OtherAvatar, "")
+			} else if c.Icon != "" {
+				mark = groupIcon(c, "")
 			}
 			var last g.Node
 			if row.LastCreatedAt > 0 {
@@ -440,6 +442,7 @@ func paneHead(v chatView) g.Node {
 		h.A(h.Class("back narrow-only"), h.Href(pHome), h.Aria("label", "Back"), icon("back")),
 		h.A(h.Class("pane-title"), h.Href(chatPath(v.Chat.ID)+"/info"),
 			g.If(v.Chat.IsDm, avatar(v.Other.UserID, v.Other.Username, v.Other.Avatar, "avatar-s")),
+			g.If(v.Chat.Icon != "", groupIcon(v.Chat, "avatar-s")),
 			h.Span(g.Text(v.Title))),
 		g.If(v.Archived, h.Form(h.ID("pane-archived"), h.Class("pane-archived"), h.Method("post"),
 			h.Action(chatPath(v.Chat.ID)+"/unarchive"),
@@ -990,6 +993,9 @@ func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {
 				h.Button(h.Class("btn"), g.Text("Add")))
 		}
 		manage = g.Group{
+			h.Section(h.ID("icon"), h.Class("stack"),
+				h.H2(g.Text("Group icon")),
+				picturePicker(groupIcon(v.Chat, "avatar-l"), v.Chat.Icon != "", base+"/icon", base+"/icon/remove")),
 			h.Form(h.ID("rename"), h.Method("post"), h.Action(base+"/rename"), h.Class("stack card"),
 				h.Label(g.Text("Name"), nameInput(v.Chat.Name)),
 				h.Button(h.Class("btn"), g.Text("Rename"))),
@@ -1036,6 +1042,70 @@ func (a *app) chatRename(w http.ResponseWriter, r *http.Request) error {
 	}
 	a.notifyChat(r.Context(), v.Chat.ID)
 	return a.flash(w, r, back, Flash{Kind: flashSuccess, Content: "Group renamed."})
+}
+
+// chatIcon sets a group's icon from a picture cropped in the browser, the
+// same way a profile picture is set.
+func (a *app) chatIcon(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	v, err := a.chatManage(r)
+	if err != nil {
+		return err
+	}
+	back := chatPath(v.Chat.ID) + "/info"
+	r.Body = http.MaxBytesReader(w, r.Body, maxAvatarForm)
+	img, name, err := decodeAvatar(r.PostFormValue("image"))
+	if err != nil {
+		return a.flash(w, r, back, Flash{Kind: flashError, Content: msgBadPicture})
+	}
+	err = a.tx(ctx, func(q *Queries) error {
+		if err := q.ChatIconSet(ctx, ChatIconSetParams{ChatID: v.Chat.ID, Image: img}); err != nil {
+			return serr.Wrap(err)
+		}
+		return serr.Wrap(q.ChatSetIcon(ctx, ChatSetIconParams{ID: v.Chat.ID, Icon: name}))
+	})
+	if err != nil {
+		return err
+	}
+	a.notifyChat(ctx, v.Chat.ID)
+	return a.flash(w, r, back, Flash{Kind: flashSuccess, Content: "Group icon saved."})
+}
+
+func (a *app) chatIconRemove(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	v, err := a.chatManage(r)
+	if err != nil {
+		return err
+	}
+	err = a.tx(ctx, func(q *Queries) error {
+		if err := q.ChatIconDelete(ctx, v.Chat.ID); err != nil {
+			return serr.Wrap(err)
+		}
+		return serr.Wrap(q.ChatSetIcon(ctx, ChatSetIconParams{ID: v.Chat.ID}))
+	})
+	if err != nil {
+		return err
+	}
+	a.notifyChat(ctx, v.Chat.ID)
+	return a.flash(w, r, chatPath(v.Chat.ID)+"/info", Flash{Kind: flashSuccess, Content: "Group icon removed."})
+}
+
+// chatIconImage serves a group's icon to those who may view the group. The
+// last path element is chats.icon: an old name is not found.
+func (a *app) chatIconImage(w http.ResponseWriter, r *http.Request) error {
+	v, err := a.chatView(r)
+	if err != nil {
+		return err
+	}
+	img, err := a.q.ChatIconGet(r.Context(), ChatIconGetParams{ChatID: v.Chat.ID, Icon: r.PathValue("name")})
+	if errors.Is(err, sql.ErrNoRows) {
+		return errNotFound
+	}
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	servePicture(w, img)
+	return nil
 }
 
 func (a *app) chatMembersAdd(w http.ResponseWriter, r *http.Request) error {

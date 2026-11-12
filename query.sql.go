@@ -65,7 +65,7 @@ func (q *Queries) AvatarSet(ctx context.Context, arg AvatarSetParams) error {
 }
 
 const chatByDMKey = `-- name: ChatByDMKey :one
-SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at FROM chats WHERE dm_key = ?
+SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at, icon FROM chats WHERE dm_key = ?
 `
 
 func (q *Queries) ChatByDMKey(ctx context.Context, dmKey sql.NullString) (Chat, error) {
@@ -79,12 +79,13 @@ func (q *Queries) ChatByDMKey(ctx context.Context, dmKey sql.NullString) (Chat, 
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.LastMessageAt,
+		&i.Icon,
 	)
 	return i, err
 }
 
 const chatByID = `-- name: ChatByID :one
-SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at FROM chats WHERE id = ?
+SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at, icon FROM chats WHERE id = ?
 `
 
 func (q *Queries) ChatByID(ctx context.Context, id int64) (Chat, error) {
@@ -98,6 +99,7 @@ func (q *Queries) ChatByID(ctx context.Context, id int64) (Chat, error) {
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.LastMessageAt,
+		&i.Icon,
 	)
 	return i, err
 }
@@ -105,7 +107,7 @@ func (q *Queries) ChatByID(ctx context.Context, id int64) (Chat, error) {
 const chatCreate = `-- name: ChatCreate :one
 INSERT INTO chats (name, created_by, created_at, last_message_at)
 VALUES (?1, ?2, ?3, ?4)
-RETURNING id, name, is_dm, dm_key, created_by, created_at, last_message_at
+RETURNING id, name, is_dm, dm_key, created_by, created_at, last_message_at, icon
 `
 
 type ChatCreateParams struct {
@@ -131,6 +133,7 @@ func (q *Queries) ChatCreate(ctx context.Context, arg ChatCreateParams) (Chat, e
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.LastMessageAt,
+		&i.Icon,
 	)
 	return i, err
 }
@@ -138,7 +141,7 @@ func (q *Queries) ChatCreate(ctx context.Context, arg ChatCreateParams) (Chat, e
 const chatCreateDM = `-- name: ChatCreateDM :one
 INSERT INTO chats (name, is_dm, dm_key, created_by, created_at, last_message_at)
 VALUES ('', TRUE, ?1, ?2, ?3, ?4)
-RETURNING id, name, is_dm, dm_key, created_by, created_at, last_message_at
+RETURNING id, name, is_dm, dm_key, created_by, created_at, last_message_at, icon
 `
 
 type ChatCreateDMParams struct {
@@ -164,8 +167,51 @@ func (q *Queries) ChatCreateDM(ctx context.Context, arg ChatCreateDMParams) (Cha
 		&i.CreatedBy,
 		&i.CreatedAt,
 		&i.LastMessageAt,
+		&i.Icon,
 	)
 	return i, err
+}
+
+const chatIconDelete = `-- name: ChatIconDelete :exec
+DELETE FROM chat_icons WHERE chat_id = ?
+`
+
+func (q *Queries) ChatIconDelete(ctx context.Context, chatID int64) error {
+	_, err := q.db.ExecContext(ctx, chatIconDelete, chatID)
+	return err
+}
+
+const chatIconGet = `-- name: ChatIconGet :one
+SELECT chat_icons.image FROM chat_icons
+JOIN chats ON chats.id = chat_icons.chat_id
+WHERE chats.id = ?1 AND chats.icon = ?2
+`
+
+type ChatIconGetParams struct {
+	ChatID int64
+	Icon   string
+}
+
+func (q *Queries) ChatIconGet(ctx context.Context, arg ChatIconGetParams) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, chatIconGet, arg.ChatID, arg.Icon)
+	var image []byte
+	err := row.Scan(&image)
+	return image, err
+}
+
+const chatIconSet = `-- name: ChatIconSet :exec
+INSERT INTO chat_icons (chat_id, image) VALUES (?1, ?2)
+ON CONFLICT (chat_id) DO UPDATE SET image = excluded.image
+`
+
+type ChatIconSetParams struct {
+	ChatID int64
+	Image  []byte
+}
+
+func (q *Queries) ChatIconSet(ctx context.Context, arg ChatIconSetParams) error {
+	_, err := q.db.ExecContext(ctx, chatIconSet, arg.ChatID, arg.Image)
+	return err
 }
 
 const chatRename = `-- name: ChatRename :exec
@@ -179,6 +225,20 @@ type ChatRenameParams struct {
 
 func (q *Queries) ChatRename(ctx context.Context, arg ChatRenameParams) error {
 	_, err := q.db.ExecContext(ctx, chatRename, arg.Name, arg.ID)
+	return err
+}
+
+const chatSetIcon = `-- name: ChatSetIcon :exec
+UPDATE chats SET icon = ?1 WHERE id = ?2
+`
+
+type ChatSetIconParams struct {
+	Icon string
+	ID   int64
+}
+
+func (q *Queries) ChatSetIcon(ctx context.Context, arg ChatSetIconParams) error {
+	_, err := q.db.ExecContext(ctx, chatSetIcon, arg.Icon, arg.ID)
 	return err
 }
 
@@ -251,7 +311,7 @@ func (q *Queries) ChatTouch(ctx context.Context, arg ChatTouchParams) error {
 }
 
 const chatsForUserWithLast = `-- name: ChatsForUserWithLast :many
-SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at,
+SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at, chats.icon,
   CAST(coalesce(other_user.id, 0) AS INTEGER) AS other_id,
   CAST(coalesce(other_user.username, '') AS TEXT) AS other,
   CAST(coalesce(other_user.avatar, '') AS TEXT) AS other_avatar,
@@ -307,6 +367,7 @@ func (q *Queries) ChatsForUserWithLast(ctx context.Context, arg ChatsForUserWith
 			&i.Chat.CreatedBy,
 			&i.Chat.CreatedAt,
 			&i.Chat.LastMessageAt,
+			&i.Chat.Icon,
 			&i.OtherID,
 			&i.Other,
 			&i.OtherAvatar,
@@ -882,7 +943,7 @@ func (q *Queries) FilesStaleUploads(ctx context.Context, before int64) ([]File, 
 }
 
 const groupsAllWithStats = `-- name: GroupsAllWithStats :many
-SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at, users.username AS creator,
+SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at, chats.icon, users.username AS creator,
   (SELECT count(*) FROM members WHERE members.chat_id = chats.id) AS member_count,
   CAST(coalesce(chat_stats.images_uploaded, 0) AS INTEGER) AS images_uploaded,
   CAST(coalesce(chat_stats.videos_uploaded, 0) AS INTEGER) AS videos_uploaded,
@@ -924,6 +985,7 @@ func (q *Queries) GroupsAllWithStats(ctx context.Context) ([]GroupsAllWithStatsR
 			&i.Chat.CreatedBy,
 			&i.Chat.CreatedAt,
 			&i.Chat.LastMessageAt,
+			&i.Chat.Icon,
 			&i.Creator,
 			&i.MemberCount,
 			&i.ImagesUploaded,

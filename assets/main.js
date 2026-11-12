@@ -132,7 +132,14 @@ document.addEventListener('keydown', ev => {
 // one is running is never dropped.
 let refreshing = false
 let refreshAgain = false
+let refreshHeld = false
 async function refresh() {
+  // The crop dialog holds state the morph would wipe (the canvas, the place
+  // of the selection, the dialog being open), so wait until it has closed.
+  if (document.querySelector('dialog.crop[open]')) {
+    refreshHeld = true
+    return
+  }
   if (refreshing) {
     refreshAgain = true
     return
@@ -382,7 +389,7 @@ document.addEventListener('click', ev => {
   })
 })
 
-// Profile picture: a chosen image opens in the crop dialog, where a square
+// Profile picture and group icon: a chosen image opens in the crop dialog, where a square
 // selection is moved and resized over it. Saving posts only that square,
 // scaled down, as a JPEG data URL in an ordinary form. The image is drawn on
 // a canvas, which the CSP allows where it would refuse a blob: <img>.
@@ -543,6 +550,10 @@ document.addEventListener('click', ev => {
       sel = drag = null
       const canvas = $('crop-canvas')
       canvas.width = canvas.height = 0 // free the pixels
+      if (refreshHeld) {
+        refreshHeld = false
+        refresh()
+      }
     },
     true,
   )
