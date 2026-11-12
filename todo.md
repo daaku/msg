@@ -1,2 +1,1 @@
-- Add support for users to be able to upload a profile picture. The flow should show a square selection tool to crop the image. Very circular picture selection implemented without any third party libraries.
 - Add instructions for configuring Backblaze for CORS using their official CLI to our readme.

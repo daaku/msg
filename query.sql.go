@@ -22,6 +22,48 @@ func (q *Queries) ArchivedCount(ctx context.Context, userID int64) (int64, error
 	return count, err
 }
 
+const avatarDelete = `-- name: AvatarDelete :exec
+DELETE FROM avatars WHERE user_id = ?
+`
+
+func (q *Queries) AvatarDelete(ctx context.Context, userID int64) error {
+	_, err := q.db.ExecContext(ctx, avatarDelete, userID)
+	return err
+}
+
+const avatarGet = `-- name: AvatarGet :one
+SELECT avatars.image FROM avatars
+JOIN users ON users.id = avatars.user_id
+WHERE users.id = ?1 AND users.avatar = ?2
+`
+
+type AvatarGetParams struct {
+	UserID int64
+	Avatar string
+}
+
+func (q *Queries) AvatarGet(ctx context.Context, arg AvatarGetParams) ([]byte, error) {
+	row := q.db.QueryRowContext(ctx, avatarGet, arg.UserID, arg.Avatar)
+	var image []byte
+	err := row.Scan(&image)
+	return image, err
+}
+
+const avatarSet = `-- name: AvatarSet :exec
+INSERT INTO avatars (user_id, image) VALUES (?1, ?2)
+ON CONFLICT (user_id) DO UPDATE SET image = excluded.image
+`
+
+type AvatarSetParams struct {
+	UserID int64
+	Image  []byte
+}
+
+func (q *Queries) AvatarSet(ctx context.Context, arg AvatarSetParams) error {
+	_, err := q.db.ExecContext(ctx, avatarSet, arg.UserID, arg.Image)
+	return err
+}
+
 const chatByDMKey = `-- name: ChatByDMKey :one
 SELECT id, name, is_dm, dm_key, created_by, created_at, last_message_at FROM chats WHERE dm_key = ?
 `
@@ -210,7 +252,9 @@ func (q *Queries) ChatTouch(ctx context.Context, arg ChatTouchParams) error {
 
 const chatsForUserWithLast = `-- name: ChatsForUserWithLast :many
 SELECT chats.id, chats.name, chats.is_dm, chats.dm_key, chats.created_by, chats.created_at, chats.last_message_at,
+  CAST(coalesce(other_user.id, 0) AS INTEGER) AS other_id,
   CAST(coalesce(other_user.username, '') AS TEXT) AS other,
+  CAST(coalesce(other_user.avatar, '') AS TEXT) AS other_avatar,
   CAST(coalesce(last.body, '') AS TEXT) AS last_body,
   CAST(coalesce(last_user.username, '') AS TEXT) AS last_username,
   CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at,
@@ -236,7 +280,9 @@ type ChatsForUserWithLastParams struct {
 
 type ChatsForUserWithLastRow struct {
 	Chat          Chat
+	OtherID       int64
 	Other         string
+	OtherAvatar   string
 	LastBody      string
 	LastUsername  string
 	LastCreatedAt int64
@@ -261,7 +307,9 @@ func (q *Queries) ChatsForUserWithLast(ctx context.Context, arg ChatsForUserWith
 			&i.Chat.CreatedBy,
 			&i.Chat.CreatedAt,
 			&i.Chat.LastMessageAt,
+			&i.OtherID,
 			&i.Other,
+			&i.OtherAvatar,
 			&i.LastBody,
 			&i.LastUsername,
 			&i.LastCreatedAt,
@@ -1317,7 +1365,7 @@ func (q *Queries) MemberSetArchived(ctx context.Context, arg MemberSetArchivedPa
 }
 
 const membersOfChat = `-- name: MembersOfChat :many
-SELECT members.user_id, users.username FROM members
+SELECT members.user_id, users.username, users.avatar FROM members
 JOIN users ON users.id = members.user_id
 WHERE members.chat_id = ?
 ORDER BY users.username
@@ -1326,6 +1374,7 @@ ORDER BY users.username
 type MembersOfChatRow struct {
 	UserID   int64
 	Username string
+	Avatar   string
 }
 
 func (q *Queries) MembersOfChat(ctx context.Context, chatID int64) ([]MembersOfChatRow, error) {
@@ -1337,7 +1386,7 @@ func (q *Queries) MembersOfChat(ctx context.Context, chatID int64) ([]MembersOfC
 	var items []MembersOfChatRow
 	for rows.Next() {
 		var i MembersOfChatRow
-		if err := rows.Scan(&i.UserID, &i.Username); err != nil {
+		if err := rows.Scan(&i.UserID, &i.Username, &i.Avatar); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1488,7 +1537,7 @@ func (q *Queries) MessagesCountFrom(ctx context.Context, arg MessagesCountFromPa
 }
 
 const messagesLatest = `-- name: MessagesLatest :many
-SELECT messages.id, messages.chat_id, messages.user_id, messages.body, messages.file_id, messages.created_at, messages.edited_at, users.username
+SELECT messages.id, messages.chat_id, messages.user_id, messages.body, messages.file_id, messages.created_at, messages.edited_at, users.username, users.avatar
 FROM messages JOIN users ON users.id = messages.user_id
 WHERE messages.chat_id = ?1
 ORDER BY messages.id DESC
@@ -1503,6 +1552,7 @@ type MessagesLatestParams struct {
 type MessagesLatestRow struct {
 	Message  Message
 	Username string
+	Avatar   string
 }
 
 func (q *Queries) MessagesLatest(ctx context.Context, arg MessagesLatestParams) ([]MessagesLatestRow, error) {
@@ -1523,6 +1573,7 @@ func (q *Queries) MessagesLatest(ctx context.Context, arg MessagesLatestParams) 
 			&i.Message.CreatedAt,
 			&i.Message.EditedAt,
 			&i.Username,
+			&i.Avatar,
 		); err != nil {
 			return nil, err
 		}
@@ -2076,7 +2127,7 @@ func (q *Queries) SnoozesForUserMessages(ctx context.Context, arg SnoozesForUser
 }
 
 const userByHandle = `-- name: UserByHandle :one
-SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at FROM users WHERE handle = ?
+SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at, avatar FROM users WHERE handle = ?
 `
 
 func (q *Queries) UserByHandle(ctx context.Context, handle []byte) (User, error) {
@@ -2091,12 +2142,13 @@ func (q *Queries) UserByHandle(ctx context.Context, handle []byte) (User, error)
 		&i.PermGroup,
 		&i.InvitedBy,
 		&i.CreatedAt,
+		&i.Avatar,
 	)
 	return i, err
 }
 
 const userByID = `-- name: UserByID :one
-SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at FROM users WHERE id = ?
+SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at, avatar FROM users WHERE id = ?
 `
 
 func (q *Queries) UserByID(ctx context.Context, id int64) (User, error) {
@@ -2111,12 +2163,13 @@ func (q *Queries) UserByID(ctx context.Context, id int64) (User, error) {
 		&i.PermGroup,
 		&i.InvitedBy,
 		&i.CreatedAt,
+		&i.Avatar,
 	)
 	return i, err
 }
 
 const userBySession = `-- name: UserBySession :one
-SELECT users.id, users.username, users.handle, users.perm_admin, users.perm_invite, users.perm_group, users.invited_by, users.created_at FROM users
+SELECT users.id, users.username, users.handle, users.perm_admin, users.perm_invite, users.perm_group, users.invited_by, users.created_at, users.avatar FROM users
 JOIN credentials ON credentials.user_id = users.id
 WHERE users.id = ?1 AND credentials.id = ?2
 `
@@ -2138,12 +2191,13 @@ func (q *Queries) UserBySession(ctx context.Context, arg UserBySessionParams) (U
 		&i.PermGroup,
 		&i.InvitedBy,
 		&i.CreatedAt,
+		&i.Avatar,
 	)
 	return i, err
 }
 
 const userByUsername = `-- name: UserByUsername :one
-SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at FROM users WHERE username = ?
+SELECT id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at, avatar FROM users WHERE username = ?
 `
 
 func (q *Queries) UserByUsername(ctx context.Context, username string) (User, error) {
@@ -2158,6 +2212,7 @@ func (q *Queries) UserByUsername(ctx context.Context, username string) (User, er
 		&i.PermGroup,
 		&i.InvitedBy,
 		&i.CreatedAt,
+		&i.Avatar,
 	)
 	return i, err
 }
@@ -2176,7 +2231,7 @@ func (q *Queries) UserCount(ctx context.Context) (int64, error) {
 const userCreate = `-- name: UserCreate :one
 INSERT INTO users (username, handle, perm_admin, invited_by, created_at)
 VALUES (?1, ?2, ?3, ?4, ?5)
-RETURNING id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at
+RETURNING id, username, handle, perm_admin, perm_invite, perm_group, invited_by, created_at, avatar
 `
 
 type UserCreateParams struct {
@@ -2205,8 +2260,23 @@ func (q *Queries) UserCreate(ctx context.Context, arg UserCreateParams) (User, e
 		&i.PermGroup,
 		&i.InvitedBy,
 		&i.CreatedAt,
+		&i.Avatar,
 	)
 	return i, err
+}
+
+const userSetAvatar = `-- name: UserSetAvatar :exec
+UPDATE users SET avatar = ?1 WHERE id = ?2
+`
+
+type UserSetAvatarParams struct {
+	Avatar string
+	ID     int64
+}
+
+func (q *Queries) UserSetAvatar(ctx context.Context, arg UserSetAvatarParams) error {
+	_, err := q.db.ExecContext(ctx, userSetAvatar, arg.Avatar, arg.ID)
+	return err
 }
 
 const userSetPerms = `-- name: UserSetPerms :exec
@@ -2302,7 +2372,7 @@ func (q *Queries) UserStatsGet(ctx context.Context, userID int64) (UserStat, err
 }
 
 const usersAll = `-- name: UsersAll :many
-SELECT users.id, users.username, users.handle, users.perm_admin, users.perm_invite, users.perm_group, users.invited_by, users.created_at, CAST(coalesce(inviter.username, '') AS TEXT) AS inviter,
+SELECT users.id, users.username, users.handle, users.perm_admin, users.perm_invite, users.perm_group, users.invited_by, users.created_at, users.avatar, CAST(coalesce(inviter.username, '') AS TEXT) AS inviter,
   (SELECT count(*) FROM credentials WHERE credentials.user_id = users.id) AS passkeys,
   CAST(coalesce(user_stats.messages_sent, 0) AS INTEGER) AS messages_sent,
   CAST(coalesce(user_stats.bytes_uploaded, 0) AS INTEGER) AS bytes_uploaded,
@@ -2340,6 +2410,7 @@ func (q *Queries) UsersAll(ctx context.Context) ([]UsersAllRow, error) {
 			&i.User.PermGroup,
 			&i.User.InvitedBy,
 			&i.User.CreatedAt,
+			&i.User.Avatar,
 			&i.Inviter,
 			&i.Passkeys,
 			&i.MessagesSent,
@@ -2360,12 +2431,13 @@ func (q *Queries) UsersAll(ctx context.Context) ([]UsersAllRow, error) {
 }
 
 const usersAllBasic = `-- name: UsersAllBasic :many
-SELECT id, username FROM users ORDER BY username
+SELECT id, username, avatar FROM users ORDER BY username
 `
 
 type UsersAllBasicRow struct {
 	ID       int64
 	Username string
+	Avatar   string
 }
 
 func (q *Queries) UsersAllBasic(ctx context.Context) ([]UsersAllBasicRow, error) {
@@ -2377,7 +2449,7 @@ func (q *Queries) UsersAllBasic(ctx context.Context) ([]UsersAllBasicRow, error)
 	var items []UsersAllBasicRow
 	for rows.Next() {
 		var i UsersAllBasicRow
-		if err := rows.Scan(&i.ID, &i.Username); err != nil {
+		if err := rows.Scan(&i.ID, &i.Username, &i.Avatar); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -2392,7 +2464,7 @@ func (q *Queries) UsersAllBasic(ctx context.Context) ([]UsersAllBasicRow, error)
 }
 
 const usersNotInChat = `-- name: UsersNotInChat :many
-SELECT id, username FROM users
+SELECT id, username, avatar FROM users
 WHERE id NOT IN (SELECT user_id FROM members WHERE chat_id = ?)
 ORDER BY username
 `
@@ -2400,6 +2472,7 @@ ORDER BY username
 type UsersNotInChatRow struct {
 	ID       int64
 	Username string
+	Avatar   string
 }
 
 func (q *Queries) UsersNotInChat(ctx context.Context, chatID int64) ([]UsersNotInChatRow, error) {
@@ -2411,7 +2484,7 @@ func (q *Queries) UsersNotInChat(ctx context.Context, chatID int64) ([]UsersNotI
 	var items []UsersNotInChatRow
 	for rows.Next() {
 		var i UsersNotInChatRow
-		if err := rows.Scan(&i.ID, &i.Username); err != nil {
+		if err := rows.Scan(&i.ID, &i.Username, &i.Avatar); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

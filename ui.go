@@ -105,6 +105,32 @@ func backLink(href, label string) g.Node {
 	return h.A(h.Class("back"), h.Href(href), icon("back"), h.Span(g.Text(label)))
 }
 
+// avatarPath is the URL of a profile picture. The name changes with the
+// picture, so the response is cached for good.
+func avatarPath(userID int64, name string) string {
+	return pAvatar + strconv.FormatInt(userID, 10) + "/" + name
+}
+
+// avatar renders a user's profile picture as a circle. A user without one
+// gets their initial on a colour of their own. name is users.avatar, and
+// size is "" or one of the avatar-* classes in main.css.
+func avatar(userID int64, username, name, size string) g.Node {
+	class := "avatar"
+	if size != "" {
+		class += " " + size
+	}
+	if name == "" {
+		initial := ""
+		if username != "" {
+			initial = strings.ToUpper(username[:1]) // usernames are ASCII
+		}
+		return h.Span(h.Class(fmt.Sprintf("%s hue-%d", class, userID%12)),
+			g.Attr("aria-hidden", "true"), g.Text(initial))
+	}
+	return h.Img(h.Class(class), h.Src(avatarPath(userID, name)), h.Alt(""),
+		h.Width("64"), h.Height("64"), h.Loading("lazy"), g.Attr("decoding", "async"))
+}
+
 // fmtBytes formats a byte count with binary units, as in "1.5 MB".
 func fmtBytes(n int64) string {
 	const unit = 1024

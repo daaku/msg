@@ -1536,3 +1536,181 @@ video.media {
   box-shadow: var(--shadow);
   white-space: pre-line;
 }
+
+/* profile pictures: a circle, or the user's initial on their own colour */
+.avatar {
+  --avatar: 2.5rem;
+
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--avatar);
+  height: var(--avatar);
+  border-radius: 50%;
+  object-fit: cover;
+  background-color: oklch(52% 0.13 var(--hue, 250));
+  color: #fff;
+  font-size: calc(var(--avatar) * 0.45);
+  font-weight: 700;
+  line-height: 1;
+  user-select: none;
+}
+
+img.avatar {
+  background-color: var(--color-surface-3);
+}
+
+.avatar-s {
+  --avatar: 1.75rem;
+}
+
+.avatar-l {
+  --avatar: 6rem;
+}
+
+.chat-item > .avatar {
+  grid-row: 1 / 3;
+}
+
+.pane-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+
+  > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+/* In a group the picture hangs in a gutter beside the first bubble of a run. */
+#messages.group .msg:not(.mine) {
+  margin-inline-start: 2.25rem;
+  max-width: min(calc(100% - 5rem), 34rem);
+}
+
+.msg-avatar {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: -2.25rem;
+}
+
+.picture {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-s);
+}
+
+label.btn {
+  flex-direction: row;
+
+  &:focus-within {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+/* The crop dialog. main.js sets --ratio on the stage (width over height of
+   the image) and the position of the box in percent, so the layout follows
+   the window with no script. */
+.crop {
+  margin: auto;
+  width: min(100% - 2 * var(--space-s), 34rem);
+  max-height: calc(100dvh - 2 * var(--space-s));
+  padding: var(--space-s);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow);
+  overflow: auto;
+
+  &::backdrop {
+    background-color: var(--color-scrim);
+  }
+
+  .row .btn {
+    flex: 1;
+  }
+}
+
+.crop-stage {
+  position: relative;
+  align-self: center;
+  width: min(100%, min(55dvh, 26rem) * var(--ratio, 1));
+  aspect-ratio: var(--ratio, 1);
+  overflow: hidden;
+  border-radius: var(--radius-s);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+}
+
+/* The square selection. Its circle shows the picture as others see it, and
+   the shadow of the circle dims everything that is left out. */
+.crop-box {
+  position: absolute;
+  border: 2px solid #fff;
+  outline: 1px solid rgb(0 0 0 / 0.5);
+  cursor: move;
+  touch-action: none;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    box-shadow: 0 0 0 100vmax rgb(0 0 0 / 0.55);
+    pointer-events: none;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--color-mark);
+    outline-offset: 0;
+  }
+}
+
+.crop-handle {
+  position: absolute;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 0 solid #fff;
+  filter: drop-shadow(0 0 1px rgb(0 0 0 / 0.8));
+  touch-action: none;
+
+  &.nw {
+    top: 0;
+    left: 0;
+    border-width: 4px 0 0 4px;
+    cursor: nwse-resize;
+  }
+
+  &.ne {
+    top: 0;
+    right: 0;
+    border-width: 4px 4px 0 0;
+    cursor: nesw-resize;
+  }
+
+  &.sw {
+    bottom: 0;
+    left: 0;
+    border-width: 0 0 4px 4px;
+    cursor: nesw-resize;
+  }
+
+  &.se {
+    right: 0;
+    bottom: 0;
+    border-width: 0 4px 4px 0;
+    cursor: nwse-resize;
+  }
+}

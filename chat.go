@@ -93,19 +93,26 @@ func (a *app) chatTitle(chat Chat, viewer *User, other string) string {
 // chatName is chatTitle for a single chat, loading the other participant of
 // a direct message.
 func (a *app) chatName(ctx context.Context, chat Chat, viewer *User) (string, error) {
-	var other string
+	other, err := a.dmOther(ctx, chat, viewer)
+	return a.chatTitle(chat, viewer, other.Username), err
+}
+
+// dmOther is the other participant of a direct message. It is the zero value
+// for a group.
+func (a *app) dmOther(ctx context.Context, chat Chat, viewer *User) (MembersOfChatRow, error) {
+	var other MembersOfChatRow
 	if chat.IsDm {
 		members, err := a.q.MembersOfChat(ctx, chat.ID)
 		if err != nil {
-			return "", serr.Wrap(err)
+			return other, serr.Wrap(err)
 		}
 		for _, m := range members {
 			if m.UserID != viewer.ID {
-				other = m.Username
+				other = m
 			}
 		}
 	}
-	return a.chatTitle(chat, viewer, other), nil
+	return other, nil
 }
 
 // live updates
@@ -268,7 +275,8 @@ type chatView struct {
 	Manage   bool
 	Archived bool // by this user, private to them
 	Title    string
-	Snoozes  snoozeView // the viewer's own, on the chat page only
+	Other    MembersOfChatRow // of a direct message, zero for a group
+	Snoozes  snoozeView       // the viewer's own, on the chat page only
 }
 
 // chatView loads the chat named by the {id} path value for a user who may
@@ -284,12 +292,13 @@ func (a *app) chatView(r *http.Request) (chatView, error) {
 	if err != nil {
 		return chatView{}, err
 	}
-	title, err := a.chatName(ctx, chat, user)
+	other, err := a.dmOther(ctx, chat, user)
 	if err != nil {
 		return chatView{}, err
 	}
 	return chatView{Chat: chat, User: user, Member: row != nil, Manage: manage,
-		Archived: row != nil && row.Archived, Title: title}, nil
+		Archived: row != nil && row.Archived,
+		Title:    a.chatTitle(chat, user, other.Username), Other: other}, nil
 }
 
 // chatMember is chatView for a user who must be a member.
@@ -366,9 +375,9 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 	} else {
 		list = h.Div(h.ID("chats"), h.Class("chat-list"), g.Map(chats, func(row ChatsForUserWithLastRow) g.Node {
 			c := row.Chat
-			kind, kindIcon := "group", "people"
+			kind, mark := "group", icon("people")
 			if c.IsDm {
-				kind, kindIcon = "dm", "person"
+				kind, mark = "dm", avatar(row.OtherID, row.Other, row.OtherAvatar, "")
 			}
 			var last g.Node
 			if row.LastCreatedAt > 0 {
@@ -382,7 +391,7 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 			return h.A(h.ID(fmt.Sprintf("chat-%d", c.ID)), h.Class("chat-item "+kind),
 				h.Href(chatPath(c.ID)),
 				g.If(c.ID == activeID, h.Aria("current", "page")),
-				icon(kindIcon),
+				mark,
 				h.Span(h.Class("chat-name"), g.Text(a.chatTitle(c, user, row.Other))),
 				last)
 		}), g.If(!archived, archivedLink(archivedCount)))
@@ -429,7 +438,9 @@ func archivedLink(n int64) g.Node {
 func paneHead(v chatView) g.Node {
 	return h.Header(h.ID("pane-head"), h.Class("pane-head"),
 		h.A(h.Class("back narrow-only"), h.Href(pHome), h.Aria("label", "Back"), icon("back")),
-		h.A(h.Class("pane-title"), h.Href(chatPath(v.Chat.ID)+"/info"), g.Text(v.Title)),
+		h.A(h.Class("pane-title"), h.Href(chatPath(v.Chat.ID)+"/info"),
+			g.If(v.Chat.IsDm, avatar(v.Other.UserID, v.Other.Username, v.Other.Avatar, "avatar-s")),
+			h.Span(g.Text(v.Title))),
 		g.If(v.Archived, h.Form(h.ID("pane-archived"), h.Class("pane-archived"), h.Method("post"),
 			h.Action(chatPath(v.Chat.ID)+"/unarchive"),
 			h.Span(h.Class("badge"), g.Text("Archived")),
@@ -564,6 +575,7 @@ func userChecks(users []UsersAllBasicRow) g.Node {
 	return h.Div(h.Class("stack-tight"), g.Map(users, func(u UsersAllBasicRow) g.Node {
 		return h.Label(h.Class("check"),
 			h.Input(h.Type("checkbox"), h.Name("user"), h.Value(strconv.FormatInt(u.ID, 10))),
+			avatar(u.ID, u.Username, u.Avatar, "avatar-s"),
 			g.Text(u.Username))
 	}))
 }
@@ -689,7 +701,7 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	return a.chatPage(w, r, v.User, &v.Chat, g.Group{
 		paneHead(v),
 		h.Div(h.ID("scroll"), h.Class("scroll"),
-			h.Div(h.ID("messages"), earlier, a.messageNodes(v, rows, reactions, files, previews, viewerLoc(r)))),
+			h.Div(h.ID("messages"), g.If(!v.Chat.IsDm, h.Class("group")), earlier, a.messageNodes(v, rows, reactions, files, previews, viewerLoc(r)))),
 		composer,
 	})
 }
@@ -755,6 +767,9 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 			preview = previewNode(id, p)
 		}
 		nodes = append(nodes, h.Article(h.ID(id), h.Class(class),
+			// In a group the picture sits beside the first bubble of a run;
+			// a direct message shows it in the header instead.
+			g.If(first && !mine && !v.Chat.IsDm, avatar(m.UserID, row.Username, row.Avatar, "avatar-s msg-avatar")),
 			g.If(first && !mine, h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)),
 				g.Text(row.Username))),
 			content,
@@ -949,7 +964,7 @@ func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {
 	}
 	memberList := h.Ul(h.ID("members"), h.Class("list"), g.Map(members, func(m MembersOfChatRow) g.Node {
 		return h.Li(h.ID(fmt.Sprintf("member-%d", m.UserID)), h.Class("row"),
-			h.Span(h.Class("cluster"), g.Text(m.Username),
+			h.Span(h.Class("cluster"), avatar(m.UserID, m.Username, m.Avatar, "avatar-s"), g.Text(m.Username),
 				g.If(m.UserID == v.Chat.CreatedBy, h.Span(h.Class("badge"), g.Text("creator")))),
 			g.If(v.Manage && m.UserID != v.Chat.CreatedBy,
 				h.Form(h.Method("post"), h.Action(base+"/members/remove"),
@@ -1123,7 +1138,7 @@ func (a *app) dm(w http.ResponseWriter, r *http.Request) error {
 		rows = append(rows, h.Li(h.ID(fmt.Sprintf("dm-user-%d", u.ID)),
 			h.Form(h.Method("post"), h.Action(pDM),
 				h.Input(h.Type("hidden"), h.Name("user"), h.Value(strconv.FormatInt(u.ID, 10))),
-				h.Button(h.Class("btn ghost user-pick"), icon("person"), h.Span(g.Text(u.Username))))))
+				h.Button(h.Class("btn ghost user-pick"), avatar(u.ID, u.Username, u.Avatar, "avatar-s"), h.Span(g.Text(u.Username))))))
 	}
 	var list g.Node = h.P(h.Class("muted"), g.Text("There is nobody else here yet."))
 	if len(rows) > 0 {

@@ -180,6 +180,9 @@ func TestAuthorisationMatrix(t *testing.T) {
 	ensure.Nil(t, err)
 	memberSub := subs[0].ID
 	g, dm := chatPath(m.g.ID), chatPath(m.dm.ID)
+	// the victim's picture: no row of the matrix changes it
+	ensure.DeepEqual(t, ta.setAvatar(victim, 64, 64).Code, http.StatusSeeOther)
+	picture := avatarPath(victim.ID, avatarOf(t, ta, victim.ID))
 	adminUser := pAdminUser + idStr(victim.ID)
 	dmOnly := roles(rMember, rCreator) // the two participants, and not the admin
 
@@ -209,7 +212,11 @@ func TestAuthorisationMatrix(t *testing.T) {
 			t.Cleanup(cancel)
 			return m.form(http.MethodGet, pEvents).WithContext(c)
 		}},
-		"GET /dm": {allowed: signedIn, req: m.get(pDM)},
+		// a profile picture is shown to everyone who is signed in
+		"GET /avatar/{id}/{name}":      {allowed: signedIn, req: m.get(picture)},
+		"POST /settings/avatar":        {allowed: signedIn, req: m.post(pSettingsAvatar, "image", jpegDataURL(t, 32, 32))},
+		"POST /settings/avatar/remove": {allowed: signedIn, req: m.post(pSettingsAvatarDel)},
+		"GET /dm":                      {allowed: signedIn, req: m.get(pDM)},
 		// everyone may message the victim
 		"POST /dm": {allowed: signedIn, req: m.post(pDM, "user", idStr(victim.ID))},
 

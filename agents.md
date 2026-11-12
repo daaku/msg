@@ -42,11 +42,11 @@ read all of it before starting any task.
 - Prefer few, large files. Do not create new Go packages. Do not split a file
   because it is long.
 - Not in scope, do not build: replies or threads, mentions, markdown or rich
-  text, search, avatars or display names, unread counters, mute, edit or
+  text, search, display names, unread counters, mute, edit or
   delete history, user deletion, rate limiting, audio messages, paste or drag
   and drop upload.
-- Everything personal to a user (passkeys, add passkey links, notifications,
-  stats, sign out) lives on the single `/settings` page. Do not add another
+- Everything personal to a user (profile picture, passkeys, add passkey
+  links, notifications, stats, sign out) lives on the single `/settings` page. Do not add another
   personal page.
 
 ## Terminology
@@ -256,6 +256,23 @@ generated on first start and stored in the `config` table.
   variant. It is an estimate, because the bytes themselves never pass through
   this server.
 
+### Profile pictures
+
+- A profile picture is chosen and cropped in the browser (`#crop` on the
+  settings page, driven by `main.js` with no library). Only the chosen square
+  is posted, as a JPEG data URL of at most 512 pixels in an ordinary form
+  field. The original file never reaches the server.
+- `decodeAvatar` in `auth.go` checks it (JPEG, square, size) and encodes it
+  again, so stored bytes are always written by this server. No ImageMagick.
+- The image is a row in `avatars`, in SQLite and not in the bucket: it is
+  small, and it is shown many times on every page. `users.avatar` is a name
+  derived from the image bytes, `''` for none.
+- It is served to any signed in user from `/avatar/{userID}/{users.avatar}`
+  with an immutable cache lifetime. A changed picture has a new URL.
+- Always render a user's picture through `avatar(...)` in `ui.go`, which
+  falls back to the initial of the username. Queries that list users select
+  `users.avatar` next to the username.
+
 ### Hooks other tasks extend
 
 - `a.afterMessage(ctx, chat, msg)` in `chat.go` runs after a message row is
@@ -290,6 +307,8 @@ event handler attributes (the CSP forbids them).
 7. Enter to send in the composer on devices with a fine pointer.
 8. Setting the `tz` cookie from the browser time zone.
 9. Select all on focus for copyable link fields.
+10. The profile picture crop dialog: drawing the chosen image on a canvas,
+    moving and resizing the square selection, and posting the cropped JPEG.
 
 `assets/sw.js` handles `push` and `notificationclick` only. It does no
 caching and has no `fetch` handler.

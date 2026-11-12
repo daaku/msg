@@ -381,3 +381,169 @@ document.addEventListener('click', ev => {
     if (scroll) scroll.scrollTop = top
   })
 })
+
+// Profile picture: a chosen image opens in the crop dialog, where a square
+// selection is moved and resized over it. Saving posts only that square,
+// scaled down, as a JPEG data URL in an ordinary form. The image is drawn on
+// a canvas, which the CSP allows where it would refuse a blob: <img>.
+{
+  const OUT = 512 // largest edge posted; avatarSize in auth.go
+  const SOURCE = 2048 // long edge of the working canvas
+  const SMALLEST = 56 // smallest selection, in CSS pixels
+  const $ = id => document.getElementById(id)
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi)
+  let sel = null // { x, y, size } in canvas pixels, while the dialog is open
+  let drag = null
+
+  // The box is placed in percent of the stage, so it follows a resize.
+  const place = () => {
+    const { width, height } = $('crop-canvas')
+    const s = $('crop-box').style
+    s.left = `${(100 * sel.x) / width}%`
+    s.top = `${(100 * sel.y) / height}%`
+    s.width = `${(100 * sel.size) / width}%`
+    s.height = `${(100 * sel.size) / height}%`
+  }
+  // geometry gives the canvas size, its place on screen, and how many canvas
+  // pixels one CSS pixel covers.
+  const geometry = () => {
+    const canvas = $('crop-canvas')
+    const rect = canvas.getBoundingClientRect()
+    const density = canvas.width / rect.width
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      rect,
+      density,
+      smallest: Math.min(canvas.width, canvas.height, SMALLEST * density),
+    }
+  }
+  const moveTo = (x, y) => {
+    const { width, height } = $('crop-canvas')
+    sel = { size: sel.size, x: clamp(x, 0, width - sel.size), y: clamp(y, 0, height - sel.size) }
+  }
+
+  document.addEventListener('change', async ev => {
+    const input = ev.target.closest?.('input[data-avatar]')
+    if (!input) return
+    const file = input.files[0]
+    input.value = '' // so the same file can be chosen again
+    if (!file) return
+    const error = $('avatar-error')
+    error.textContent = ''
+    let bitmap
+    try {
+      bitmap = await createImageBitmap(file)
+    } catch (err) {
+      console.error(err)
+      error.textContent = 'That file could not be opened as a picture.'
+      return
+    }
+    const canvas = $('crop-canvas')
+    const scale = Math.min(1, SOURCE / Math.max(bitmap.width, bitmap.height))
+    const width = (canvas.width = Math.max(1, Math.round(bitmap.width * scale)))
+    const height = (canvas.height = Math.max(1, Math.round(bitmap.height * scale)))
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = '#fff' // behind a transparent image: JPEG has no alpha
+    ctx.fillRect(0, 0, width, height)
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage(bitmap, 0, 0, width, height)
+    bitmap.close()
+    canvas.parentElement.style.setProperty('--ratio', width / height)
+    const size = Math.min(width, height) // the largest square, centred
+    sel = { size, x: (width - size) / 2, y: (height - size) / 2 }
+    place()
+    $(input.dataset.avatar).showModal()
+    $('crop-box').focus()
+  })
+
+  document.addEventListener('pointerdown', ev => {
+    const box = ev.target.closest?.('#crop-box')
+    if (!box || !sel || ev.button !== 0) return
+    ev.preventDefault()
+    box.setPointerCapture(ev.pointerId)
+    box.focus({ preventScroll: true })
+    const { rect, density } = geometry()
+    const px = (ev.clientX - rect.left) * density
+    const py = (ev.clientY - rect.top) * density
+    drag = { id: ev.pointerId, from: sel, dx: sel.x - px, dy: sel.y - py }
+    const corner = ev.target.dataset.corner // nw, ne, sw or se
+    if (corner) {
+      // The corner opposite to the one held stays where it is. grab is how
+      // far the pointer is from the corner it holds.
+      const sx = corner[1] === 'e' ? 1 : -1
+      const sy = corner[0] === 's' ? 1 : -1
+      const ax = sx > 0 ? sel.x : sel.x + sel.size
+      const ay = sy > 0 ? sel.y : sel.y + sel.size
+      drag.corner = { sx, sy, ax, ay, gx: ax + sx * sel.size - px, gy: ay + sy * sel.size - py }
+    }
+  })
+
+  document.addEventListener('pointermove', ev => {
+    if (!drag || ev.pointerId !== drag.id) return
+    const { width, height, rect, density, smallest } = geometry()
+    const px = (ev.clientX - rect.left) * density
+    const py = (ev.clientY - rect.top) * density
+    if (drag.corner) {
+      const { sx, sy, ax, ay, gx, gy } = drag.corner
+      const room = Math.min(sx > 0 ? width - ax : ax, sy > 0 ? height - ay : ay)
+      const want = Math.max((px + gx - ax) * sx, (py + gy - ay) * sy)
+      const size = clamp(want, Math.min(smallest, room), room)
+      sel = { size, x: sx > 0 ? ax : ax - size, y: sy > 0 ? ay : ay - size }
+    } else {
+      moveTo(px + drag.dx, py + drag.dy)
+    }
+    place()
+  })
+
+  for (const type of ['pointerup', 'pointercancel']) {
+    document.addEventListener(type, ev => {
+      if (drag?.id === ev.pointerId) drag = null
+    })
+  }
+
+  // Arrow keys move the selection, plus and minus resize it about its centre.
+  document.addEventListener('keydown', ev => {
+    if (ev.target.id !== 'crop-box' || !sel) return
+    const { width, height, smallest } = geometry()
+    const step = Math.max(1, Math.round(Math.min(width, height) / (ev.shiftKey ? 10 : 50)))
+    const move = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key]
+    const grow = { '+': 1, '=': 1, '-': -1, _: -1 }[ev.key]
+    if (move) {
+      moveTo(sel.x + move[0] * step, sel.y + move[1] * step)
+    } else if (grow) {
+      const size = clamp(sel.size + 2 * grow * step, smallest, Math.min(width, height))
+      const shift = (sel.size - size) / 2
+      sel.size = size
+      moveTo(sel.x + shift, sel.y + shift)
+    } else {
+      return
+    }
+    ev.preventDefault()
+    place()
+  })
+
+  document.addEventListener('submit', ev => {
+    const form = ev.target
+    if (!form.closest?.('#crop') || !sel || ev.submitter?.formMethod === 'dialog') return
+    const side = Math.min(OUT, Math.round(sel.size))
+    const out = document.createElement('canvas')
+    out.width = out.height = side
+    const ctx = out.getContext('2d')
+    ctx.imageSmoothingQuality = 'high'
+    ctx.drawImage($('crop-canvas'), sel.x, sel.y, sel.size, sel.size, 0, 0, side, side)
+    form.image.value = out.toDataURL('image/jpeg', 0.9)
+  })
+
+  // close does not bubble, so it is caught on the way down.
+  document.addEventListener(
+    'close',
+    ev => {
+      if (ev.target.id !== 'crop') return
+      sel = drag = null
+      const canvas = $('crop-canvas')
+      canvas.width = canvas.height = 0 // free the pixels
+    },
+    true,
+  )
+}

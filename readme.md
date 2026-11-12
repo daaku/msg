@@ -12,6 +12,7 @@ used only where it has to be, and passkeys are the only way to sign in.
 - Groups and direct messages in one chat list; archiving per user
 - Messages can be edited and deleted by their author, with no history kept
 - Emoji reactions
+- Profile pictures, cropped in the browser before they are sent
 - File uploads straight from the browser to the bucket in chunks, in the
   background, with a progress ring
 - Images converted with ImageMagick and videos with ffmpeg; the original is
@@ -329,6 +330,8 @@ hardware decoding cannot play it. Changing it affects new uploads only.
   the server counts the size of a file each time it hands out a signed URL,
   and browsers cache that redirect.
 - Edits and deletes keep no history.
+- Profile pictures are stored in the database, at most 512 pixels square,
+  and are visible to every signed in user.
 - Snooze reminders are push notifications, so they need notifications
   enabled on at least one device.
 - The built in fake bucket (`S3_ENDPOINT=fake`) is for development only.

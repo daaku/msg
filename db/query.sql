@@ -160,7 +160,9 @@ SELECT * FROM chats WHERE id = ?;
 
 -- name: ChatsForUserWithLast :many
 SELECT sqlc.embed(chats),
+  CAST(coalesce(other_user.id, 0) AS INTEGER) AS other_id,
   CAST(coalesce(other_user.username, '') AS TEXT) AS other,
+  CAST(coalesce(other_user.avatar, '') AS TEXT) AS other_avatar,
   CAST(coalesce(last.body, '') AS TEXT) AS last_body,
   CAST(coalesce(last_user.username, '') AS TEXT) AS last_username,
   CAST(coalesce(last.created_at, 0) AS INTEGER) AS last_created_at,
@@ -201,7 +203,7 @@ DELETE FROM members WHERE chat_id = @chat_id AND user_id = @user_id;
 SELECT * FROM members WHERE chat_id = @chat_id AND user_id = @user_id;
 
 -- name: MembersOfChat :many
-SELECT members.user_id, users.username FROM members
+SELECT members.user_id, users.username, users.avatar FROM members
 JOIN users ON users.id = members.user_id
 WHERE members.chat_id = ?
 ORDER BY users.username;
@@ -210,12 +212,12 @@ ORDER BY users.username;
 SELECT user_id FROM members WHERE chat_id = ? ORDER BY user_id;
 
 -- name: UsersNotInChat :many
-SELECT id, username FROM users
+SELECT id, username, avatar FROM users
 WHERE id NOT IN (SELECT user_id FROM members WHERE chat_id = ?)
 ORDER BY username;
 
 -- name: UsersAllBasic :many
-SELECT id, username FROM users ORDER BY username;
+SELECT id, username, avatar FROM users ORDER BY username;
 
 -- name: MessageCreate :one
 INSERT INTO messages (chat_id, user_id, body, file_id, created_at)
@@ -223,7 +225,7 @@ VALUES (@chat_id, @user_id, @body, @file_id, @created_at)
 RETURNING *;
 
 -- name: MessagesLatest :many
-SELECT sqlc.embed(messages), users.username
+SELECT sqlc.embed(messages), users.username, users.avatar
 FROM messages JOIN users ON users.id = messages.user_id
 WHERE messages.chat_id = @chat_id
 ORDER BY messages.id DESC
@@ -419,3 +421,18 @@ INSERT INTO files (chat_id, user_id, kind, status, name, s3_prefix, size,
 VALUES (@chat_id, @user_id, 'preview', 'ready', 'preview', @s3_prefix, 0,
   @conv_type, @conv_size, @width, @height, @created_at)
 RETURNING *;
+
+-- name: AvatarSet :exec
+INSERT INTO avatars (user_id, image) VALUES (@user_id, @image)
+ON CONFLICT (user_id) DO UPDATE SET image = excluded.image;
+
+-- name: AvatarDelete :exec
+DELETE FROM avatars WHERE user_id = ?;
+
+-- name: AvatarGet :one
+SELECT avatars.image FROM avatars
+JOIN users ON users.id = avatars.user_id
+WHERE users.id = @user_id AND users.avatar = @avatar;
+
+-- name: UserSetAvatar :exec
+UPDATE users SET avatar = @avatar WHERE id = @id;

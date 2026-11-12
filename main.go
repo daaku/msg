@@ -48,6 +48,7 @@ const (
 	pAdminUser          = "/admin/u/"
 	pArchived           = "/archived"
 	pAssets             = "/assets/"
+	pAvatar             = "/avatar/"
 	pChat               = "/c/"
 	pDM                 = "/dm"
 	pEvents             = "/events"
@@ -71,6 +72,8 @@ const (
 	pPushUnsubscribe    = "/push/unsubscribe"
 	pRobotsTxt          = "/robots.txt"
 	pSettings           = "/settings"
+	pSettingsAvatar     = "/settings/avatar"
+	pSettingsAvatarDel  = "/settings/avatar/remove"
 	pSettingsLink       = "/settings/link"
 	pSettingsLinkRevoke = "/settings/link/revoke"
 	pSignIn             = "/sign-in"
@@ -739,6 +742,9 @@ func (a *app) handler() http.Handler {
 	handle("POST "+pInvites, a.wrap(accInvite, a.invitesPost))
 	handle("POST "+pInvitesRevoke, a.wrap(accInvite, a.invitesRevoke))
 	handle("GET "+pSettings, a.wrap(accUser, a.settings))
+	handle("POST "+pSettingsAvatar, a.wrap(accUser, a.settingsAvatar))
+	handle("POST "+pSettingsAvatarDel, a.wrap(accUser, a.settingsAvatarRemove))
+	handle("GET "+pAvatar+"{id}/{name}", a.wrap(accUser, a.avatarImage))
 	handle("POST "+pSettingsLink, a.wrap(accUser, a.settingsLink))
 	handle("POST "+pSettingsLinkRevoke, a.wrap(accUser, a.settingsLinkRevoke))
 	handle("GET "+pPasskeyOptions, a.wrap(accUser, a.passkeyOptions))

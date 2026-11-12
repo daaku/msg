@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/jpeg"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -649,7 +653,7 @@ type settingsSection func(r *http.Request, u *User) (g.Node, error)
 // settingsSections are the sections of the settings page, in order. Later
 // features append to this list.
 func (a *app) settingsSections() []settingsSection {
-	return []settingsSection{a.settingsPasskeys, a.settingsDevices, a.settingsNotifications, a.settingsStats}
+	return []settingsSection{a.settingsPicture, a.settingsPasskeys, a.settingsDevices, a.settingsNotifications, a.settingsStats}
 }
 
 func (a *app) settings(w http.ResponseWriter, r *http.Request) error {
@@ -675,6 +679,143 @@ func (a *app) settings(w http.ResponseWriter, r *http.Request) error {
 	body = append(body, h.Form(h.Method("post"), h.Action(pSignOut),
 		h.Button(h.Class("btn secondary"), g.Text("Sign out"))))
 	return a.pageSimple(w, r, "Settings", backLink(pHome, "Home"), body...).Render(w)
+}
+
+// profile picture
+
+const (
+	// avatarSize is the largest accepted edge of a profile picture, in
+	// pixels. main.js crops to at most this.
+	avatarSize = 512
+	// maxAvatarForm bounds the form that carries the picture as a data URL.
+	maxAvatarForm = 1 << 20
+	avatarPrefix  = "data:image/jpeg;base64,"
+)
+
+// settingsPicture shows the user's profile picture with the controls to
+// change it. The file never leaves the browser: main.js opens it in the crop
+// dialog and posts only the chosen square, as a small JPEG.
+func (a *app) settingsPicture(r *http.Request, u *User) (g.Node, error) {
+	handle := func(corner string) g.Node {
+		return h.Span(h.Class("crop-handle "+corner), h.Data("corner", corner))
+	}
+	return h.Section(h.ID("picture"), h.Class("stack"),
+		h.H2(g.Text("Profile picture")),
+		h.Div(h.Class("card picture"),
+			avatar(u.ID, u.Username, u.Avatar, "avatar-l"),
+			h.Div(h.Class("stack-tight"),
+				h.Div(h.Class("cluster"),
+					h.Label(h.Class("btn secondary"), g.Text("Choose a picture"),
+						h.Input(h.Class("visually-hidden"), h.Type("file"), h.Accept("image/*"),
+							h.Data("avatar", "crop"))),
+					g.If(u.Avatar != "", h.Form(h.Method("post"), h.Action(pSettingsAvatarDel),
+						h.Button(h.Class("btn secondary"), g.Text("Remove"))))),
+				h.P(h.ID("avatar-error"), h.Class("form-error"), h.Role("alert")))),
+		g.El("dialog", h.ID("crop"), h.Class("crop"), h.Aria("labelledby", "crop-title"),
+			h.Form(h.Method("post"), h.Action(pSettingsAvatar), h.Class("stack"),
+				h.H2(h.ID("crop-title"), g.Text("Crop your picture")),
+				h.Div(h.Class("crop-stage"),
+					h.Canvas(h.ID("crop-canvas")),
+					h.Div(h.ID("crop-box"), h.Class("crop-box"), h.TabIndex("0"), h.Role("group"),
+						h.Aria("label", "Selection. Arrow keys move it, plus and minus resize it."),
+						handle("nw"), handle("ne"), handle("sw"), handle("se"))),
+				h.P(h.Class("muted"), g.Text("Drag the square to move it and its corners to resize it. "+
+					"The circle is what everyone else sees.")),
+				h.Input(h.Type("hidden"), h.Name("image")),
+				h.Div(h.Class("row"),
+					h.Button(h.Class("btn secondary"), h.FormMethod("dialog"), h.FormNoValidate(), g.Text("Cancel")),
+					h.Button(h.Class("btn"), g.Text("Save"))))),
+	), nil
+}
+
+// decodeAvatar checks a picture cropped by the browser and encodes it again,
+// so that what is stored and served is always a JPEG written by this server.
+func decodeAvatar(dataURL string) ([]byte, error) {
+	enc, ok := strings.CutPrefix(dataURL, avatarPrefix)
+	if !ok {
+		return nil, errors.New("not a JPEG data URL")
+	}
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return nil, err
+	}
+	// The size is checked before decoding, so a small file that claims a
+	// huge canvas costs nothing.
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width != cfg.Height || cfg.Width < 1 || cfg.Width > avatarSize {
+		return nil, fmt.Errorf("%dx%d is not a square of at most %d pixels", cfg.Width, cfg.Height, avatarSize)
+	}
+	img, err := jpeg.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	if err := jpeg.Encode(&out, img, &jpeg.Options{Quality: 85}); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func (a *app) settingsAvatar(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	r.Body = http.MaxBytesReader(w, r.Body, maxAvatarForm)
+	img, err := decodeAvatar(r.PostFormValue("image"))
+	if err != nil {
+		return a.flash(w, r, pSettings, Flash{Kind: flashError,
+			Content: "That picture could not be used."})
+	}
+	sum := sha256.Sum256(img)
+	err = a.tx(ctx, func(q *Queries) error {
+		if err := q.AvatarSet(ctx, AvatarSetParams{UserID: user.ID, Image: img}); err != nil {
+			return serr.Wrap(err)
+		}
+		return serr.Wrap(q.UserSetAvatar(ctx, UserSetAvatarParams{
+			ID: user.ID, Avatar: hex.EncodeToString(sum[:8])}))
+	})
+	if err != nil {
+		return err
+	}
+	return a.flash(w, r, pSettings, Flash{Kind: flashSuccess, Content: "Profile picture saved."})
+}
+
+func (a *app) settingsAvatarRemove(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	user := userFrom(ctx)
+	err := a.tx(ctx, func(q *Queries) error {
+		if err := q.AvatarDelete(ctx, user.ID); err != nil {
+			return serr.Wrap(err)
+		}
+		return serr.Wrap(q.UserSetAvatar(ctx, UserSetAvatarParams{ID: user.ID}))
+	})
+	if err != nil {
+		return err
+	}
+	return a.flash(w, r, pSettings, Flash{Kind: flashSuccess, Content: "Profile picture removed."})
+}
+
+// avatarImage serves a profile picture to any signed in user. The last path
+// element is users.avatar, which changes with the picture: an old name is
+// not found, and a current one never changes, so it is cached for good.
+func (a *app) avatarImage(w http.ResponseWriter, r *http.Request) error {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		return errNotFound
+	}
+	img, err := a.q.AvatarGet(r.Context(), AvatarGetParams{UserID: id, Avatar: r.PathValue("name")})
+	if errors.Is(err, sql.ErrNoRows) {
+		return errNotFound
+	}
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
+	_, _ = w.Write(img)
+	return nil
 }
 
 func (a *app) settingsPasskeys(r *http.Request, u *User) (g.Node, error) {

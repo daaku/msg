@@ -1,8 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/base64"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1175,4 +1181,193 @@ func TestAdminRecovery(t *testing.T) {
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, row.UserID, bob.ID)
 	ensure.DeepEqual(t, invitesSent(t, ta, admin.ID), int64(0))
+}
+
+// profile picture
+
+func testImage(w, h int) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			img.Set(x, y, color.RGBA{R: uint8(x), G: uint8(y), B: 128, A: 255})
+		}
+	}
+	return img
+}
+
+// jpegDataURL is what main.js posts for a cropped picture of the given size.
+func jpegDataURL(t *testing.T, w, h int) string {
+	t.Helper()
+	var buf bytes.Buffer
+	ensure.Nil(t, jpeg.Encode(&buf, testImage(w, h), nil))
+	return avatarPrefix + base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+// setAvatar posts a profile picture of the given size for u.
+func (ta *testApp) setAvatar(u *testUser, w, h int) *httptest.ResponseRecorder {
+	ta.t.Helper()
+	return ta.post(pSettingsAvatar, url.Values{"image": {jpegDataURL(ta.t, w, h)}}, ta.as(u))
+}
+
+func avatarOf(t *testing.T, ta *testApp, userID int64) string {
+	t.Helper()
+	u, err := ta.app.q.UserByID(t.Context(), userID)
+	ensure.Nil(t, err)
+	return u.Avatar
+}
+
+func TestProfilePicture(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice")
+	bob := ta.newUser("bob")
+
+	// nothing yet: the initial, a way to choose, nothing to remove
+	page := ta.get(pSettings, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, `<span class="avatar avatar-l hue-`+idStr(alice.ID%12)+`" aria-hidden="true">A</span>`)
+	ensure.StringContains(t, page, `data-avatar="crop"`)
+	ensure.StringContains(t, page, `<dialog id="crop"`)
+	ensure.StringContains(t, page, `action="/settings/avatar"`)
+	ensure.StringDoesNotContain(t, page, `action="/settings/avatar/remove"`)
+
+	w := ta.setAvatar(alice, avatarSize, avatarSize)
+	ensure.DeepEqual(t, w.Header().Get("Location"), pSettings)
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "Profile picture saved.")
+	first := avatarOf(t, ta, alice.ID)
+	ensure.DeepEqual(t, len(first), 16)
+	ensure.DeepEqual(t, avatarOf(t, ta, bob.ID), "")
+	page = ta.get(pSettings, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, `<img class="avatar avatar-l" src="`+avatarPath(alice.ID, first)+`"`)
+	ensure.StringContains(t, page, `action="/settings/avatar/remove"`)
+
+	// served to any signed in user, as a JPEG of the posted size, for good
+	for _, u := range []*testUser{alice, bob} {
+		w = ta.get(avatarPath(alice.ID, first), ta.as(u))
+		ensure.DeepEqual(t, w.Code, http.StatusOK)
+		ensure.DeepEqual(t, w.Header().Get("Content-Type"), "image/jpeg")
+		ensure.DeepEqual(t, w.Header().Get("Cache-Control"), "private, max-age=31536000, immutable")
+		ensure.DeepEqual(t, w.Header().Get("X-Content-Type-Options"), "nosniff")
+		cfg, err := jpeg.DecodeConfig(w.Body)
+		ensure.Nil(t, err)
+		ensure.DeepEqual(t, []int{cfg.Width, cfg.Height}, []int{avatarSize, avatarSize})
+	}
+	w = ta.get(avatarPath(alice.ID, first))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, w.Header().Get("Location"), pSignIn)
+
+	// a new picture has a new name, and the old name is gone
+	ensure.DeepEqual(t, ta.setAvatar(alice, 100, 100).Code, http.StatusSeeOther)
+	second := avatarOf(t, ta, alice.ID)
+	ensure.True(t, second != first && second != "")
+	ensure.DeepEqual(t, ta.get(avatarPath(alice.ID, first), ta.as(bob)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.get(avatarPath(alice.ID, second), ta.as(bob)).Code, http.StatusOK)
+	ensure.DeepEqual(t, countRows(t, ta, "avatars"), 1)
+
+	// names that do not exist
+	for _, p := range []string{
+		avatarPath(bob.ID, second), avatarPath(alice.ID, "nope"),
+		avatarPath(999, second), pAvatar + "x/" + second,
+	} {
+		ensure.DeepEqual(t, ta.get(p, ta.as(bob)).Code, http.StatusNotFound, p)
+	}
+
+	// removing is only ever your own
+	w = ta.post(pSettingsAvatarDel, nil, ta.as(bob))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, avatarOf(t, ta, alice.ID), second)
+	w = ta.post(pSettingsAvatarDel, nil, ta.as(alice))
+	ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "Profile picture removed.")
+	ensure.DeepEqual(t, avatarOf(t, ta, alice.ID), "")
+	ensure.DeepEqual(t, countRows(t, ta, "avatars"), 0)
+	ensure.DeepEqual(t, ta.get(avatarPath(alice.ID, second), ta.as(alice)).Code, http.StatusNotFound)
+
+	w = ta.post(pSettingsAvatar, url.Values{"image": {jpegDataURL(t, 8, 8)}})
+	ensure.DeepEqual(t, w.Code, http.StatusUnauthorized)
+}
+
+func TestProfilePictureRejected(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice")
+	var pngBuf bytes.Buffer
+	ensure.Nil(t, png.Encode(&pngBuf, testImage(16, 16)))
+	valid := jpegDataURL(t, 16, 16)
+	cases := map[string]string{
+		"missing":      "",
+		"not a url":    "hello",
+		"bad base64":   avatarPrefix + "!!!",
+		"not a jpeg":   avatarPrefix + base64.StdEncoding.EncodeToString([]byte("hello")),
+		"png as jpeg":  avatarPrefix + base64.StdEncoding.EncodeToString(pngBuf.Bytes()),
+		"png data url": "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngBuf.Bytes()),
+		"wide":         jpegDataURL(t, 64, 32),
+		"tall":         jpegDataURL(t, 32, 64),
+		"too large":    jpegDataURL(t, avatarSize+1, avatarSize+1),
+		"truncated":    valid[:len(valid)/2&^3],
+		"over limit":   valid + strings.Repeat("A", maxAvatarForm),
+	}
+	for name, image := range cases {
+		w := ta.post(pSettingsAvatar, url.Values{"image": {image}}, ta.as(alice))
+		ensure.StringContains(t, ta.flashOf(w, ta.as(alice)), "That picture could not be used.", name)
+		ensure.DeepEqual(t, avatarOf(t, ta, alice.ID), "", name)
+	}
+	ensure.DeepEqual(t, countRows(t, ta, "avatars"), 0)
+}
+
+// What is stored is encoded by the server: bytes after the image are dropped.
+func TestProfilePictureReencoded(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice")
+	var buf bytes.Buffer
+	ensure.Nil(t, jpeg.Encode(&buf, testImage(16, 16), nil))
+	buf.WriteString("<script>alert(1)</script>")
+	w := ta.post(pSettingsAvatar, url.Values{
+		"image": {avatarPrefix + base64.StdEncoding.EncodeToString(buf.Bytes())}}, ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	w = ta.get(avatarPath(alice.ID, avatarOf(t, ta, alice.ID)), ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusOK)
+	ensure.False(t, bytes.Contains(w.Body.Bytes(), []byte("<script>")))
+}
+
+// The picture appears wherever the user does.
+func TestProfilePictureShown(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	group := ta.newChat(alice, "G", bob, carol)
+	dm := ta.newDM(alice, bob)
+	ta.newMessage(group, bob, "from bob")
+	ta.newMessage(group, carol, "from carol")
+	ta.newMessage(dm, bob, "hello")
+	ensure.DeepEqual(t, ta.setAvatar(bob, 64, 64).Code, http.StatusSeeOther)
+	src := `src="` + avatarPath(bob.ID, avatarOf(t, ta, bob.ID)) + `"`
+	img := func(size string) string { return `<img class="avatar` + size + `" ` + src }
+	initial := func(u *testUser, size string) string {
+		return fmt.Sprintf(`<span class="avatar%s hue-%d" aria-hidden="true">%s</span>`,
+			size, u.ID%12, strings.ToUpper(u.Username[:1]))
+	}
+
+	// a group: beside the first bubble of each run, never beside your own
+	page := ta.get(chatPath(group.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, `<div id="messages" class="group">`)
+	ensure.StringContains(t, page, img(" avatar-s msg-avatar"))
+	ensure.StringContains(t, page, initial(carol, " avatar-s msg-avatar"))
+	ensure.DeepEqual(t, strings.Count(ta.get(chatPath(group.ID), ta.as(bob)).Body.String(), src), 0)
+
+	// a direct message: in the header and the chat list, not in the bubbles
+	page = ta.get(chatPath(dm.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, `<div id="messages">`)
+	ensure.StringContains(t, page, `class="pane-title" href="`+chatPath(dm.ID)+`/info">`+img(" avatar-s"))
+	ensure.StringContains(t, page, fmt.Sprintf(`id="chat-%d" class="chat-item dm"`, dm.ID)+
+		` href="`+chatPath(dm.ID)+`" aria-current="page">`+img(""))
+	ensure.StringDoesNotContain(t, page, "msg-avatar")
+	// bob sees alice there, who has no picture
+	page = ta.get(chatPath(dm.ID), ta.as(bob)).Body.String()
+	ensure.StringContains(t, page, initial(alice, " avatar-s"))
+	ensure.DeepEqual(t, strings.Count(page, src), 0)
+
+	// member list, the list to start a direct message, and new group
+	ensure.StringContains(t, ta.get(chatPath(group.ID)+"/info", ta.as(alice)).Body.String(), img(" avatar-s"))
+	ensure.StringContains(t, ta.get(pDM, ta.as(alice)).Body.String(), img(" avatar-s"))
+	page = ta.get(pNew, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, img(" avatar-s"))
+	ensure.StringContains(t, page, initial(carol, " avatar-s"))
 }

@@ -8,6 +8,11 @@ import (
 	"database/sql"
 )
 
+type Avatar struct {
+	UserID int64
+	Image  []byte
+}
+
 type Chat struct {
 	ID            int64
 	Name          string
@@ -136,6 +141,7 @@ type User struct {
 	PermGroup  bool
 	InvitedBy  sql.NullInt64
 	CreatedAt  int64
+	Avatar     string
 }
 
 type UserStat struct {

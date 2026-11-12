@@ -475,8 +475,7 @@ func TestDMTitles(t *testing.T) {
 
 	row := func(c Chat, kind string) string {
 		return fmt.Sprintf(`id="chat-%d" class="chat-item %s" href="%s"`, c.ID, kind, chatPath(c.ID)) +
-			`><svg class="icon icon-` + map[string]string{"dm": "person", "group": "people"}[kind] +
-			`"`
+			map[string]string{"dm": `><span class="avatar hue-`, "group": `><svg class="icon icon-people"`}[kind]
 	}
 	body := ta.get(pHome, ta.as(alice)).Body.String()
 	ensure.StringContains(t, body, row(dm, "dm"))
@@ -506,10 +505,10 @@ func TestDMTitles(t *testing.T) {
 	// the pane header and page title
 	body = ta.get(chatPath(dm.ID), ta.as(bob)).Body.String()
 	ensure.StringContains(t, body, "<title>alice · msg</title>")
-	ensure.StringContains(t, body, `class="pane-title" href="`+chatPath(dm.ID)+`/info">alice</a>`)
+	ensure.StringContains(t, body, `class="pane-title" href="`+chatPath(dm.ID)+`/info"><span class="avatar avatar-s hue-`+idStr(alice.ID%12)+`" aria-hidden="true">A</span><span>alice</span></a>`)
 	body = ta.get(chatPath(dm.ID), ta.as(alice)).Body.String()
 	ensure.StringContains(t, body, "<title>bob · msg</title>")
-	ensure.StringContains(t, body, `class="pane-title" href="`+chatPath(dm.ID)+`/info">bob</a>`)
+	ensure.StringContains(t, body, `class="pane-title" href="`+chatPath(dm.ID)+`/info"><span class="avatar avatar-s hue-`+idStr(bob.ID%12)+`" aria-hidden="true">B</span><span>bob</span></a>`)
 	body = ta.get(chatPath(dm.ID)+"/info", ta.as(alice)).Body.String()
 	ensure.StringContains(t, body, "<title>bob · msg</title>")
 
