@@ -451,8 +451,35 @@ func isMedia(f File) bool {
 	return (f.Kind == kindImage || f.Kind == kindVideo) && f.Status == statusReady
 }
 
+// A picture or a video is shown no larger than this box, in CSS pixels
+// (22rem by 26rem).
+const (
+	mediaMaxWidth  = 352
+	mediaMaxHeight = 416
+)
+
+// mediaBox is the size a picture or a video of the given size is shown at:
+// scaled down to fit the box, never up. The size is given to the browser as
+// the width and height attributes, so the bubble around it is laid out from
+// plain numbers and fits it exactly. A narrower screen shrinks it further.
+func mediaBox(w, h int64) (int64, int64) {
+	if w <= 0 || h <= 0 {
+		return mediaMaxWidth, mediaMaxHeight
+	}
+	bw, bh := w, h
+	if bw > mediaMaxWidth {
+		bw, bh = mediaMaxWidth, max(1, (h*mediaMaxWidth+w/2)/w)
+	}
+	if bh > mediaMaxHeight {
+		bw, bh = max(1, (w*mediaMaxHeight+h/2)/h), mediaMaxHeight
+	}
+	return bw, bh
+}
+
 func fileNode(f File) g.Node {
 	converts := f.Kind == kindImage || f.Kind == kindVideo
+	bw, bh := mediaBox(f.Width, f.Height)
+	width, height := h.Width(strconv.FormatInt(bw, 10)), h.Height(strconv.FormatInt(bh, 10))
 	switch {
 	case converts && (f.Status == statusPending || f.Status == statusProcessing):
 		return h.Div(h.Class("file-processing"),
@@ -462,15 +489,13 @@ func fileNode(f File) g.Node {
 		// width and height reserve the space, so nothing shifts on load
 		src := filePath(f.ID, "c")
 		return h.A(h.Class("media"), h.Href(src), h.Target("_blank"), h.Rel("noopener"),
-			h.Img(h.ID(fmt.Sprintf("f%d", f.ID)), h.Src(src),
-				h.Width(strconv.FormatInt(f.Width, 10)), h.Height(strconv.FormatInt(f.Height, 10)),
+			h.Img(h.ID(fmt.Sprintf("f%d", f.ID)), h.Src(src), width, height,
 				h.Alt(f.Name), h.Loading("lazy"), g.Attr("decoding", "async")))
 	case f.Kind == kindVideo && f.Status == statusReady:
 		// preload none: nothing is downloaded until it is played
 		return h.Video(h.ID(fmt.Sprintf("f%d", f.ID)), h.Class("media"),
 			h.Controls(), h.PlaysInline(), h.Preload("none"),
-			h.Poster(filePath(f.ID, "p")),
-			h.Width(strconv.FormatInt(f.Width, 10)), h.Height(strconv.FormatInt(f.Height, 10)),
+			h.Poster(filePath(f.ID, "p")), width, height,
 			h.Src(filePath(f.ID, "c")))
 	}
 	return fileDownload(f)

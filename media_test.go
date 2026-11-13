@@ -583,3 +583,22 @@ func TestStaleUploadCleanup(t *testing.T) {
 	ensure.DeepEqual(t, ta.file(fresh.File).Status, statusUploading)
 	ensure.DeepEqual(t, ta.file(done).Status, statusReady, "finished files are never touched")
 }
+
+func TestMediaBox(t *testing.T) {
+	for _, c := range [][4]int64{
+		// width, height, shown width, shown height
+		{3840, 2560, 352, 235}, // wide: capped by the width
+		{1920, 1080, 352, 198},
+		{3024, 4032, 312, 416}, // tall: capped by the height
+		{720, 1280, 234, 416},
+		{352, 416, 352, 416}, // exactly the box
+		{160, 120, 160, 120}, // small: never scaled up
+		{300, 900, 139, 416},
+		{9000, 10, 352, 1}, // extreme shapes keep a pixel
+		{10, 9000, 1, 416},
+		{0, 0, 352, 416}, // unknown size
+	} {
+		w, h := mediaBox(c[0], c[1])
+		ensure.DeepEqual(t, []int64{w, h}, []int64{c[2], c[3]}, c)
+	}
+}

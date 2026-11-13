@@ -1432,24 +1432,22 @@ button.chip {
   font-size: var(--step--1);
 }
 
+/* The width and height attributes carry the size to show the picture or
+   video at (mediaBox in media.go). Only a narrower screen changes it. */
 .media {
   display: block;
-  max-width: min(100%, 22rem);
+  max-width: 100%;
   border-radius: calc(var(--radius-l) - 0.25rem);
   overflow: hidden;
 
   & img {
     display: block;
     max-width: 100%;
-    max-height: 55dvh;
-    width: auto;
     height: auto;
   }
 }
 
 video.media {
-  max-height: 55dvh;
-  width: auto;
   height: auto;
   background-color: #000000;
 }

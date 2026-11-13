@@ -170,7 +170,7 @@ func TestImageConversion(t *testing.T) {
 	// rendered lazily with its dimensions
 	page := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
 	ensure.StringContains(t, page, `<img id="f`+idStr(id)+`" src="/f/`+idStr(id)+
-		`/c" width="3840" height="2560" alt="big.jpg" loading="lazy" decoding="async">`)
+		`/c" width="352" height="235" alt="big.jpg" loading="lazy" decoding="async">`)
 	ensure.StringContains(t, page, `<a class="media" href="/f/`+idStr(id)+`/c" target="_blank" rel="noopener">`)
 	ensure.False(t, strings.Contains(page, "Processing…"))
 	// the bubble is the picture, with the time on top of it
