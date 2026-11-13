@@ -922,9 +922,15 @@ body.chat {
 
 /* messages: column-reverse keeps the newest message in view with no script */
 .scroll {
+  --grid-gap: 12px;
+  --grid-line: color-mix(in oklab, var(--color-text) 4%, transparent);
+
   flex: 1;
   min-height: 0;
-  background-color: var(--color-chat-bg);
+  background:
+    linear-gradient(var(--grid-line) 0 1px, transparent 1px) 0 0 / var(--grid-gap) var(--grid-gap),
+    linear-gradient(to right, var(--grid-line) 0 1px, transparent 1px) 0 0 / var(--grid-gap) var(--grid-gap),
+    var(--color-chat-bg);
   display: flex;
   flex-direction: column-reverse;
   overflow-y: auto;
