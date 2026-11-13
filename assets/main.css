@@ -987,9 +987,24 @@ body.chat {
   border-radius: var(--radius-l);
   border-start-start-radius: var(--radius-s);
 
+  /* The first bubble of a run has a tail, as in a comic: its top edge runs
+     on past the outer corner to a point, and comes back to the side. */
   &.first {
     margin-block-start: var(--space-2xs);
-    border-start-start-radius: var(--radius-l);
+    border-start-start-radius: 0;
+
+    &::before {
+      content: "";
+      position: absolute;
+      inset-block-start: 0;
+      inset-inline-end: 100%;
+      width: 0.5625rem;
+      height: 0.875rem;
+      background-color: var(--bubble);
+      /* drawn for a tail on the right, 9 by 14, with a rounded tip */
+      clip-path: path("M0 0H6.6Q9.4 0 7.8 2.4L0 14Z");
+      scale: -1 1;
+    }
   }
 
   &.mine {
@@ -1002,7 +1017,12 @@ body.chat {
     border-start-end-radius: var(--radius-s);
 
     &.first {
-      border-start-end-radius: var(--radius-l);
+      border-start-end-radius: 0;
+
+      &::before {
+        inset-inline: 100% auto;
+        scale: none;
+      }
     }
 
     a {
@@ -1592,14 +1612,14 @@ img.avatar,
 
 /* In a group the picture hangs in a gutter beside the first bubble of a run. */
 #messages.group .msg:not(.mine) {
-  margin-inline-start: 2.25rem;
-  max-width: min(calc(100% - 5rem), 34rem);
+  margin-inline-start: 2.5rem;
+  max-width: min(calc(100% - 5.25rem), 34rem);
 }
 
 .msg-avatar {
   position: absolute;
   inset-block-start: 0;
-  inset-inline-start: -2.25rem;
+  inset-inline-start: -2.5rem;
 }
 
 .picture {
