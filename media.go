@@ -445,6 +445,12 @@ func (a *app) filesFor(ctx context.Context, rows []MessagesLatestRow) (map[int64
 }
 
 // fileNode renders the attachment of a message.
+// isMedia reports whether fileNode shows the file itself: a picture or a
+// video that has been converted.
+func isMedia(f File) bool {
+	return (f.Kind == kindImage || f.Kind == kindVideo) && f.Status == statusReady
+}
+
 func fileNode(f File) g.Node {
 	converts := f.Kind == kindImage || f.Kind == kindVideo
 	switch {

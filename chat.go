@@ -761,9 +761,22 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 			class += " emoji-only"
 		}
 		id := fmt.Sprintf("m%d", m.ID)
-		content := h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body)))
+		// The meta line floats at the end of the text, on its last line
+		// when there is room.
+		meta := h.Div(h.ID(id+"-meta"), h.Class("msg-meta"),
+			snoozeMarker(v, m),
+			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
+			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
+				g.Text(at.Format("15:04"))))
+		content := g.Group{h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body))), meta}
 		if f, ok := files[m.FileID.Int64]; ok && m.FileID.Valid {
-			content = h.Div(h.ID(id+"-file"), h.Class("msg-file"), fileNode(f))
+			if isMedia(f) {
+				// A picture or a video fills its bubble, and the meta line
+				// sits on top of it.
+				content = g.Group{h.Div(h.ID(id+"-file"), h.Class("msg-file msg-media"), fileNode(f), meta)}
+			} else {
+				content = g.Group{h.Div(h.ID(id+"-file"), h.Class("msg-file"), fileNode(f)), meta}
+			}
 		}
 		var preview g.Node
 		if p, ok := previews[m.ID]; ok {
@@ -778,13 +791,6 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 				h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)), g.Text(row.Username)),
 			}),
 			content,
-			// The meta line floats at the end of the text, on its last
-			// line when there is room.
-			h.Div(h.ID(id+"-meta"), h.Class("msg-meta"),
-				snoozeMarker(v, m),
-				g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
-				h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
-					g.Text(at.Format("15:04")))),
 			preview,
 			a.reactionChips(v, m, reactions[m.ID]),
 			a.messageMenu(v, m)))

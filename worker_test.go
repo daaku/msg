@@ -173,6 +173,10 @@ func TestImageConversion(t *testing.T) {
 		`/c" width="3840" height="2560" alt="big.jpg" loading="lazy" decoding="async">`)
 	ensure.StringContains(t, page, `<a class="media" href="/f/`+idStr(id)+`/c" target="_blank" rel="noopener">`)
 	ensure.False(t, strings.Contains(page, "Processing…"))
+	// the bubble is the picture, with the time on top of it
+	ensure.StringContains(t, page, `-file" class="msg-file msg-media"><a class="media"`)
+	ensure.StringContains(t, page, `decoding="async"></a><div id="m`)
+	ensure.StringContains(t, page, `-meta" class="msg-meta"><time id="m`)
 
 	// the converted variant redirects and counts its own size
 	before, _ := ta.stats(alice.ID, chat.ID)

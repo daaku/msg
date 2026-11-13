@@ -117,6 +117,8 @@ func TestVideoConversionH264(t *testing.T) {
 	page := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
 	ensure.StringContains(t, page, `<video id="f`+idStr(id)+`" class="media" controls playsinline preload="none"`+
 		` poster="/f/`+idStr(id)+`/p" width="1920" height="1080" src="/f/`+idStr(id)+`/c"></video>`)
+	ensure.StringContains(t, page, `-file" class="msg-file msg-media"><video id="f`+idStr(id)+`"`)
+	ensure.StringContains(t, page, `/c"></video><div id="m`)
 	ensure.StringContains(t, ta.get(pHome, ta.as(alice)).Body.String(), "alice: 🎬 Video")
 
 	// poster and converted redirects count their own sizes
