@@ -1359,6 +1359,7 @@ func TestProfilePictureShown(t *testing.T) {
 	ensure.StringContains(t, page, fmt.Sprintf(`id="chat-%d" class="chat-item dm"`, dm.ID)+
 		` href="`+chatPath(dm.ID)+`" aria-current="page">`+img(""))
 	ensure.StringDoesNotContain(t, page, "msg-avatar")
+	ensure.StringDoesNotContain(t, page, "msg-who") // nor the name: there is only one other person
 	// bob sees alice there, who has no picture
 	page = ta.get(chatPath(dm.ID), ta.as(bob)).Body.String()
 	ensure.StringContains(t, page, initial(alice, " avatar-s"))

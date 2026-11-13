@@ -770,11 +770,13 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 			preview = previewNode(id, p)
 		}
 		nodes = append(nodes, h.Article(h.ID(id), h.Class(class),
-			// In a group the picture sits beside the first bubble of a run;
-			// a direct message shows it in the header instead.
-			g.If(first && !mine && !v.Chat.IsDm, avatar(m.UserID, row.Username, row.Avatar, "avatar-s msg-avatar")),
-			g.If(first && !mine, h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)),
-				g.Text(row.Username))),
+			// In a group the first bubble of a run names its author, with
+			// their picture beside it. A direct message has only one other
+			// person, who is named in the header.
+			g.If(first && !mine && !v.Chat.IsDm, g.Group{
+				avatar(m.UserID, row.Username, row.Avatar, "avatar-s msg-avatar"),
+				h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)), g.Text(row.Username)),
+			}),
 			content,
 			// The meta line floats at the end of the text, on its last
 			// line when there is room.
