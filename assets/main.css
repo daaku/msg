@@ -60,11 +60,13 @@ video {
   --space-3xl: clamp(6rem, 5.6932rem + 1.3636vw, 6.75rem);
 }
 
-/* tokens: ink blue for actions, marigold for what is yours */
+/* tokens: ink blue for actions, marigold marks where you are, and your own
+   bubbles are green on a warm conversation background */
 :root {
   color-scheme: light dark;
 
   --color-bg: #eceef2;
+  --color-chat-bg: #f5f1eb;
   --color-surface: #ffffff;
   --color-surface-2: #f1f3f6;
   --color-surface-3: #e3e6ec;
@@ -75,8 +77,8 @@ video {
   --color-accent: #27408b;
   --color-on-accent: #ffffff;
   --color-mark: #f2b632;
-  --color-mine: #ffe9a6;
-  --color-on-mine: #2a2204;
+  --color-mine: #d9fdd3;
+  --color-on-mine: #111b21;
   --color-theirs: #ffffff;
   --color-danger: #b3261e;
   --color-success: #1e7b4b;
@@ -95,6 +97,7 @@ video {
 @media (prefers-color-scheme: dark) {
   :root {
     --color-bg: #0f131b;
+    --color-chat-bg: #0f131b;
     --color-surface: #171c27;
     --color-surface-2: #1f2633;
     --color-surface-3: #2a3242;
@@ -104,8 +107,8 @@ video {
 
     --color-accent: #f2b632;
     --color-on-accent: #1b1503;
-    --color-mine: #54430f;
-    --color-on-mine: #fff3cf;
+    --color-mine: #144d37;
+    --color-on-mine: #e7f8ec;
     --color-theirs: #1f2633;
     --color-danger: #f2897f;
     --color-success: #6bcb94;
@@ -921,6 +924,7 @@ body.chat {
 .scroll {
   flex: 1;
   min-height: 0;
+  background-color: var(--color-chat-bg);
   display: flex;
   flex-direction: column-reverse;
   overflow-y: auto;
