@@ -476,6 +476,189 @@ func mediaBox(w, h int64) (int64, int64) {
 	return bw, bh
 }
 
+// albums
+
+const (
+	// albumMin is how many pictures and videos in a row make an album.
+	albumMin = 4
+	// albumGap is the longest pause between two messages of one album.
+	albumGap = 30 * time.Minute
+	// albumShown is how many of an album's items the chat shows.
+	albumShown = 4
+)
+
+// mediaFollows reports whether rows[k] continues a run of pictures and
+// videos from rows[k-1]: it is a converted picture or video by the same
+// person, sent at most albumGap later.
+func mediaFollows(rows []MessagesLatestRow, files map[int64]File, k int) bool {
+	if k < 1 || k >= len(rows) {
+		return false
+	}
+	prev, m := rows[k-1].Message, rows[k].Message
+	return m.FileID.Valid && isMedia(files[m.FileID.Int64]) && m.UserID == prev.UserID &&
+		m.CreatedAt-prev.CreatedAt <= int64(albumGap/time.Second)
+}
+
+// mediaPath is the page that shows the pictures and videos of the messages
+// from..to of a chat, opened at the message at.
+func mediaPath(chatID, from, to, at int64) string {
+	return fmt.Sprintf("%s/media/%d/%d?at=%d", chatPath(chatID), from, to, at)
+}
+
+// mediaThumb is the small picture of a picture or a video: the converted
+// picture itself, or the poster of a video. There is no smaller variant.
+func mediaThumb(f File, size int) g.Node {
+	variant := "c"
+	if f.Kind == kindVideo {
+		variant = "p"
+	}
+	px := strconv.Itoa(size)
+	return h.Img(h.Src(filePath(f.ID, variant)), h.Alt(f.Name),
+		h.Width(px), h.Height(px), h.Loading("lazy"), g.Attr("decoding", "async"))
+}
+
+// albumNode is the content of an album bubble: a grid of the first few
+// pictures and videos of the run, each a link to the media page.
+func albumNode(v chatView, run []MessagesLatestRow, files map[int64]File, loc *time.Location) g.Node {
+	first, last := run[0].Message, run[len(run)-1].Message
+	id := fmt.Sprintf("m%d", first.ID)
+	// The bubble carries the id of its first message. The others get an
+	// anchor, so that #m{id} leads here for every message of the album.
+	var anchors, cells g.Group
+	for _, row := range run[1:] {
+		anchors = append(anchors, h.Span(h.ID(fmt.Sprintf("m%d", row.Message.ID))))
+	}
+	for k, row := range run[:min(albumShown, len(run))] {
+		m := row.Message
+		f := files[m.FileID.Int64]
+		more := k == albumShown-1 && len(run) > albumShown
+		cells = append(cells, h.A(h.ID(fmt.Sprintf("%s-c%d", id, m.ID)), h.Class("album-cell"),
+			h.Href(mediaPath(v.Chat.ID, first.ID, last.ID, m.ID)),
+			mediaThumb(f, 176),
+			// the count of the rest covers the last cell, in place of a play badge
+			g.If(more, h.Span(h.Class("album-more"), g.Textf("+%d", len(run)-albumShown))),
+			g.If(f.Kind == kindVideo && !more, h.Span(h.Class("album-play"), icon("play")))))
+	}
+	at := time.Unix(last.CreatedAt, 0).In(loc)
+	return g.Group{anchors,
+		h.Div(h.ID(id+"-album"), h.Class("msg-media album"), cells,
+			h.Div(h.ID(id+"-meta"), h.Class("msg-meta"),
+				h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
+					g.Text(at.Format("15:04")))))}
+}
+
+// chatMedia shows the pictures and videos of the messages {from}..{to} of a
+// chat, one at a time, with the others in a strip below. The range must be
+// a run of pictures and videos as mediaFollows defines it: anything else in
+// it, and the page is not found. ?at names the message shown.
+func (a *app) chatMedia(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	v, err := a.chatView(r)
+	if err != nil {
+		return err
+	}
+	from, err1 := strconv.ParseInt(r.PathValue("from"), 10, 64)
+	to, err2 := strconv.ParseInt(r.PathValue("to"), 10, 64)
+	if err1 != nil || err2 != nil || from < 1 || to < from {
+		return errNotFound
+	}
+	// one more than a chat page can hold, to notice a longer range
+	found, err := a.q.MessagesRange(ctx, MessagesRangeParams{ChatID: v.Chat.ID, FromID: from, ToID: to, N: maxPage + 1})
+	if err != nil {
+		return serr.Wrap(err)
+	}
+	if len(found) == 0 || len(found) > maxPage {
+		return errNotFound
+	}
+	rows := make([]MessagesLatestRow, len(found))
+	for i, row := range found {
+		rows[i] = MessagesLatestRow(row)
+	}
+	files, err := a.filesFor(ctx, rows)
+	if err != nil {
+		return err
+	}
+	if m := rows[0].Message; !m.FileID.Valid || !isMedia(files[m.FileID.Int64]) {
+		return errNotFound
+	}
+	for k := 1; k < len(rows); k++ {
+		if !mediaFollows(rows, files, k) {
+			return errNotFound
+		}
+	}
+
+	cur := 0
+	if at, err := strconv.ParseInt(r.URL.Query().Get("at"), 10, 64); err == nil {
+		for i, row := range rows {
+			if row.Message.ID == at {
+				cur = i
+			}
+		}
+	}
+	row := rows[cur]
+	m := row.Message
+	f := files[m.FileID.Int64]
+	loc := viewerLoc(r)
+	reactions, err := a.reactionsFor(ctx, v.User.ID, rows[cur:cur+1])
+	if err != nil {
+		return err
+	}
+	if v.Snoozes, err = a.snoozesFor(ctx, v.User.ID, rows[cur:cur+1], loc); err != nil {
+		return err
+	}
+	first, last := rows[0].Message.ID, rows[len(rows)-1].Message.ID
+	link := func(i int) g.Node { return h.Href(mediaPath(v.Chat.ID, first, last, rows[i].Message.ID)) }
+
+	// The shown item is the only one in the page at full size, and every
+	// picture is lazy, so the browser fetches what is on screen and no more.
+	var item g.Node
+	itemID := h.ID(fmt.Sprintf("media-%d", m.ID))
+	if f.Kind == kindVideo {
+		item = h.Video(itemID, h.Class("gallery-item"), h.Controls(), h.PlaysInline(), h.Preload("none"),
+			h.Poster(filePath(f.ID, "p")), h.Src(filePath(f.ID, "c")))
+	} else {
+		item = h.Img(itemID, h.Class("gallery-item"), h.Src(filePath(f.ID, "c")), h.Alt(f.Name),
+			h.Width(strconv.FormatInt(f.Width, 10)), h.Height(strconv.FormatInt(f.Height, 10)),
+			h.Loading("lazy"), g.Attr("decoding", "async"))
+	}
+	// Always rendered, hidden at either end, so the stage keeps its shape.
+	step := func(id, label, iconName string, i int) g.Node {
+		if i < 0 || i >= len(rows) {
+			return h.A(h.ID(id), h.Class("gallery-step "+iconName), h.Hidden(""))
+		}
+		return h.A(h.ID(id), h.Class("gallery-step "+iconName), link(i), g.Attr("data-morph"),
+			h.Aria("label", label), h.Title(label), icon(iconName))
+	}
+	var thumbs g.Group
+	for i, tr := range rows {
+		tf := files[tr.Message.FileID.Int64]
+		thumbs = append(thumbs, h.A(h.ID(fmt.Sprintf("thumb-%d", tr.Message.ID)), h.Class("gallery-thumb"),
+			link(i), g.Attr("data-morph"),
+			g.If(i == cur, h.Aria("current", "true")),
+			mediaThumb(tf, 64),
+			g.If(tf.Kind == kindVideo, h.Span(h.Class("album-play"), icon("play")))))
+	}
+	at := time.Unix(m.CreatedAt, 0)
+	return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("gallery"), h.Class("gallery"),
+		// The chat's own header, with the back link always shown. ?m= shows
+		// enough of the chat to hold the album and jumps to it.
+		h.Header(h.ID("gallery-head"), h.Class("pane-head gallery-head"),
+			h.A(h.Class("back"), h.Href(fmt.Sprintf("%s?m=%d", chatPath(v.Chat.ID), first)),
+				h.Aria("label", "Back to "+v.Title), icon("back")),
+			h.Span(h.Class("pane-title"), g.Text(v.Title)),
+			h.Span(h.ID("gallery-count"), h.Class("muted"), g.Textf("%d of %d", cur+1, len(rows)))),
+		h.Div(h.ID("gallery-stage"), h.Class("gallery-stage"),
+			item,
+			step("gallery-prev", "Previous", "left", cur-1),
+			step("gallery-next", "Next", "right", cur+1)),
+		h.Div(h.ID("gallery-bar"), h.Class("gallery-bar"),
+			h.Span(h.ID("gallery-caption"), h.Class("muted"),
+				g.Text(row.Username+" · "), h.Time(h.DateTime(at.UTC().Format(time.RFC3339)), g.Text(fmtTime(at, loc)))),
+			a.reactionChips(v, m, reactions[m.ID]),
+			a.messageMenu(v, m)),
+		h.Nav(h.ID("gallery-strip"), h.Class("gallery-strip"), h.Aria("label", "All pictures and videos"), thumbs)))
+}
+
 func fileNode(f File) g.Node {
 	converts := f.Kind == kindImage || f.Kind == kindVideo
 	bw, bh := mediaBox(f.Width, f.Height)

@@ -317,6 +317,9 @@ event handler attributes (the CSP forbids them).
 9. Select all on focus for copyable link fields.
 10. The crop dialog for profile pictures and group icons: drawing the chosen image on a canvas,
     moving and resizing the square selection, and posting the cropped JPEG.
+11. Dropping a `#m{id}` fragment from a chat's URL with `history.replaceState`
+    once the reader scrolls away from it or sends a message.
+12. On the media page, scrolling the thumbnail strip to the shown item.
 
 `assets/sw.js` handles `push` and `notificationclick` only. It does no
 caching and has no `fetch` handler.

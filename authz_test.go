@@ -224,8 +224,12 @@ func TestAuthorisationMatrix(t *testing.T) {
 		"POST /new": {allowed: roles(rCreator, rGroup, rAdmin), req: m.post(pNew, "name", "Another")},
 
 		// the group
-		"GET /c/{id}":       {allowed: viewers, req: m.get(g)},
-		"GET /c/{id}/info":  {allowed: viewers, req: m.get(g + "/info")},
+		"GET /c/{id}":      {allowed: viewers, req: m.get(g)},
+		"GET /c/{id}/info": {allowed: viewers, req: m.get(g + "/info")},
+		"GET /c/{id}/media/{from}/{to}": {allowed: viewers, req: func(role) *http.Request {
+			a, b := ta.mediaMessage(member, m.g, kindImage), ta.mediaMessage(member, m.g, kindVideo)
+			return m.form(http.MethodGet, mediaPath(m.g.ID, a.ID, b.ID, b.ID))
+		}},
 		"POST /c/{id}/send": {allowed: members, req: m.post(g+"/send", "body", "hi")},
 		"POST /c/{id}/react": {allowed: members, req: func(role) *http.Request {
 			return m.form(http.MethodPost, g+"/react", "message", idStr(m.message().ID), "emoji", "👍")
@@ -423,6 +427,10 @@ func TestAuthorisationMatrix(t *testing.T) {
 	dmRows := map[string]matrixRow{
 		"GET page": {allowed: dmOnly, req: m.get(dm)},
 		"GET info": {allowed: dmOnly, req: m.get(dm + "/info")},
+		"GET media": {allowed: dmOnly, req: func(role) *http.Request {
+			a := ta.mediaMessage(member, m.dm, kindImage)
+			return m.form(http.MethodGet, mediaPath(m.dm.ID, a.ID, a.ID, a.ID))
+		}},
 		"GET events": {allowed: dmOnly, req: func(role) *http.Request {
 			c, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
 			t.Cleanup(cancel)

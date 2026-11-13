@@ -451,3 +451,10 @@ WHERE chats.id = @chat_id AND chats.icon = @icon;
 
 -- name: ChatSetIcon :exec
 UPDATE chats SET icon = @icon WHERE id = @id;
+
+-- name: MessagesRange :many
+SELECT sqlc.embed(messages), users.username, users.avatar
+FROM messages JOIN users ON users.id = messages.user_id
+WHERE messages.chat_id = @chat_id AND messages.id >= @from_id AND messages.id <= @to_id
+ORDER BY messages.id
+LIMIT @n;

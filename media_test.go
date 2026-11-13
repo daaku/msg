@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/png"
 	"net/http"
@@ -601,4 +602,256 @@ func TestMediaBox(t *testing.T) {
 		w, h := mediaBox(c[0], c[1])
 		ensure.DeepEqual(t, []int64{w, h}, []int64{c[2], c[3]}, c)
 	}
+}
+
+// albums and the media page
+
+// mediaMessage is a message with a converted picture or video, made without
+// running the converters.
+func (ta *testApp) mediaMessage(user *testUser, chat Chat, kind string) Message {
+	ta.t.Helper()
+	t := ta.t
+	file := ta.upload(user, chat, "p.bin", []byte("x"))
+	_, err := ta.app.db.ExecContext(t.Context(), `UPDATE files SET kind = ?, status = 'ready', name = 'p.jpg',
+		conv_type = 'image/webp', conv_size = 1, poster_type = 'image/webp', poster_size = 1,
+		width = 800, height = 600 WHERE id = ?`, kind, file)
+	ensure.Nil(t, err)
+	var id int64
+	ensure.Nil(t, ta.app.db.QueryRowContext(t.Context(), "SELECT id FROM messages WHERE file_id = ?", file).Scan(&id))
+	m, err := ta.app.q.MessageByID(t.Context(), id)
+	ensure.Nil(t, err)
+	return m
+}
+
+// sentAt moves a message in time, in minutes after the test clock.
+func (ta *testApp) sentAt(m Message, minutes int64) {
+	ta.t.Helper()
+	_, err := ta.app.db.ExecContext(ta.t.Context(), "UPDATE messages SET created_at = ? WHERE id = ?",
+		testNow.Unix()+minutes*60, m.ID)
+	ensure.Nil(ta.t, err)
+}
+
+func TestAlbum(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	chat := ta.newChat(alice, "Team", bob)
+	page := func() string { return ta.get(chatPath(chat.ID), ta.as(alice)).Body.String() }
+	cell := func(first, last, m Message) string {
+		return fmt.Sprintf(`<a id="m%d-c%d" class="album-cell" href="%s/media/%d/%d?at=%d">`,
+			first.ID, m.ID, chatPath(chat.ID), first.ID, last.ID, m.ID)
+	}
+
+	// three in a row are three bubbles
+	var ms []Message
+	for range 3 {
+		ms = append(ms, ta.mediaMessage(bob, chat, kindImage))
+	}
+	body := page()
+	ensure.StringDoesNotContain(t, body, "album")
+	ensure.DeepEqual(t, strings.Count(body, `class="msg-file msg-media"`), 3)
+
+	// the fourth makes them one album, under the id of the first
+	ms = append(ms, ta.mediaMessage(bob, chat, kindVideo))
+	body = page()
+	ensure.DeepEqual(t, strings.Count(body, `class="msg-file msg-media"`), 0)
+	ensure.StringContains(t, body, fmt.Sprintf(`<article id="m%d" class="msg first msg-album">`, ms[0].ID))
+	ensure.StringContains(t, body, fmt.Sprintf(`<div id="m%d-album" class="msg-media album">`, ms[0].ID))
+	for _, m := range ms {
+		ensure.StringContains(t, body, cell(ms[0], ms[3], m))
+	}
+	// every other message of it can still be linked to
+	for _, m := range ms[1:] {
+		ensure.StringContains(t, body, fmt.Sprintf(`<span id="m%d"></span>`, m.ID))
+	}
+	// lazy thumbnails of the converted picture, and the poster for a video
+	ensure.DeepEqual(t, strings.Count(body, `width="176" height="176" loading="lazy" decoding="async">`), 4)
+	ensure.StringContains(t, body, fmt.Sprintf(`<img src="/f/%d/c"`, ms[0].FileID.Int64))
+	ensure.StringContains(t, body, fmt.Sprintf(`<img src="/f/%d/p"`, ms[3].FileID.Int64))
+	ensure.DeepEqual(t, strings.Count(body, `class="album-play"`), 1)
+	ensure.StringDoesNotContain(t, body, "album-more")
+	// one time for the album, and no per message menu
+	ensure.StringContains(t, body, fmt.Sprintf(`<div id="m%d-meta" class="msg-meta"><time id="m%d-time"`, ms[0].ID, ms[0].ID))
+	ensure.StringDoesNotContain(t, body, fmt.Sprintf(`id="m%d-more"`, ms[0].ID))
+
+	// more than four: four cells, the last one counts the rest
+	ms = append(ms, ta.mediaMessage(bob, chat, kindImage), ta.mediaMessage(bob, chat, kindImage))
+	body = page()
+	ensure.DeepEqual(t, strings.Count(body, `class="album-cell"`), 4)
+	ensure.StringContains(t, body, cell(ms[0], ms[5], ms[3]))
+	ensure.StringContains(t, body, `<span class="album-more">+2</span>`)
+	ensure.StringDoesNotContain(t, body, cell(ms[0], ms[5], ms[4]))
+	// the count covers the video in the last cell, without its play badge
+	ensure.StringDoesNotContain(t, body, "album-play")
+
+	// 30 minutes apart still belongs, a minute more does not
+	ta.sentAt(ms[4], 30)
+	ta.sentAt(ms[5], 30)
+	ensure.StringContains(t, page(), `<span class="album-more">+2</span>`)
+	ta.sentAt(ms[4], 31)
+	ta.sentAt(ms[5], 31)
+	body = page()
+	ensure.StringContains(t, body, cell(ms[0], ms[3], ms[3]))
+	ensure.StringDoesNotContain(t, body, "album-more")
+	ensure.DeepEqual(t, strings.Count(body, `class="msg-file msg-media"`), 2)
+
+	// the gap is between neighbours, not from the first
+	for i, m := range ms {
+		ta.sentAt(m, int64(i)*25)
+	}
+	ensure.StringContains(t, page(), cell(ms[0], ms[5], ms[0]))
+
+	// a new day starts a new run, in the viewer's time zone
+	for i, m := range ms {
+		ta.sentAt(m, 20*60+int64(i)*20) // 23:04 UTC onwards: three before midnight, three after
+	}
+	body = page()
+	ensure.StringDoesNotContain(t, body, "album")
+	ensure.DeepEqual(t, strings.Count(body, `class="msg-file msg-media"`), 6)
+	for _, m := range ms {
+		ta.sentAt(m, 0)
+	}
+
+	// something else in between splits the run
+	ta.newMessage(chat, bob, "look at these")
+	more := []Message{ta.mediaMessage(bob, chat, kindImage), ta.mediaMessage(bob, chat, kindImage), ta.mediaMessage(bob, chat, kindImage)}
+	body = page()
+	ensure.StringContains(t, body, cell(ms[0], ms[5], ms[0]))
+	ensure.DeepEqual(t, strings.Count(body, `class="msg-file msg-media"`), 3)
+	// and so does another sender
+	mine := ta.mediaMessage(alice, chat, kindImage)
+	body = page()
+	ensure.DeepEqual(t, strings.Count(body, `class="msg-file msg-media"`), 4)
+	ensure.StringContains(t, body, fmt.Sprintf(`<article id="m%d" class="msg mine first">`, mine.ID))
+	_ = more
+
+	// a picture that is not converted yet is not part of a run
+	_, err := ta.app.db.ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", ms[2].FileID.Int64)
+	ensure.Nil(t, err)
+	body = page()
+	ensure.StringDoesNotContain(t, body, "album")
+}
+
+func TestChatMediaPage(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	admin := ta.newUser("boss", "admin")
+	chat := ta.newChat(alice, "Team", bob)
+	other := ta.newChat(alice, "Other", bob)
+	base := chatPath(chat.ID)
+	text := ta.newMessage(chat, bob, "before")
+	var ms []Message
+	for i := range 6 {
+		kind := kindImage
+		if i == 2 {
+			kind = kindVideo
+		}
+		ms = append(ms, ta.mediaMessage(bob, chat, kind))
+	}
+	first, last := ms[0], ms[5]
+	path := func(from, to, at int64) string { return mediaPath(chat.ID, from, to, at) }
+	link := func(m Message) string {
+		return fmt.Sprintf(`href="%s/media/%d/%d?at=%d"`, base, first.ID, last.ID, m.ID)
+	}
+
+	w := ta.get(path(first.ID, last.ID, first.ID), ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusOK)
+	body := w.Body.String()
+	// the first item, as the only one at full size, and lazy
+	ensure.DeepEqual(t, strings.Count(body, `class="gallery-item"`), 1)
+	ensure.StringContains(t, body, fmt.Sprintf(`<img id="media-%d" class="gallery-item" src="/f/%d/c" alt="p.jpg" width="800" height="600" loading="lazy" decoding="async">`,
+		first.ID, first.FileID.Int64))
+	ensure.StringContains(t, body, `<span id="gallery-count" class="muted">1 of 6</span>`)
+	// no step back from the first, a step on to the second
+	ensure.StringContains(t, body, `<a id="gallery-prev" class="gallery-step left" hidden=""></a>`)
+	ensure.StringContains(t, body, `<a id="gallery-next" class="gallery-step right" `+link(ms[1])+` data-morph`)
+	// the strip: every item, lazy, the shown one marked
+	for i, m := range ms {
+		variant := "c"
+		if i == 2 {
+			variant = "p"
+		}
+		current := ""
+		if i == 0 {
+			current = ` aria-current="true"`
+		}
+		ensure.StringContains(t, body, fmt.Sprintf(`<a id="thumb-%d" class="gallery-thumb" %s data-morph%s><img src="/f/%d/%s" alt="p.jpg" width="64" height="64" loading="lazy" decoding="async">`,
+			m.ID, link(m), current, m.FileID.Int64, variant))
+	}
+	ensure.DeepEqual(t, strings.Count(body, `loading="lazy"`), 7)
+	// back to the chat at the album
+	ensure.StringContains(t, body, fmt.Sprintf(`<a class="back" href="%s?m=%d" aria-label="Back to Team">`, base, first.ID))
+	w = ta.get(fmt.Sprintf("%s?m=%d", base, first.ID), ta.as(alice))
+	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
+	ensure.StringContains(t, w.Header().Get("Location"), fmt.Sprintf("#m%d", first.ID))
+	// the message can still be acted on from here
+	ensure.StringContains(t, body, fmt.Sprintf(`id="m%d-menu"`, first.ID))
+	ensure.StringDoesNotContain(t, body, fmt.Sprintf(`action="%s/delete"`, messagePath(chat.ID, first.ID)))
+	ensure.StringContains(t, ta.get(path(first.ID, last.ID, first.ID), ta.as(bob)).Body.String(),
+		fmt.Sprintf(`action="%s/delete"`, messagePath(chat.ID, first.ID)))
+
+	// a video in the middle: nothing loads until it is played
+	body = ta.get(path(first.ID, last.ID, ms[2].ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, fmt.Sprintf(`<video id="media-%d" class="gallery-item" controls playsinline preload="none" poster="/f/%d/p" src="/f/%d/c"></video>`,
+		ms[2].ID, ms[2].FileID.Int64, ms[2].FileID.Int64))
+	ensure.StringContains(t, body, `>3 of 6<`)
+	ensure.StringContains(t, body, `<a id="gallery-prev" class="gallery-step left" `+link(ms[1])+` data-morph`)
+	ensure.StringContains(t, body, `<a id="gallery-next" class="gallery-step right" `+link(ms[3])+` data-morph`)
+	ensure.StringContains(t, body, fmt.Sprintf(`<a id="thumb-%d" class="gallery-thumb" %s data-morph aria-current="true">`, ms[2].ID, link(ms[2])))
+	ensure.DeepEqual(t, strings.Count(body, `aria-current="true"`), 1)
+
+	// the last one has no step on; an unknown ?at shows the first
+	body = ta.get(path(first.ID, last.ID, last.ID), ta.as(alice)).Body.String()
+	ensure.StringContains(t, body, `<a id="gallery-next" class="gallery-step right" hidden=""></a>`)
+	for _, q := range []string{"", "?at=x", "?at=999", fmt.Sprintf("?at=%d", text.ID)} {
+		body = ta.get(fmt.Sprintf("%s/media/%d/%d%s", base, first.ID, last.ID, q), ta.as(alice)).Body.String()
+		ensure.StringContains(t, body, `>1 of 6<`, q)
+	}
+
+	// a part of the run, and a single item, are runs too
+	ensure.StringContains(t, ta.get(path(ms[1].ID, ms[3].ID, ms[2].ID), ta.as(alice)).Body.String(), `>2 of 3<`)
+	ensure.StringContains(t, ta.get(path(ms[4].ID, ms[4].ID, ms[4].ID), ta.as(alice)).Body.String(), `>1 of 1<`)
+
+	// who may see it: those who may see the chat
+	ensure.DeepEqual(t, ta.get(path(first.ID, last.ID, first.ID), ta.as(bob)).Code, http.StatusOK)
+	ensure.DeepEqual(t, ta.get(path(first.ID, last.ID, first.ID), ta.as(admin)).Code, http.StatusOK)
+	ensure.DeepEqual(t, ta.get(path(first.ID, last.ID, first.ID), ta.as(carol)).Code, http.StatusNotFound)
+	ensure.DeepEqual(t, ta.get(path(first.ID, last.ID, first.ID)).Header().Get("Location"), pSignIn)
+
+	// ranges that are not a run of pictures and videos are not found
+	notFound := func(name, p string) {
+		t.Helper()
+		ensure.DeepEqual(t, ta.get(p, ta.as(alice)).Code, http.StatusNotFound, name)
+	}
+	notFound("text in the range", path(text.ID, last.ID, first.ID))
+	notFound("backwards", path(last.ID, first.ID, first.ID))
+	notFound("nothing there", path(last.ID+50, last.ID+60, 0))
+	notFound("zero", path(0, last.ID, first.ID))
+	notFound("not a number", base+"/media/x/"+idStr(last.ID))
+	notFound("negative", base+"/media/-1/"+idStr(last.ID))
+	notFound("another chat", mediaPath(other.ID, first.ID, last.ID, first.ID))
+
+	after := ta.newMessage(chat, bob, "after")
+	notFound("text at the end", path(first.ID, after.ID, first.ID))
+	late := ta.mediaMessage(bob, chat, kindImage)
+	notFound("text in the middle", path(first.ID, late.ID, first.ID))
+	hers := ta.mediaMessage(alice, chat, kindImage)
+	notFound("two senders", path(late.ID, hers.ID, late.ID))
+
+	ta.sentAt(ms[4], 31)
+	ta.sentAt(ms[5], 31)
+	notFound("more than 30 minutes apart", path(first.ID, last.ID, first.ID))
+	ensure.DeepEqual(t, ta.get(path(first.ID, ms[3].ID, first.ID), ta.as(alice)).Code, http.StatusOK)
+	ensure.DeepEqual(t, ta.get(path(ms[4].ID, last.ID, last.ID), ta.as(alice)).Code, http.StatusOK)
+
+	_, err := ta.app.db.ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", ms[1].FileID.Int64)
+	ensure.Nil(t, err)
+	notFound("not converted yet", path(first.ID, ms[3].ID, first.ID))
+	notFound("starts with one not converted", path(ms[1].ID, ms[3].ID, ms[1].ID))
+
+	// a deleted message leaves a run of the rest
+	ensure.DeepEqual(t, ta.post(messagePath(chat.ID, ms[1].ID)+"/delete", nil, ta.as(bob)).Code, http.StatusSeeOther)
+	ensure.StringContains(t, ta.get(path(first.ID, ms[3].ID, ms[1].ID), ta.as(alice)).Body.String(), `>1 of 3<`)
 }

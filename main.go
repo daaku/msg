@@ -719,6 +719,7 @@ func (a *app) handler() http.Handler {
 	handle("POST "+pNew, a.wrap(accGroup, a.newGroupPost))
 	handle("GET "+pChat+"{id}", a.wrap(accUser, a.chat))
 	handle("GET "+pChat+"{id}/info", a.wrap(accUser, a.chatInfo))
+	handle("GET "+pChat+"{id}/media/{from}/{to}", a.wrap(accUser, a.chatMedia))
 	handle("POST "+pChat+"{id}/send", a.wrap(accUser, a.chatSend))
 	handle("POST "+pChat+"{id}/react", a.wrap(accUser, a.chatReact))
 	handle("POST "+pChat+"{id}/archive", a.wrap(accUser, a.chatArchive))

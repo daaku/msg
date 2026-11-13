@@ -1769,3 +1769,180 @@ label.btn {
     cursor: nwse-resize;
   }
 }
+
+/* An album: a run of pictures and videos as one bubble, a grid of the first
+   few, each a link to the media page. */
+.msg-album {
+  padding: 0.25rem;
+
+  > .msg-who {
+    margin-inline: 0.5rem;
+  }
+}
+
+.album {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  width: 22rem;
+  border-radius: calc(var(--radius-l) - 0.25rem);
+  overflow: hidden;
+}
+
+.album-cell {
+  position: relative;
+  display: block;
+  aspect-ratio: 1;
+  background-color: var(--color-surface-3);
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+}
+
+.album-play,
+.album-more {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background-color: rgb(0 0 0 / 0.55);
+  color: #ffffff;
+  pointer-events: none;
+}
+
+.album-play {
+  margin: auto;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+}
+
+.album-more {
+  font-size: var(--step-3);
+  font-weight: 700;
+}
+
+/* The media page: one picture or video of an album at a time, steps to
+   either side, and a strip of all of them below. */
+.gallery {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--color-surface);
+}
+
+.gallery-head #gallery-count {
+  flex: none;
+  margin-inline-start: auto;
+  font-size: var(--step--1);
+}
+
+.gallery-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background-color: #0b0d12;
+}
+
+.gallery-item {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: contain;
+}
+
+.gallery-step {
+  position: absolute;
+  inset-block-start: 50%;
+  translate: 0 -50%;
+  display: grid;
+  place-items: center;
+  width: var(--touch);
+  height: var(--touch);
+  border-radius: 50%;
+  background-color: rgb(0 0 0 / 0.55);
+  color: #ffffff;
+
+  &.left {
+    left: var(--space-2xs);
+  }
+
+  &.right {
+    right: var(--space-2xs);
+  }
+
+  &:hover {
+    background-color: rgb(0 0 0 / 0.75);
+  }
+}
+
+.gallery-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-height: var(--touch);
+  padding: var(--space-3xs) var(--space-s);
+
+  .reactions {
+    margin: 0;
+  }
+
+  .msg-more {
+    position: static;
+    translate: none;
+    margin-inline: auto 0;
+    opacity: 1;
+  }
+}
+
+.gallery-strip {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  padding: var(--space-3xs) var(--space-2xs);
+  padding-bottom: calc(var(--space-2xs) + env(safe-area-inset-bottom));
+  scrollbar-width: thin;
+}
+
+.gallery-thumb {
+  position: relative;
+  flex: none;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: var(--radius-s);
+  overflow: hidden;
+  background-color: var(--color-surface-3);
+  opacity: 0.55;
+
+  img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .album-play {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+
+  &:hover {
+    opacity: 0.85;
+  }
+
+  &[aria-current] {
+    opacity: 1;
+    outline: 2px solid var(--color-accent);
+    outline-offset: -2px;
+  }
+
+  &:focus-visible {
+    outline-offset: -2px;
+  }
+}

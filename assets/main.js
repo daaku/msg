@@ -162,6 +162,7 @@ async function refresh() {
     morph(document.getElementById('app'), next.outerHTML)
     document.title = doc.title
     showUploadError()
+    showCurrentThumb()
   } catch (err) {
     console.error(err) // offline: the next ping retries
   } finally {
@@ -171,6 +172,45 @@ async function refresh() {
       refresh()
     }
   }
+}
+
+// The media page: bring the thumbnail of the shown item into the middle of
+// the strip, once each time another item is shown.
+let shownThumb = ''
+function showCurrentThumb() {
+  const thumb = document.querySelector('.gallery-thumb[aria-current]')
+  if (!thumb || thumb.id === shownThumb) return
+  shownThumb = thumb.id
+  const strip = thumb.parentElement
+  strip.scrollLeft = thumb.offsetLeft - (strip.clientWidth - thumb.offsetWidth) / 2
+}
+showCurrentThumb()
+
+// A chat opened at a message (#m123) forgets that once the reader scrolls
+// away or sends something: the fragment is dropped from the URL in place,
+// with no history entry and no reload, so a later reload does not jump back.
+{
+  const dropHash = () => {
+    if (location.hash) history.replaceState(history.state, '', location.pathname + location.search)
+  }
+  let base = null // where the browser's own jump to the fragment left #scroll
+  addEventListener('load', () =>
+    requestAnimationFrame(() => {
+      base = document.getElementById('scroll')?.scrollTop ?? null
+    }),
+  )
+  // scroll does not bubble, so it is caught on the way down
+  document.addEventListener(
+    'scroll',
+    ev => {
+      if (ev.target.id !== 'scroll' || base === null || !location.hash) return
+      if (Math.abs(ev.target.scrollTop - base) > 32) dropHash()
+    },
+    { capture: true, passive: true },
+  )
+  document.addEventListener('submit', ev => {
+    if (ev.target.id === 'composer') dropHash()
+  })
 }
 
 // The event stream only says "something changed". It is closed while the

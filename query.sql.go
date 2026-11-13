@@ -1650,6 +1650,65 @@ func (q *Queries) MessagesLatest(ctx context.Context, arg MessagesLatestParams) 
 	return items, nil
 }
 
+const messagesRange = `-- name: MessagesRange :many
+SELECT messages.id, messages.chat_id, messages.user_id, messages.body, messages.file_id, messages.created_at, messages.edited_at, users.username, users.avatar
+FROM messages JOIN users ON users.id = messages.user_id
+WHERE messages.chat_id = ?1 AND messages.id >= ?2 AND messages.id <= ?3
+ORDER BY messages.id
+LIMIT ?4
+`
+
+type MessagesRangeParams struct {
+	ChatID int64
+	FromID int64
+	ToID   int64
+	N      int64
+}
+
+type MessagesRangeRow struct {
+	Message  Message
+	Username string
+	Avatar   string
+}
+
+func (q *Queries) MessagesRange(ctx context.Context, arg MessagesRangeParams) ([]MessagesRangeRow, error) {
+	rows, err := q.db.QueryContext(ctx, messagesRange,
+		arg.ChatID,
+		arg.FromID,
+		arg.ToID,
+		arg.N,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MessagesRangeRow
+	for rows.Next() {
+		var i MessagesRangeRow
+		if err := rows.Scan(
+			&i.Message.ID,
+			&i.Message.ChatID,
+			&i.Message.UserID,
+			&i.Message.Body,
+			&i.Message.FileID,
+			&i.Message.CreatedAt,
+			&i.Message.EditedAt,
+			&i.Username,
+			&i.Avatar,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const previewByMessage = `-- name: PreviewByMessage :one
 SELECT message_id, url, status, title, description, site_name, file_id, created_at FROM previews WHERE message_id = ?
 `

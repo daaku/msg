@@ -734,15 +734,17 @@ func viewerLoc(r *http.Request) *time.Location {
 }
 
 // messageNodes renders messages, oldest first, with a separator before the
-// first message of each day.
+// first message of each day. A run of pictures and videos is one album.
 func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[int64][]reactionGroup, files map[int64]File, previews map[int64]PreviewsForMessagesRow, loc *time.Location) g.Node {
 	var nodes g.Group
 	var prevUser int64
 	var prevDay string
-	for _, row := range rows {
+	dayOf := func(m Message) string { return time.Unix(m.CreatedAt, 0).In(loc).Format("2006-01-02") }
+	for i := 0; i < len(rows); i++ {
+		row := rows[i]
 		m := row.Message
 		at := time.Unix(m.CreatedAt, 0).In(loc)
-		day := at.Format("2006-01-02")
+		day := dayOf(m)
 		if day != prevDay {
 			nodes = append(nodes, h.Div(h.ID("day-"+day), h.Class("day"),
 				g.Text(at.Format("2 January 2006"))))
@@ -757,6 +759,27 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 		if first {
 			class += " first"
 		}
+		// In a group the first bubble of a run names its author, with
+		// their picture beside it. A direct message has only one other
+		// person, who is named in the header.
+		who := g.If(first && !mine && !v.Chat.IsDm, g.Group{
+			avatar(m.UserID, row.Username, row.Avatar, "avatar-s msg-avatar"),
+			h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)), g.Text(row.Username)),
+		})
+
+		// An album: the pictures and videos that follow each other on this
+		// day. It stands in for all of their bubbles.
+		n := 1
+		for mediaFollows(rows, files, i+n) && dayOf(rows[i+n].Message) == day {
+			n++
+		}
+		if n >= albumMin && isMedia(files[m.FileID.Int64]) && m.FileID.Valid {
+			nodes = append(nodes, h.Article(h.ID(fmt.Sprintf("m%d", m.ID)), h.Class(class+" msg-album"),
+				who, albumNode(v, rows[i:i+n], files, loc)))
+			i += n - 1
+			continue
+		}
+
 		if !m.FileID.Valid && emojiOnly(m.Body) {
 			class += " emoji-only"
 		}
@@ -783,13 +806,7 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 			preview = previewNode(id, p)
 		}
 		nodes = append(nodes, h.Article(h.ID(id), h.Class(class),
-			// In a group the first bubble of a run names its author, with
-			// their picture beside it. A direct message has only one other
-			// person, who is named in the header.
-			g.If(first && !mine && !v.Chat.IsDm, g.Group{
-				avatar(m.UserID, row.Username, row.Avatar, "avatar-s msg-avatar"),
-				h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)), g.Text(row.Username)),
-			}),
+			who,
 			content,
 			preview,
 			a.reactionChips(v, m, reactions[m.ID]),
