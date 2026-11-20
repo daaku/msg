@@ -3,7 +3,17 @@
 
 addEventListener('install', () => skipWaiting())
 
-addEventListener('activate', ev => ev.waitUntil(clients.claim()))
+// This worker keeps no caches, so any cache found was left by the reverted
+// PWA worker that used to live at this URL. Delete them, and reload the open
+// pages it served, since they are still running the old app.
+addEventListener('activate', ev => ev.waitUntil((async () => {
+  const names = await caches.keys()
+  await Promise.all(names.map(name => caches.delete(name)))
+  await clients.claim()
+  if (names.length === 0) return
+  const windows = await clients.matchAll({ type: 'window' })
+  await Promise.all(windows.map(c => c.navigate(c.url).catch(console.error)))
+})()))
 
 addEventListener('push', ev => {
   let data = {}

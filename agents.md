@@ -322,7 +322,8 @@ event handler attributes (the CSP forbids them).
 12. On the media page, scrolling the thumbnail strip to the shown item.
 
 `assets/sw.js` handles `push` and `notificationclick` only. It does no
-caching and has no `fetch` handler.
+caching and has no `fetch` handler. On activate it deletes any caches left by
+the reverted PWA worker and, if there were any, reloads the open pages.
 
 ## HTML and CSS conventions
 
