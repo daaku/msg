@@ -334,7 +334,9 @@ the reverted PWA worker and, if there were any, reloads the open pages.
   `:root`. Support light and dark with `prefers-color-scheme`.
 - Mobile first. One breakpoint at 48rem switches the two pane layout on.
 - Every `<img>` in a chat has `loading="lazy"`, `decoding="async"`, `width`
-  and `height`.
+  and `height`. The one exception is the pictures in the chat list and the
+  pane header (`avatarNow`, `groupIconNow`): they load at once, so they are
+  in the first frame a page transition captures and do not blink.
 - A chat's name is always rendered through `a.chatTitle`, which gives the
   other person's username for a direct message.
 - Every page other than home has a visible back link, because an installed iOS

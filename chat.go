@@ -377,9 +377,9 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 			c := row.Chat
 			kind, mark := "group", icon("people")
 			if c.IsDm {
-				kind, mark = "dm", avatar(row.OtherID, row.Other, row.OtherAvatar, "")
+				kind, mark = "dm", avatarNow(row.OtherID, row.Other, row.OtherAvatar, "")
 			} else if c.Icon != "" {
-				mark = groupIcon(c, "")
+				mark = groupIconNow(c, "")
 			}
 			var last g.Node
 			if row.LastCreatedAt > 0 {
@@ -395,7 +395,10 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 				g.If(c.ID == activeID, h.Aria("current", "page")),
 				mark,
 				h.Span(h.Class("chat-name"), g.Text(a.chatTitle(c, user, row.Other))),
-				last)
+				last,
+				// The marigold bar is an element of its own so that the page
+				// transition can slide it from the old row to the new one.
+				g.If(c.ID == activeID, h.Span(h.Class("chat-bar"), g.Attr("aria-hidden", "true"))))
 		}), g.If(!archived, archivedLink(archivedCount)))
 	}
 	head := h.Header(h.Class("sidebar-head"),
@@ -441,8 +444,8 @@ func paneHead(v chatView) g.Node {
 	return h.Header(h.ID("pane-head"), h.Class("pane-head"),
 		h.A(h.Class("back narrow-only"), h.Href(pHome), h.Aria("label", "Back"), icon("back")),
 		h.A(h.Class("pane-title"), h.Href(chatPath(v.Chat.ID)+"/info"),
-			g.If(v.Chat.IsDm, avatar(v.Other.UserID, v.Other.Username, v.Other.Avatar, "avatar-s")),
-			g.If(v.Chat.Icon != "", groupIcon(v.Chat, "avatar-s")),
+			g.If(v.Chat.IsDm, avatarNow(v.Other.UserID, v.Other.Username, v.Other.Avatar, "avatar-s")),
+			g.If(v.Chat.Icon != "", groupIconNow(v.Chat, "avatar-s")),
 			h.Span(g.Text(v.Title))),
 		g.If(v.Archived, h.Form(h.ID("pane-archived"), h.Class("pane-archived"), h.Method("post"),
 			h.Action(chatPath(v.Chat.ID)+"/unarchive"),

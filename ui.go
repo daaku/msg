@@ -115,6 +115,18 @@ func avatarPath(userID int64, name string) string {
 // gets their initial on a colour of their own. name is users.avatar, and
 // size is "" or one of the avatar-* classes in main.css.
 func avatar(userID int64, username, name, size string) g.Node {
+	return avatarImg(userID, username, name, size, true)
+}
+
+// avatarNow is avatar for the chat list and the pane header, which are on
+// screen as soon as the page is. Their pictures load right away, so that
+// they are already in the first frame the page transition captures. A lazy
+// picture is missing there and blinks as the transition fades to it.
+func avatarNow(userID int64, username, name, size string) g.Node {
+	return avatarImg(userID, username, name, size, false)
+}
+
+func avatarImg(userID int64, username, name, size string, lazy bool) g.Node {
 	class := "avatar"
 	if size != "" {
 		class += " " + size
@@ -127,11 +139,16 @@ func avatar(userID int64, username, name, size string) g.Node {
 		return h.Span(h.Class(fmt.Sprintf("%s hue-%d", class, userID%12)),
 			g.Attr("aria-hidden", "true"), g.Text(initial))
 	}
-	return pictureImg(class, avatarPath(userID, name))
+	return pictureImg(class, avatarPath(userID, name), lazy)
 }
 
-// pictureImg is the <img> of a profile picture or a group icon.
-func pictureImg(class, src string) g.Node {
+// pictureImg is the <img> of a profile picture or a group icon. One that is
+// not lazy is also decoded with the frame it is first painted in.
+func pictureImg(class, src string, lazy bool) g.Node {
+	if !lazy {
+		return h.Img(h.Class(class), h.Src(src), h.Alt(""),
+			h.Width("64"), h.Height("64"), g.Attr("decoding", "sync"))
+	}
 	return h.Img(h.Class(class), h.Src(src), h.Alt(""),
 		h.Width("64"), h.Height("64"), h.Loading("lazy"), g.Attr("decoding", "async"))
 }
@@ -145,6 +162,16 @@ func chatIconPath(c Chat) string {
 // groupIcon renders a group's icon as a circle, or the people mark when the
 // group has none. size is "" or one of the avatar-* classes.
 func groupIcon(c Chat, size string) g.Node {
+	return groupIconImg(c, size, true)
+}
+
+// groupIconNow is groupIcon for the chat list and the pane header, as
+// avatarNow is for avatar.
+func groupIconNow(c Chat, size string) g.Node {
+	return groupIconImg(c, size, false)
+}
+
+func groupIconImg(c Chat, size string, lazy bool) g.Node {
 	class := "avatar"
 	if size != "" {
 		class += " " + size
@@ -152,7 +179,7 @@ func groupIcon(c Chat, size string) g.Node {
 	if c.Icon == "" {
 		return h.Span(h.Class(class+" group-mark"), g.Attr("aria-hidden", "true"), icon("people"))
 	}
-	return pictureImg(class, chatIconPath(c))
+	return pictureImg(class, chatIconPath(c), lazy)
 }
 
 // picturePicker is the control that chooses, crops and removes a picture:

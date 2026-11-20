@@ -654,6 +654,144 @@ body.chat {
   }
 }
 
+/* page transitions: every page is a full navigation, and the browser
+   animates from the old page to the new one (cross document view
+   transitions). Browsers without them simply load the page.
+   - Wide: the chat list stays put while the marigold bar slides to the
+     new row, the pane header holds still while its title cross fades,
+     and the messages fade in under it.
+   - Narrow: opening a chat pushes it in from the right over the list,
+     and going back slides it away again. The direction needs no script:
+     the list exists only on one side of the transition and the pane
+     only on the other, so each is the only child of its group.
+   Morph refreshes and data-morph links are not navigations and never
+   animate. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition {
+    navigation: auto;
+  }
+}
+
+#sidebar {
+  view-transition-name: sidebar;
+}
+
+#pane {
+  view-transition-name: pane;
+}
+
+.pane-head {
+  view-transition-name: pane-head;
+}
+
+.chat-bar {
+  view-transition-name: chat-bar;
+}
+
+::view-transition-group(*) {
+  animation-duration: 220ms;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* the pane, and its header, are drawn over the list as they slide */
+::view-transition-group(pane),
+::view-transition-group(pane-head) {
+  z-index: 1;
+}
+
+/* The list looks the same on both sides, so it is not cross faded: the
+   old one is shown as it was until the transition ends, which leaves the
+   pictures in it alone. Only the highlight changes, once the bar lands. */
+::view-transition-old(sidebar) {
+  animation: none;
+}
+
+::view-transition-new(sidebar) {
+  animation: 220ms both vt-hidden;
+}
+
+::view-transition-old(pane) {
+  animation: 90ms ease-out both vt-fade-out;
+}
+
+::view-transition-new(pane) {
+  animation:
+    220ms cubic-bezier(0.2, 0, 0, 1) 40ms both vt-fade-in,
+    220ms cubic-bezier(0.2, 0, 0, 1) 40ms both vt-rise;
+}
+
+@media (width < 48rem) {
+  ::view-transition-new(pane):only-child,
+  ::view-transition-new(pane-head):only-child {
+    animation: 280ms cubic-bezier(0.2, 0, 0, 1) both vt-from-end;
+  }
+
+  ::view-transition-old(pane):only-child,
+  ::view-transition-old(pane-head):only-child {
+    animation: 240ms cubic-bezier(0.3, 0, 1, 1) both vt-to-end;
+  }
+
+  ::view-transition-old(sidebar):only-child {
+    animation: 280ms cubic-bezier(0.2, 0, 0, 1) both vt-to-start;
+  }
+
+  ::view-transition-new(sidebar):only-child {
+    animation: 240ms cubic-bezier(0.2, 0, 0, 1) both vt-from-start;
+  }
+}
+
+@keyframes vt-hidden {
+  from,
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes vt-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes vt-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes vt-rise {
+  from {
+    translate: 0 0.5rem;
+  }
+}
+
+@keyframes vt-from-end {
+  from {
+    translate: 100% 0;
+  }
+}
+
+@keyframes vt-to-end {
+  to {
+    translate: 100% 0;
+  }
+}
+
+/* the list moves a little and dims, as if behind the chat */
+@keyframes vt-to-start {
+  to {
+    translate: -25% 0;
+    opacity: 0.6;
+  }
+}
+
+@keyframes vt-from-start {
+  from {
+    translate: -25% 0;
+    opacity: 0.6;
+  }
+}
+
 /* sidebar */
 .sidebar-head {
   position: sticky;
@@ -709,17 +847,16 @@ body.chat {
 
   &[aria-current="page"] {
     background-color: var(--color-surface-3);
+  }
 
-    /* yours: the marigold bar marks where you are */
-    &::before {
-      content: "";
-      position: absolute;
-      inset-block: 0.75rem;
-      inset-inline-start: -0.125rem;
-      width: 0.25rem;
-      border-radius: 999px;
-      background-color: var(--color-mark);
-    }
+  /* yours: the marigold bar marks where you are */
+  > .chat-bar {
+    position: absolute;
+    inset-block: 0.75rem;
+    inset-inline-start: -0.125rem;
+    width: 0.25rem;
+    border-radius: 999px;
+    background-color: var(--color-mark);
   }
 
   &:focus-visible {

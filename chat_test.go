@@ -198,6 +198,8 @@ func TestGroupPageAccess(t *testing.T) {
 	ensure.StringContains(t, body, `href="`+chatPath(chat.ID)+`/info"`)
 	ensure.StringContains(t, body, fmt.Sprintf(`id="chat-%d" class="chat-item group" href="%s" aria-current="page"`,
 		chat.ID, chatPath(chat.ID)))
+	// only the open chat carries the bar the page transition slides
+	ensure.DeepEqual(t, strings.Count(body, `class="chat-bar"`), 1)
 	ensure.StringContains(t, body, "<title>Team &lt;b&gt; · msg</title>")
 
 	// the info page has a back link to the group and lists the members
@@ -1539,7 +1541,12 @@ func TestGroupIcon(t *testing.T) {
 	ensure.StringContains(t, page, fmt.Sprintf(`id="chat-%d" class="chat-item group" href="%s" aria-current="page"><img class="avatar" %s`, group.ID, base, src))
 	ensure.StringContains(t, page, fmt.Sprintf(`id="chat-%d" class="chat-item group" href="%s"><svg class="icon icon-people"`, other.ID, chatPath(other.ID)))
 	ensure.StringContains(t, page, `class="pane-title" href="`+info+`"><img class="avatar avatar-s" `+src)
+	// the list and the header load it at once, so it is in the first frame
+	// of a page transition; the picker below the fold stays lazy
+	ensure.StringContains(t, page, src+` alt="" width="64" height="64" decoding="sync">`)
+	ensure.StringDoesNotContain(t, page, src+` alt="" width="64" height="64" loading="lazy"`)
 	page = ta.get(info, ta.as(alice)).Body.String()
+	ensure.StringContains(t, page, src+` alt="" width="64" height="64" loading="lazy"`)
 	ensure.StringContains(t, page, `<img class="avatar avatar-l" `+src)
 	ensure.StringContains(t, page, `action="`+base+`/icon/remove"`)
 
