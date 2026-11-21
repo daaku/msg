@@ -33,11 +33,12 @@ import (
 // path: presign, then make a plain HTTP request.
 
 const (
-	s3Algorithm  = "AWS4-HMAC-SHA256"
-	s3Unsigned   = "UNSIGNED-PAYLOAD"
-	s3TimeFormat = "20060102T150405Z"
-	s3CallExpiry = 15 * time.Minute // lifetime of URLs for the server's own calls
-	s3MinPart    = 5 << 20          // S3's minimum size of every part but the last
+	s3Algorithm     = "AWS4-HMAC-SHA256"
+	s3Unsigned      = "UNSIGNED-PAYLOAD"
+	s3TimeFormat    = "20060102T150405Z"
+	s3CallExpiry    = 15 * time.Minute // lifetime of URLs for the server's own calls
+	s3MinPart       = 5 << 20          // S3's minimum size of every part but the last
+	s3ClientTimeout = 5 * time.Minute
 )
 
 type s3Client struct {
@@ -353,8 +354,10 @@ func (c *s3Client) completeMultipart(ctx context.Context, key, uploadID string, 
 		return serr.Errorf("s3 complete multipart: unreadable answer %q", b)
 	}
 	if root.XMLName.Local == "Error" {
-		return serr.Wrap(&s3Error{Op: "complete multipart", Status: http.StatusOK,
-			Body: root.Code + ": " + root.Message})
+		return serr.Wrap(&s3Error{
+			Op: "complete multipart", Status: http.StatusOK,
+			Body: root.Code + ": " + root.Message,
+		})
 	}
 	return nil
 }
@@ -433,7 +436,7 @@ func newS3(cfg config, now func() time.Time) (*s3Client, *fakeS3, error) {
 		fake := &fakeS3{dir: filepath.Join(cfg.StateDir, "fakes3"), c: c}
 		// The server's own calls run the fake in process, so they do not
 		// depend on the listen address.
-		c.hc = &http.Client{Transport: handlerTransport{fake}}
+		c.hc = &http.Client{Transport: handlerTransport{fake}, Timeout: s3ClientTimeout}
 		return c, fake, nil
 	}
 	var missing []string
@@ -461,7 +464,7 @@ func newS3(cfg config, now func() time.Time) (*s3Client, *fakeS3, error) {
 		accessKey: cfg.S3AccessKeyID,
 		secretKey: cfg.S3SecretAccessKey,
 		pathStyle: cfg.S3PathStyle,
-		hc:        &http.Client{},
+		hc:        &http.Client{Timeout: s3ClientTimeout},
 		now:       now,
 	}, nil, nil
 }

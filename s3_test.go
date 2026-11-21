@@ -448,3 +448,63 @@ func TestFakeS3MountedOnlyWhenFake(t *testing.T) {
 	w := ta.get(pFakeS3 + "dev/x")
 	ensure.DeepEqual(t, w.Code, http.StatusForbidden)
 }
+
+// Handler and worker contexts have no deadline, so the client must supply
+// one, for a real bucket as well as for the in-process fake.
+func TestS3ClientTimeout(t *testing.T) {
+	cfg, err := parseConfig(func(k string) string {
+		return map[string]string{
+			"S3_ENDPOINT": "https://s3.example.com", "S3_BUCKET": "b",
+			"S3_ACCESS_KEY_ID": "k", "S3_SECRET_ACCESS_KEY": "s",
+		}[k]
+	})
+	ensure.Nil(t, err)
+	c, fake, err := newS3(cfg, time.Now)
+	ensure.Nil(t, err)
+	ensure.True(t, fake == nil)
+	ensure.DeepEqual(t, c.hc.Timeout, s3ClientTimeout)
+	ensure.DeepEqual(t, newTestApp(t).app.s3.hc.Timeout, s3ClientTimeout)
+}
+
+// stalledS3Client points a signing client at a server that ignores the
+// request, with a deliberately short timeout.
+func stalledS3Client(t *testing.T, h http.Handler) *s3Client {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return &s3Client{
+		endpoint: mustURL(t, srv.URL), region: "us-east-1", bucket: "b",
+		accessKey: "k", secretKey: "s", pathStyle: true,
+		now: time.Now, hc: &http.Client{Timeout: 200 * time.Millisecond},
+	}
+}
+
+func TestS3ClientTimeoutBoundsStalledCalls(t *testing.T) {
+	t.Run("headers", func(t *testing.T) {
+		c := stalledS3Client(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		start := time.Now()
+		_, err := c.get(t.Context(), "k", "")
+		ensure.NotNil(t, err)
+		ensure.True(t, time.Since(start) < 2*time.Second, err)
+	})
+
+	t.Run("body", func(t *testing.T) {
+		c := stalledS3Client(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, "partial")
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+			<-r.Context().Done()
+		}))
+		start := time.Now()
+		rc, err := c.get(t.Context(), "k", "")
+		ensure.Nil(t, err)
+		defer rc.Close()
+		_, err = io.ReadAll(rc)
+		ensure.NotNil(t, err)
+		ensure.True(t, time.Since(start) < 2*time.Second, err)
+	})
+}
