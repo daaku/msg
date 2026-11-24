@@ -231,8 +231,8 @@ type pushPayloadData struct {
 // pushSnippet describes a message in a notification: the start of its
 // text, or what kind of file it is.
 func (a *app) pushSnippet(ctx context.Context, msg Message) (string, error) {
-	if msg.FileID.Valid {
-		f, err := a.db.Files.Find(ctx, msg.FileID.Int64)
+	if msg.FileID != nil {
+		f, err := a.db.Files.Find(ctx, *msg.FileID)
 		if err != nil {
 			return "", serr.Wrap(err)
 		}

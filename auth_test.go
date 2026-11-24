@@ -94,7 +94,7 @@ func TestBootstrap(t *testing.T) {
 	admin, err := ta.app.db.Users.Where(ant.Eq(&Users.Username, "admin")).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.True(t, admin.PermAdmin)
-	ensure.False(t, admin.InvitedBy.Valid)
+	ensure.True(t, admin.InvitedBy == nil)
 
 	// with a user present nothing is created
 	ensure.Nil(t, ta.app.bootstrap(ctx))
@@ -135,7 +135,7 @@ func TestInviteAccept(t *testing.T) {
 	ensure.False(t, bob.PermAdmin)
 	ensure.False(t, bob.PermInvite)
 	ensure.False(t, bob.PermGroup)
-	ensure.DeepEqual(t, bob.InvitedBy.Int64, inviter.ID)
+	ensure.DeepEqual(t, *bob.InvitedBy, inviter.ID)
 	ensure.DeepEqual(t, bob.CreatedAt.Unix(), testNow.Unix())
 
 	creds, err := ta.app.credentials(ctx, bob.ID)
@@ -668,7 +668,7 @@ func TestSettingsLinks(t *testing.T) {
 	link := links[0]
 	ensure.DeepEqual(t, link.Handle, bob.Handle)
 	ensure.DeepEqual(t, link.Username, "bob")
-	ensure.DeepEqual(t, link.CreatedBy.Int64, bob.ID)
+	ensure.DeepEqual(t, *link.CreatedBy, bob.ID)
 	ensure.DeepEqual(t, link.ExpiresAt.Unix(), testNow.Add(24*time.Hour).Unix())
 
 	page := ta.get(pSettings, ta.as(bob)).Body.String()
@@ -800,8 +800,8 @@ func TestInvitesCreate(t *testing.T) {
 	ensure.DeepEqual(t, countRows(t, ta, "invites"), 1)
 	ensure.DeepEqual(t, invitesSent(t, ta, alice.ID), int64(1))
 	inv := pendingInvite(t, ta, "bob")
-	ensure.DeepEqual(t, inv.CreatedBy.Int64, alice.ID)
-	ensure.False(t, inv.UserID.Valid)
+	ensure.DeepEqual(t, *inv.CreatedBy, alice.ID)
+	ensure.True(t, inv.UserID == nil)
 	ensure.False(t, inv.PermAdmin)
 	ensure.DeepEqual(t, inv.ExpiresAt.Unix(), testNow.Add(7*24*time.Hour).Unix())
 
@@ -825,7 +825,7 @@ func TestInvitesCreate(t *testing.T) {
 	ensure.False(t, bob.PermAdmin)
 	ensure.False(t, bob.PermInvite)
 	ensure.False(t, bob.PermGroup)
-	ensure.DeepEqual(t, bob.InvitedBy.Int64, alice.ID)
+	ensure.DeepEqual(t, *bob.InvitedBy, alice.ID)
 	ensure.DeepEqual(t, ta.get(pInvites, withCookies(aw)).Code, http.StatusNotFound)
 	ensure.StringDoesNotContain(t, ta.get(pInvites, ta.as(alice)).Body.String(), ">bob<")
 }
@@ -1149,7 +1149,7 @@ func TestAdminRecovery(t *testing.T) {
 	links := pendingLinks(t, ta, bob.ID)
 	ensure.DeepEqual(t, len(links), 1)
 	link := links[0]
-	ensure.DeepEqual(t, link.CreatedBy.Int64, admin.ID)
+	ensure.DeepEqual(t, *link.CreatedBy, admin.ID)
 	ensure.DeepEqual(t, link.ExpiresAt.Unix(), testNow.Add(24*time.Hour).Unix())
 	page = ta.get(base, ta.as(admin)).Body.String()
 	ensure.StringContains(t, page, `value="`+ta.app.inviteURL(link)+`"`)

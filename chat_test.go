@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/skudra-go/ant"
@@ -364,8 +363,7 @@ func TestDMStart(t *testing.T) {
 
 	w = ta.post(pDM, url.Values{"user": {idStr(bob.ID)}}, ta.as(alice))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
-	chat, err := ta.app.db.Chats.Where(ant.Eq(&Chats.DMKey, sql.NullString{
-		String: fmt.Sprintf("%d:%d", alice.ID, bob.ID), Valid: true})).Single(ctx)
+	chat, err := ta.app.db.Chats.Where(ant.Eq(&Chats.DMKey, new(fmt.Sprintf("%d:%d", alice.ID, bob.ID)))).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
 	ensure.True(t, chat.IsDM)
@@ -886,7 +884,7 @@ func TestMessageEdit(t *testing.T) {
 		VALUES (?, ?, 'ready', 'a.txt', 'p1', 1, 1)`, chat.ID, alice.ID)
 	ensure.Nil(t, err)
 	fileID, _ := res.LastInsertId()
-	fm, err := ta.app.createMessage(t.Context(), chat, alice.ID, "", sql.NullInt64{Int64: fileID, Valid: true})
+	fm, err := ta.app.createMessage(t.Context(), chat, alice.ID, "", &fileID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, ta.get(messagePath(chat.ID, fm.ID)+"/edit", ta.as(alice)).Code, http.StatusNotFound)
 	ensure.DeepEqual(t, ta.post(messagePath(chat.ID, fm.ID)+"/edit", url.Values{"body": {"x"}}, ta.as(alice)).Code,

@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/hkdf"
 	"crypto/sha256"
-	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -417,7 +416,7 @@ type User struct {
 	PermAdmin  bool
 	PermInvite bool
 	PermGroup  bool
-	InvitedBy  sql.NullInt64
+	InvitedBy  *int64
 	CreatedAt  ant.UnixTime
 	Avatar     string
 	Passkeys   int64 `ant:"computed"` // filled only when asked for
@@ -448,9 +447,9 @@ type Invite struct {
 	Token     string
 	Username  string
 	Handle    []byte
-	UserID    sql.NullInt64 // set for an add passkey link
+	UserID    *int64 // set for an add passkey link
 	PermAdmin bool
-	CreatedBy sql.NullInt64 // unset for the bootstrap invite
+	CreatedBy *int64 // unset for the bootstrap invite
 	CreatedAt ant.UnixTime
 	ExpiresAt ant.UnixTime
 
@@ -465,7 +464,7 @@ type Chat struct {
 	ID            int64
 	Name          string
 	IsDM          bool
-	DMKey         sql.NullString
+	DMKey         *string
 	CreatedBy     int64
 	CreatedAt     ant.UnixTime
 	LastMessageAt ant.UnixTime
@@ -525,7 +524,7 @@ type Message struct {
 	ChatID    int64
 	UserID    int64
 	Body      string
-	FileID    sql.NullInt64
+	FileID    *int64
 	CreatedAt ant.UnixTime
 	EditedAt  ant.UnixTime
 
@@ -551,7 +550,7 @@ type Preview struct {
 	Title       string
 	Description string
 	SiteName    string
-	FileID      sql.NullInt64
+	FileID      *int64
 	CreatedAt   ant.UnixTime
 
 	File *File

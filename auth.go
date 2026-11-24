@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -121,6 +120,16 @@ func (a *app) credentials(ctx context.Context, userID int64) ([]*Credential, err
 	creds, err := a.db.Credentials.Where(ant.Eq(&Credentials.UserID, userID)).
 		OrderBy(&Credentials.ID).All(ctx)
 	return creds, serr.Wrap(err)
+}
+
+// inviteUser is the passkey user an invite registers: the existing user
+// of an add passkey link, or the user a sign up link will create.
+func (a *app) inviteUser(ctx context.Context, inv *Invite) (waUser, error) {
+	var userID int64
+	if inv.UserID != nil {
+		userID = *inv.UserID
+	}
+	return a.waUserFor(ctx, inv.Handle, inv.Username, userID)
 }
 
 // registrationOptions starts a passkey registration for u, excluding the
@@ -405,21 +414,18 @@ func (a *app) createInvite(ctx context.Context, db *AppDB, p inviteParams) (*Inv
 		Username:  p.Username,
 		Handle:    randBytes(16),
 		PermAdmin: p.Admin,
-		CreatedBy: nullID(p.CreatedBy),
 		ExpiresAt: unixTime(now.Add(p.TTL)),
+	}
+	if p.CreatedBy != 0 {
+		inv.CreatedBy = new(p.CreatedBy)
 	}
 	if p.User != nil {
 		inv.Username = p.User.Username
 		inv.Handle = p.User.Handle
-		inv.UserID = nullID(p.User.ID)
+		inv.UserID = new(p.User.ID)
 		inv.PermAdmin = false
 	}
 	return inv, serr.Wrap(db.Invites.Insert(ctx, inv))
-}
-
-// nullID is id as a nullable reference, NULL for 0.
-func nullID(id int64) sql.NullInt64 {
-	return sql.NullInt64{Int64: id, Valid: id != 0}
 }
 
 // inviteLive matches the invites that have not expired.
@@ -429,7 +435,7 @@ func (a *app) inviteLive() ant.Cond {
 
 // pendingLinks returns the live add passkey links of userID, newest first.
 func (a *app) pendingLinks(ctx context.Context, db *AppDB, userID int64) ([]*Invite, error) {
-	links, err := db.Invites.Where(ant.Eq(&Invites.UserID, nullID(userID)), a.inviteLive()).
+	links, err := db.Invites.Where(ant.Eq(&Invites.UserID, new(userID)), a.inviteLive()).
 		OrderByDesc(&Invites.ID).All(ctx)
 	return links, serr.Wrap(err)
 }
@@ -438,7 +444,7 @@ func (a *app) pendingLinks(ctx context.Context, db *AppDB, userID int64) ([]*Inv
 // there was one.
 func (a *app) revokeLink(ctx context.Context, id, userID int64) (bool, error) {
 	n, err := a.db.Invites.Where(ant.Eq(&Invites.ID, id),
-		ant.Eq(&Invites.UserID, nullID(userID))).Delete(ctx)
+		ant.Eq(&Invites.UserID, new(userID))).Delete(ctx)
 	return n > 0, serr.Wrap(err)
 }
 
@@ -471,7 +477,7 @@ func (a *app) invite(w http.ResponseWriter, r *http.Request) error {
 	title, intro, label := "Welcome",
 		"Welcome, "+inv.Username+". Create a passkey to finish setting up your account.",
 		"Create passkey"
-	if inv.UserID.Valid {
+	if inv.UserID != nil {
 		title, intro, label = "Add a passkey",
 			"Add a passkey for "+inv.Username+" on this device.",
 			"Add passkey"
@@ -488,7 +494,7 @@ func (a *app) inviteOptions(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	u, err := a.waUserFor(r.Context(), inv.Handle, inv.Username, inv.UserID.Int64)
+	u, err := a.inviteUser(r.Context(), inv)
 	if err != nil {
 		return err
 	}
@@ -501,7 +507,7 @@ func (a *app) invitePost(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	wu, err := a.waUserFor(ctx, inv.Handle, inv.Username, inv.UserID.Int64)
+	wu, err := a.inviteUser(ctx, inv)
 	if err != nil {
 		return err
 	}
@@ -522,8 +528,8 @@ func (a *app) invitePost(w http.ResponseWriter, r *http.Request) error {
 			return httpErr(http.StatusNotFound, msgInviteInvalid)
 		}
 		used := deleted[0]
-		userID := used.UserID.Int64
-		if !used.UserID.Valid {
+		userID := used.UserID
+		if userID == nil {
 			user := &User{
 				Username:  used.Username,
 				Handle:    used.Handle,
@@ -533,9 +539,9 @@ func (a *app) invitePost(w http.ResponseWriter, r *http.Request) error {
 			if err := tx.Users.Insert(ctx, user); err != nil {
 				return serr.Wrap(err)
 			}
-			userID = user.ID
+			userID = &user.ID
 		}
-		if row, err = a.newCredential(r, userID, cred); err != nil {
+		if row, err = a.newCredential(r, *userID, cred); err != nil {
 			return err
 		}
 		err = tx.Credentials.Insert(ctx, row)
@@ -1011,7 +1017,7 @@ func (a *app) invites(w http.ResponseWriter, r *http.Request) error {
 			return q.Where(ant.IsNotNull(&Invites.CreatedBy)).IncludeOne(&Invites.Creator)
 		}).
 		When(!admin, func(q *ant.Query[Invite]) *ant.Query[Invite] {
-			return q.Where(ant.Eq(&Invites.CreatedBy, nullID(user.ID)))
+			return q.Where(ant.Eq(&Invites.CreatedBy, new(user.ID)))
 		}).
 		OrderByDesc(&Invites.ID).All(ctx)
 	if err != nil {
@@ -1128,7 +1134,7 @@ func (a *app) invitesRevoke(w http.ResponseWriter, r *http.Request) error {
 	n, err := a.db.Invites.Where(ant.Eq(&Invites.ID, id), ant.IsNull(&Invites.UserID),
 		ant.IsNotNull(&Invites.CreatedBy)).
 		When(!allowed(user, accAdmin), func(q *ant.Query[Invite]) *ant.Query[Invite] {
-			return q.Where(ant.Eq(&Invites.CreatedBy, nullID(user.ID)))
+			return q.Where(ant.Eq(&Invites.CreatedBy, new(user.ID)))
 		}).
 		Delete(ctx)
 	if err != nil {

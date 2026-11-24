@@ -356,11 +356,11 @@ func TestPreviewEndToEnd(t *testing.T) {
 	ensure.DeepEqual(t, p.Title, "A <script>alert(1)</script> title")
 	ensure.DeepEqual(t, p.Description, "Some words")
 	ensure.DeepEqual(t, p.SiteName, "The Site")
-	ensure.True(t, p.FileID.Valid)
+	ensure.True(t, p.FileID != nil)
 	ensure.DeepEqual(t, []int64{pageHits.Load(), imageHits.Load()}, []int64{1, 1})
 	ensure.True(t, pinged(c), "the chat is pinged when the preview is ready")
 
-	f := ta.file(p.FileID.Int64)
+	f := ta.file(*p.FileID)
 	ensure.DeepEqual(t, f.Kind, kindPreview)
 	ensure.DeepEqual(t, f.Status, statusReady)
 	ensure.DeepEqual(t, []int64{f.Width, f.Height, f.Size}, []int64{1200, 600, 0})
@@ -400,7 +400,7 @@ func TestPreviewEndToEnd(t *testing.T) {
 	edit("now " + srv.URL + "/other")
 	p2 := ta.preview(m.ID)
 	ensure.DeepEqual(t, p2.Title, "Other page")
-	ensure.False(t, p2.FileID.Valid)
+	ensure.True(t, p2.FileID == nil)
 	ensure.True(t, ta.objectMissing(fileKey(f, "converted")))
 	_, err := ta.app.db.Files.Find(ctx, f.ID)
 	ensure.True(t, err != nil, "the old image row is gone")
@@ -413,7 +413,7 @@ func TestPreviewEndToEnd(t *testing.T) {
 	// deleting a message with a ready preview leaves nothing behind
 	m2 := ta.send(alice, chat, link)
 	ta.runPreviews()
-	f2 := ta.file(ta.preview(m2.ID).FileID.Int64)
+	f2 := ta.file(*ta.preview(m2.ID).FileID)
 	w := ta.post(messagePath(chat.ID, m2.ID)+"/delete", nil, ta.as(alice))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
 	ensure.DeepEqual(t, countRows(t, ta, "previews"), 0)
@@ -470,10 +470,10 @@ func TestPreviewFailures(t *testing.T) {
 	check("/500", "failed")
 	check("/empty", "failed") // neither title nor image
 	// an image that is not an image, or is too big, is dropped; the card stays
-	ensure.False(t, check("/htmlimage", "ready").FileID.Valid)
-	ensure.False(t, check("/bigimage", "ready").FileID.Valid)
+	ensure.True(t, check("/htmlimage", "ready").FileID == nil)
+	ensure.True(t, check("/bigimage", "ready").FileID == nil)
 	// an image alone is enough
-	ensure.True(t, check("/imageonly", "ready").FileID.Valid)
+	ensure.True(t, check("/imageonly", "ready").FileID != nil)
 	ensure.DeepEqual(t, countRows(t, ta, "files"), 1)
 
 	// a failed preview renders nothing and is never retried

@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -350,7 +349,7 @@ func (a *app) uploadComplete(r *http.Request, in uploadFileIn) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, err = a.createMessage(ctx, chat, user.ID, "", sql.NullInt64{Int64: file.ID, Valid: true})
+	_, err = a.createMessage(ctx, chat, user.ID, "", &file.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -1521,7 +1520,7 @@ func (a *app) processPreview(ctx context.Context, p Preview) {
 		return
 	}
 	err = a.db.Tx(ctx, func(tx *AppDB) error {
-		var fileID sql.NullInt64
+		var fileID *int64
 		if img != nil {
 			f := &File{
 				ChatID:   msg.ChatID,
@@ -1538,7 +1537,7 @@ func (a *app) processPreview(ctx context.Context, p Preview) {
 			if err := tx.Files.Insert(ctx, f); err != nil {
 				return serr.Wrap(err)
 			}
-			fileID = nullID(f.ID)
+			fileID = &f.ID
 		}
 		// A claimed preview is failed until it is ready, see previewOnce.
 		n, err := tx.Previews.Where(ant.Eq(&Previews.MessageID, p.MessageID), ant.Eq(&Previews.URL, p.URL),
@@ -1616,7 +1615,7 @@ func (a *app) startPreviews() {
 // requestPreview queues a preview for the first URL of a text message.
 func (a *app) requestPreview(ctx context.Context, msg Message) {
 	u := firstURL(msg.Body)
-	if u == "" || msg.FileID.Valid {
+	if u == "" || msg.FileID != nil {
 		return
 	}
 	if _, err := checkPreviewURL(u); err != nil {

@@ -666,8 +666,8 @@ func TestAlbum(t *testing.T) {
 	}
 	// lazy thumbnails of the converted picture, and the poster for a video
 	ensure.DeepEqual(t, strings.Count(body, `width="176" height="176" loading="lazy" decoding="async">`), 4)
-	ensure.StringContains(t, body, fmt.Sprintf(`<img src="/f/%d/c"`, ms[0].FileID.Int64))
-	ensure.StringContains(t, body, fmt.Sprintf(`<img src="/f/%d/p"`, ms[3].FileID.Int64))
+	ensure.StringContains(t, body, fmt.Sprintf(`<img src="/f/%d/c"`, *ms[0].FileID))
+	ensure.StringContains(t, body, fmt.Sprintf(`<img src="/f/%d/p"`, *ms[3].FileID))
 	ensure.DeepEqual(t, strings.Count(body, `class="album-play"`), 1)
 	ensure.StringDoesNotContain(t, body, "album-more")
 	// one time for the album, and no per message menu
@@ -726,7 +726,7 @@ func TestAlbum(t *testing.T) {
 	_ = more
 
 	// a picture that is not converted yet is not part of a run
-	_, err := ta.app.db.DB().ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", ms[2].FileID.Int64)
+	_, err := ta.app.db.DB().ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", *ms[2].FileID)
 	ensure.Nil(t, err)
 	body = page()
 	ensure.StringDoesNotContain(t, body, "album")
@@ -762,7 +762,7 @@ func TestChatMediaPage(t *testing.T) {
 	// the first item, as the only one at full size, and lazy
 	ensure.DeepEqual(t, strings.Count(body, `class="gallery-item"`), 1)
 	ensure.StringContains(t, body, fmt.Sprintf(`<img id="media-%d" class="gallery-item" src="/f/%d/c" alt="p.jpg" width="800" height="600" loading="lazy" decoding="async">`,
-		first.ID, first.FileID.Int64))
+		first.ID, *first.FileID))
 	ensure.StringContains(t, body, `<span id="gallery-count" class="muted">1 of 6</span>`)
 	// no step back from the first, a step on to the second
 	ensure.StringContains(t, body, `<a id="gallery-prev" class="gallery-step left" hidden=""></a>`)
@@ -778,7 +778,7 @@ func TestChatMediaPage(t *testing.T) {
 			current = ` aria-current="true"`
 		}
 		ensure.StringContains(t, body, fmt.Sprintf(`<a id="thumb-%d" class="gallery-thumb" %s data-morph%s><img src="/f/%d/%s" alt="p.jpg" width="64" height="64" loading="lazy" decoding="async">`,
-			m.ID, link(m), current, m.FileID.Int64, variant))
+			m.ID, link(m), current, *m.FileID, variant))
 	}
 	ensure.DeepEqual(t, strings.Count(body, `loading="lazy"`), 7)
 	// back to the chat at the album
@@ -795,7 +795,7 @@ func TestChatMediaPage(t *testing.T) {
 	// a video in the middle: nothing loads until it is played
 	body = ta.get(path(first.ID, last.ID, ms[2].ID), ta.as(alice)).Body.String()
 	ensure.StringContains(t, body, fmt.Sprintf(`<video id="media-%d" class="gallery-item" controls playsinline preload="none" poster="/f/%d/p" src="/f/%d/c"></video>`,
-		ms[2].ID, ms[2].FileID.Int64, ms[2].FileID.Int64))
+		ms[2].ID, *ms[2].FileID, *ms[2].FileID))
 	ensure.StringContains(t, body, `>3 of 6<`)
 	ensure.StringContains(t, body, `<a id="gallery-prev" class="gallery-step left" `+link(ms[1])+` data-morph`)
 	ensure.StringContains(t, body, `<a id="gallery-next" class="gallery-step right" `+link(ms[3])+` data-morph`)
@@ -846,7 +846,7 @@ func TestChatMediaPage(t *testing.T) {
 	ensure.DeepEqual(t, ta.get(path(first.ID, ms[3].ID, first.ID), ta.as(alice)).Code, http.StatusOK)
 	ensure.DeepEqual(t, ta.get(path(ms[4].ID, last.ID, last.ID), ta.as(alice)).Code, http.StatusOK)
 
-	_, err := ta.app.db.DB().ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", ms[1].FileID.Int64)
+	_, err := ta.app.db.DB().ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", *ms[1].FileID)
 	ensure.Nil(t, err)
 	notFound("not converted yet", path(first.ID, ms[3].ID, first.ID))
 	notFound("starts with one not converted", path(ms[1].ID, ms[3].ID, ms[1].ID))

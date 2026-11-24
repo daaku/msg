@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -921,7 +920,7 @@ func normalizeBody(s string) (string, error) {
 
 // createMessage stores a new message, bumps the chat and the author's
 // counter, and runs afterMessage once it is committed.
-func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body string, fileID sql.NullInt64) (Message, error) {
+func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body string, fileID *int64) (Message, error) {
 	msg := Message{ChatID: chat.ID, UserID: userID, Body: body, FileID: fileID}
 	err := a.db.Tx(ctx, func(tx *AppDB) error {
 		if err := tx.Messages.Insert(ctx, &msg); err != nil {
@@ -966,7 +965,7 @@ func (a *app) chatSend(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if body != "" {
-		_, err = a.createMessage(r.Context(), v.Chat, v.User.ID, body, sql.NullInt64{})
+		_, err = a.createMessage(r.Context(), v.Chat, v.User.ID, body, nil)
 		if err != nil {
 			return err
 		}
@@ -1192,13 +1191,13 @@ func dmKey(a, b int64) string {
 // startDM returns the direct message between two users, creating it when
 // there is none yet. created reports whether this call created it.
 func (a *app) startDM(ctx context.Context, userID, otherID int64) (chat Chat, created bool, err error) {
-	key := sql.NullString{String: dmKey(userID, otherID), Valid: true}
-	c := &Chat{IsDM: true, DMKey: key, CreatedBy: userID, LastMessageAt: unixTime(a.now())}
+	key := dmKey(userID, otherID)
+	c := &Chat{IsDM: true, DMKey: &key, CreatedBy: userID, LastMessageAt: unixTime(a.now())}
 	err = a.db.Tx(ctx, func(tx *AppDB) error {
 		// FirstOrCreate reads the chat again when a concurrent request
 		// created it first.
 		var err error
-		c, created, err = tx.Chats.FirstOrCreate(ctx, c, ant.Eq(&Chats.DMKey, key))
+		c, created, err = tx.Chats.FirstOrCreate(ctx, c, ant.Eq(&Chats.DMKey, &key))
 		if err != nil || !created {
 			return serr.Wrap(err)
 		}
@@ -1262,7 +1261,7 @@ func messagePath(chatID, msgID int64) string {
 // canEdit reports whether the viewer may edit the message: the author, while
 // still a member, and only a text message.
 func canEdit(v chatView, m Message) bool {
-	return m.UserID == v.User.ID && v.Member && !m.FileID.Valid
+	return m.UserID == v.User.ID && v.Member && m.FileID == nil
 }
 
 // canDelete reports whether the viewer may delete the message: the author
@@ -1420,10 +1419,10 @@ func (a *app) deleteMessage(ctx context.Context, chat Chat, msg Message) error {
 		if err := tx.Messages.DeleteByID(ctx, msg.ID); err != nil {
 			return serr.Wrap(err)
 		}
-		if !msg.FileID.Valid {
+		if msg.FileID == nil {
 			return nil
 		}
-		f, err := tx.Files.Find(ctx, msg.FileID.Int64)
+		f, err := tx.Files.Find(ctx, *msg.FileID)
 		if err != nil {
 			return serr.Wrap(err)
 		}
