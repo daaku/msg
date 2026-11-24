@@ -410,7 +410,7 @@ var (
 
 type app struct {
 	win      *mygo.Window
-	notes    []note // newest first
+	notes    []note // in the order their chats came
 	err      error  // shown until the app restarts
 	retry    *time.Timer
 	quitting bool
@@ -445,16 +445,17 @@ func (a *app) height() int {
 }
 
 func (a *app) add(n note) {
-	for i, old := range a.notes {
-		if old.Chat == n.Chat {
-			// Keep the lines it shows, and open where the user stopped.
-			n.Lines = append(old.Lines, n.Lines...)
-			n.URL = old.URL
-			a.notes = slices.Delete(a.notes, i, i+1)
-			break
-		}
+	i := slices.IndexFunc(a.notes, func(old note) bool { return old.Chat == n.Chat })
+	if i < 0 {
+		a.notes = append(a.notes, n)
+	} else {
+		// Keep its place and the lines it shows, and open where the user
+		// stopped.
+		old := a.notes[i]
+		n.Lines = append(old.Lines, n.Lines...)
+		n.URL = old.URL
+		a.notes[i] = n
 	}
-	a.notes = append([]note{n}, a.notes...)
 	a.layout()
 }
 
@@ -491,9 +492,10 @@ func (a *app) layout() {
 	if ds := mygo.Screen.Displays(); len(ds) > 0 {
 		area = ds[0].WorkArea
 	}
-	h := min(a.height(), area.Height-2*margin)
-	a.win.SetSize(width, h)
-	a.win.SetPosition(area.X+area.Width-width-margin, area.Y+margin)
+	// One call: SetPosition after SetSize would ask for the size the window
+	// still has, as Wayland resizes it later.
+	a.win.SetBounds(mygo.Rectangle{X: area.X + area.Width - width - margin, Y: area.Y + margin,
+		Width: width, Height: min(a.height(), area.Height-2*margin)})
 	if !a.win.IsVisible() {
 		a.win.ShowInactive() // leave the keyboard where the user is typing
 	}

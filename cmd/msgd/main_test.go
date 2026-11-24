@@ -305,8 +305,8 @@ func TestView(t *testing.T) {
 	for _, n := range testNotes() {
 		a.add(n)
 	}
-	if a.notes[0].Chat != 1 {
-		t.Fatalf("newest first: %+v", a.notes)
+	if a.notes[0].Chat != 2 || a.notes[1].Chat != 1 {
+		t.Fatalf("in the order they came: %+v", a.notes)
 	}
 	tt := ui.NewTester(a.view, width, a.height())
 	for _, want := range []string{"2 chats", "Dismiss all", "bob", "hi alice", "15:04",
@@ -328,10 +328,10 @@ func TestView(t *testing.T) {
 		}
 	}
 
-	// more of a chat adds to its card, which goes to the top
+	// more of a chat adds to its card, which keeps its place
 	a.add(note{Chat: 2, Title: "bob", URL: "https://msg.example/c/2?m=12", Lines: []line{{ID: 12, Text: "you there?"}}})
 	tt.Frame()
-	if a.notes[0].Chat != 2 || len(a.notes[0].Lines) != 2 || a.notes[0].URL != "https://msg.example/c/2?m=9" {
+	if len(a.notes) != 2 || a.notes[0].Chat != 2 || len(a.notes[0].Lines) != 2 || a.notes[0].URL != "https://msg.example/c/2?m=9" {
 		t.Fatalf("notes %+v", a.notes)
 	}
 
