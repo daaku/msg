@@ -191,7 +191,7 @@ func (a *app) settingsNotifications(r *http.Request, u *User) (g.Node, error) {
 			return h.Li(h.ID(fmt.Sprintf("push-sub-%d", s.ID)), h.Class("row"),
 				h.Div(h.Class("stack-tight"),
 					h.Strong(g.Text(s.Label)),
-					dateCell("Added", s.CreatedAt.Unix())),
+					dateCell("Added", s.CreatedAt)),
 				h.Form(h.Method("post"), h.Action(pPushUnsubscribe),
 					h.Input(h.Type("hidden"), h.Name("id"), h.Value(strconv.FormatInt(s.ID, 10))),
 					h.Button(h.Class("btn secondary"), g.Text("Remove"))))
@@ -458,7 +458,7 @@ func (a *app) snoozesFor(ctx context.Context, userID int64, rows []*Message, loc
 	}
 	now := a.now()
 	for _, s := range snoozes {
-		sv.due[s.MessageID] = fmtDue(time.Unix(s.DueAt, 0), now, loc)
+		sv.due[s.MessageID] = fmtDue(s.DueAt.Time, now, loc)
 	}
 	return sv, nil
 }
@@ -522,7 +522,7 @@ func (a *app) messageSnooze(w http.ResponseWriter, r *http.Request) error {
 	_, err = a.db.Snoozes.Upsert(r.Context(), &Snooze{
 		MessageID: m.ID,
 		UserID:    v.User.ID,
-		DueAt:     due.Unix(),
+		DueAt:     unixTime(due),
 	}, ant.OnConflict(&Snoozes.MessageID).And(ant.F(&Snoozes.UserID)).
 		DoUpdate(ant.F(&Snoozes.DueAt), ant.F(&Snoozes.CreatedAt)))
 	if err != nil {
@@ -583,7 +583,7 @@ func (a *app) snoozeRound(ctx context.Context) {
 
 // snoozesDue returns up to 100 snoozes due at now, oldest first.
 func (a *app) snoozesDue(ctx context.Context, now time.Time) ([]*Snooze, error) {
-	due, err := a.db.Snoozes.Where(ant.Lte(&Snoozes.DueAt, now.Unix())).
+	due, err := a.db.Snoozes.Where(ant.Lte(&Snoozes.DueAt, unixTime(now))).
 		OrderBy(&Snoozes.DueAt).ThenBy(&Snoozes.MessageID).ThenBy(&Snoozes.UserID).
 		Limit(100).All(ctx)
 	return due, serr.Wrap(err)

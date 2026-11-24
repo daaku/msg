@@ -87,7 +87,7 @@ func TestGroupCreate(t *testing.T) {
 	ensure.DeepEqual(t, chat.Name, strings.Repeat("é", 64))
 	ensure.False(t, chat.IsDM)
 	ensure.DeepEqual(t, chat.CreatedBy, alice.ID)
-	ensure.DeepEqual(t, chat.LastMessageAt, testNow.Unix())
+	ensure.DeepEqual(t, chat.LastMessageAt.Unix(), testNow.Unix())
 	ensure.True(t, isMember(t, ta, chat.ID, alice.ID))
 	ensure.True(t, isMember(t, ta, chat.ID, bob.ID))
 	ensure.False(t, isMember(t, ta, chat.ID, carol.ID))
@@ -371,7 +371,7 @@ func TestDMStart(t *testing.T) {
 	ensure.True(t, chat.IsDM)
 	ensure.DeepEqual(t, chat.Name, "")
 	ensure.DeepEqual(t, chat.CreatedBy, alice.ID)
-	ensure.DeepEqual(t, chat.LastMessageAt, testNow.Unix())
+	ensure.DeepEqual(t, chat.LastMessageAt.Unix(), testNow.Unix())
 	ensure.DeepEqual(t, memberCount(t, ta, chat.ID), 2)
 	ensure.True(t, isMember(t, ta, chat.ID, alice.ID))
 	ensure.True(t, isMember(t, ta, chat.ID, bob.ID))
@@ -530,7 +530,7 @@ func lastMessageAt(t *testing.T, ta *testApp, chatID int64) int64 {
 	t.Helper()
 	c, err := ta.app.db.Chats.Find(t.Context(), chatID)
 	ensure.Nil(t, err)
-	return c.LastMessageAt
+	return c.LastMessageAt.Unix()
 }
 
 func TestSend(t *testing.T) {
@@ -845,7 +845,7 @@ func TestMessageEdit(t *testing.T) {
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
 	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
 	got, _ := messageRow(t, ta, m.ID)
-	ensure.DeepEqual(t, got.EditedAt, int64(0))
+	ensure.True(t, got.EditedAt.IsZero())
 	ensure.StringDoesNotContain(t, ta.get(chatPath(chat.ID), ta.as(alice)).Body.String(), `id="m`+idStr(m.ID)+`-edited"`)
 
 	// the author changes the text
@@ -855,7 +855,7 @@ func TestMessageEdit(t *testing.T) {
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
 	got, _ = messageRow(t, ta, m.ID)
 	ensure.DeepEqual(t, got.Body, "changed\n<b>bold</b>")
-	ensure.DeepEqual(t, got.EditedAt, later.Unix())
+	ensure.DeepEqual(t, got.EditedAt.Unix(), later.Unix())
 	ensure.DeepEqual(t, got.CreatedAt.Unix(), testNow.Unix())
 	ensure.DeepEqual(t, lastMessageAt(t, ta, chat.ID), testNow.Unix())
 	body = ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()

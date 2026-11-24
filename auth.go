@@ -170,13 +170,12 @@ func (a *app) newCredential(r *http.Request, userID int64, cred *webauthn.Creden
 	if err != nil {
 		return nil, serr.Wrap(err)
 	}
-	now := a.now().Unix()
 	return &Credential{
 		UserID:       userID,
 		CredentialID: cred.ID,
 		Credential:   credJSON,
 		Label:        deviceLabel(r),
-		LastUsedAt:   now,
+		LastUsedAt:   unixTime(a.now()),
 	}, nil
 }
 
@@ -370,7 +369,7 @@ func (a *app) signInPost(w http.ResponseWriter, r *http.Request) error {
 	}
 	_, err = a.db.Credentials.Where(ant.Eq(&Credentials.ID, row.ID)).Update(ctx,
 		ant.Set(&Credentials.Credential, credJSON),
-		ant.Set(&Credentials.LastUsedAt, a.now().Unix()))
+		ant.Set(&Credentials.LastUsedAt, unixTime(a.now())))
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -407,7 +406,7 @@ func (a *app) createInvite(ctx context.Context, db *AppDB, p inviteParams) (*Inv
 		Handle:    randBytes(16),
 		PermAdmin: p.Admin,
 		CreatedBy: nullID(p.CreatedBy),
-		ExpiresAt: now.Add(p.TTL).Unix(),
+		ExpiresAt: unixTime(now.Add(p.TTL)),
 	}
 	if p.User != nil {
 		inv.Username = p.User.Username
@@ -425,7 +424,7 @@ func nullID(id int64) sql.NullInt64 {
 
 // inviteLive matches the invites that have not expired.
 func (a *app) inviteLive() ant.Cond {
-	return ant.Gt(&Invites.ExpiresAt, a.now().Unix())
+	return ant.Gt(&Invites.ExpiresAt, unixTime(a.now()))
 }
 
 // pendingLinks returns the live add passkey links of userID, newest first.
@@ -618,8 +617,8 @@ func permNames(u User) []string {
 }
 
 // dateCell renders a labelled timestamp, as in "Created 2 Jan 2026 03:04".
-func dateCell(label string, unix int64) g.Node {
-	return h.Span(h.Class("muted"), g.Text(label+" "+fmtTime(time.Unix(unix, 0), nil)))
+func dateCell(label string, t ant.UnixTime) g.Node {
+	return h.Span(h.Class("muted"), g.Text(label+" "+fmtTime(t.Time, nil)))
 }
 
 // passkeyList renders passkey rows. current is the row id marked "this
@@ -635,7 +634,7 @@ func passkeyList(creds []*Credential, current int64, deleteAction string, canDel
 				h.Span(h.Class("cluster"),
 					h.Strong(g.Text(c.Label)),
 					g.If(c.ID == current, h.Span(h.Class("badge"), g.Text("this device")))),
-				dateCell("Created", c.CreatedAt.Unix()),
+				dateCell("Created", c.CreatedAt),
 				dateCell("Last used", c.LastUsedAt)),
 			g.If(canDelete, h.Form(h.Method("post"), h.Action(deleteAction),
 				h.Input(h.Type("hidden"), h.Name("id"), h.Value(strconv.FormatInt(c.ID, 10))),
@@ -993,8 +992,8 @@ func (a *app) settingsLinkRevoke(w http.ResponseWriter, r *http.Request) error {
 const inviteTTL = 7 * 24 * time.Hour
 
 // expiresIn describes how long until unix, in whole days rounded up.
-func (a *app) expiresIn(unix int64) string {
-	days := (unix - a.now().Unix() + 86399) / 86400
+func (a *app) expiresIn(t ant.UnixTime) string {
+	days := (t.Unix() - a.now().Unix() + 86399) / 86400
 	if days <= 1 {
 		return "expires in 1 day"
 	}

@@ -585,8 +585,7 @@ func (a *app) addMembers(ctx context.Context, db *AppDB, chatID, addedBy int64, 
 // createGroup creates a group with the creator and the given users as
 // members.
 func (a *app) createGroup(ctx context.Context, creatorID int64, name string, userIDs []int64) (Chat, error) {
-	now := a.now().Unix()
-	chat := Chat{Name: name, CreatedBy: creatorID, LastMessageAt: now}
+	chat := Chat{Name: name, CreatedBy: creatorID, LastMessageAt: unixTime(a.now())}
 	err := a.db.Tx(ctx, func(tx *AppDB) error {
 		if err := tx.Chats.Insert(ctx, &chat); err != nil {
 			return serr.Wrap(err)
@@ -793,7 +792,7 @@ func (a *app) messageNodes(v chatView, rows []*Message, loc *time.Location) g.No
 		// when there is room.
 		meta := h.Div(h.ID(id+"-meta"), h.Class("msg-meta"),
 			snoozeMarker(v, *m),
-			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
+			g.If(!m.EditedAt.IsZero(), h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
 			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
 				g.Text(at.Format("15:04"))))
 		content := g.Group{h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body))), meta}
@@ -936,7 +935,7 @@ func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body s
 			return serr.Wrap(err)
 		}
 		_, err = tx.Chats.Where(ant.Eq(&Chats.ID, chat.ID)).Update(ctx,
-			ant.Set(&Chats.LastMessageAt, msg.CreatedAt.Unix()))
+			ant.Set(&Chats.LastMessageAt, msg.CreatedAt))
 		if err != nil {
 			return serr.Wrap(err)
 		}
@@ -1193,9 +1192,8 @@ func dmKey(a, b int64) string {
 // startDM returns the direct message between two users, creating it when
 // there is none yet. created reports whether this call created it.
 func (a *app) startDM(ctx context.Context, userID, otherID int64) (chat Chat, created bool, err error) {
-	now := a.now().Unix()
 	key := sql.NullString{String: dmKey(userID, otherID), Valid: true}
-	c := &Chat{IsDM: true, DMKey: key, CreatedBy: userID, LastMessageAt: now}
+	c := &Chat{IsDM: true, DMKey: key, CreatedBy: userID, LastMessageAt: unixTime(a.now())}
 	err = a.db.Tx(ctx, func(tx *AppDB) error {
 		// FirstOrCreate reads the chat again when a concurrent request
 		// created it first.
@@ -1374,7 +1372,7 @@ func (a *app) messageEditPost(w http.ResponseWriter, r *http.Request) error {
 			Content: "A message cannot be empty. Delete it instead."})
 	}
 	if body != m.Body {
-		m.Body, m.EditedAt = body, a.now().Unix()
+		m.Body, m.EditedAt = body, unixTime(a.now())
 		_, err := a.db.Messages.Where(ant.Eq(&Messages.ID, m.ID)).Update(ctx,
 			ant.Set(&Messages.Body, m.Body), ant.Set(&Messages.EditedAt, m.EditedAt))
 		if err != nil {

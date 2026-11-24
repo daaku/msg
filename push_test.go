@@ -467,7 +467,7 @@ func TestSnoozeRoutes(t *testing.T) {
 	rows := ta.snoozeRows()
 	ensure.DeepEqual(t, len(rows), 1)
 	ensure.DeepEqual(t, *rows[0], Snooze{MessageID: m.ID, UserID: alice.ID,
-		DueAt: time.Date(2026, 1, 3, 5, 0, 0, 0, time.UTC).Unix(), CreatedAt: ant.UnixTime{Time: testNow}})
+		DueAt: unixTime(time.Date(2026, 1, 3, 5, 0, 0, 0, time.UTC)), CreatedAt: ant.UnixTime{Time: testNow}})
 
 	// again replaces the time; one's own message works too
 	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "1h"), http.StatusSeeOther)
@@ -475,7 +475,7 @@ func TestSnoozeRoutes(t *testing.T) {
 	rows = ta.snoozeRows()
 	ensure.DeepEqual(t, len(rows), 2)
 	ensure.DeepEqual(t, rows[0].UserID, alice.ID)
-	ensure.DeepEqual(t, rows[0].DueAt, testNow.Add(time.Hour).Unix())
+	ensure.DeepEqual(t, rows[0].DueAt.Unix(), testNow.Add(time.Hour).Unix())
 	aliceS.next()
 
 	// unsnooze
@@ -624,7 +624,7 @@ func TestSnoozeMovedBeforeFiring(t *testing.T) {
 	ensure.DeepEqual(t, len(ta.sends()), 0)
 	rows := ta.snoozeRows()
 	ensure.DeepEqual(t, len(rows), 1)
-	ensure.DeepEqual(t, rows[0].DueAt, testNow.Add(4*time.Hour).Unix())
+	ensure.DeepEqual(t, rows[0].DueAt.Unix(), testNow.Add(4*time.Hour).Unix())
 }
 
 func TestSnoozeDMPayload(t *testing.T) {

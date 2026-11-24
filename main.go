@@ -440,7 +440,7 @@ type Credential struct {
 	Credential   []byte
 	Label        string
 	CreatedAt    ant.UnixTime
-	LastUsedAt   int64
+	LastUsedAt   ant.UnixTime
 }
 
 type Invite struct {
@@ -452,7 +452,7 @@ type Invite struct {
 	PermAdmin bool
 	CreatedBy sql.NullInt64 // unset for the bootstrap invite
 	CreatedAt ant.UnixTime
-	ExpiresAt int64
+	ExpiresAt ant.UnixTime
 
 	Creator *User
 }
@@ -468,7 +468,7 @@ type Chat struct {
 	DMKey         sql.NullString
 	CreatedBy     int64
 	CreatedAt     ant.UnixTime
-	LastMessageAt int64
+	LastMessageAt ant.UnixTime
 	Icon          string
 	MemberCount   int64 `ant:"computed"` // filled only when asked for
 
@@ -527,7 +527,7 @@ type Message struct {
 	Body      string
 	FileID    sql.NullInt64
 	CreatedAt ant.UnixTime
-	EditedAt  int64
+	EditedAt  ant.UnixTime
 
 	User      *User
 	File      *File
@@ -577,7 +577,7 @@ func (Reaction) Configure(b *ant.ModelBuilder[Reaction]) {
 type Snooze struct {
 	MessageID int64
 	UserID    int64
-	DueAt     int64
+	DueAt     ant.UnixTime
 	CreatedAt ant.UnixTime
 }
 
@@ -718,6 +718,9 @@ func openDB(ctx context.Context, file string, now func() time.Time) (*AppDB, err
 	}
 	return db, nil
 }
+
+// unixTime is t as a column of whole unix seconds.
+func unixTime(t time.Time) ant.UnixTime { return ant.UnixTime{Time: t} }
 
 // configDefault returns the stored config value for key, storing fresh
 // first when there is none. Reading it back after the insert makes two

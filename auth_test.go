@@ -76,7 +76,7 @@ func TestBootstrap(t *testing.T) {
 	ensure.DeepEqual(t, len(first), 1)
 	ensure.DeepEqual(t, first[0].Username, "admin")
 	ensure.True(t, first[0].PermAdmin)
-	ensure.DeepEqual(t, first[0].ExpiresAt, testNow.Add(24*time.Hour).Unix())
+	ensure.DeepEqual(t, first[0].ExpiresAt.Unix(), testNow.Add(24*time.Hour).Unix())
 	ensure.True(t, len(first[0].Token) >= 43, "256 bit token")
 
 	// a second start replaces it
@@ -319,7 +319,7 @@ func TestSignIn(t *testing.T) {
 
 	row, err := ta.app.db.Credentials.Where(ant.Col(&Credentials.CredentialID).Eq(bob.cred.ID)).Single(ctx)
 	ensure.Nil(t, err)
-	ensure.DeepEqual(t, row.LastUsedAt, testNow.Add(time.Minute).Unix())
+	ensure.DeepEqual(t, row.LastUsedAt.Unix(), testNow.Add(time.Minute).Unix())
 
 	// already signed in: the sign in page goes home
 	ensure.DeepEqual(t, ta.get(pSignIn, ta.as(bob)).Code, http.StatusSeeOther)
@@ -669,7 +669,7 @@ func TestSettingsLinks(t *testing.T) {
 	ensure.DeepEqual(t, link.Handle, bob.Handle)
 	ensure.DeepEqual(t, link.Username, "bob")
 	ensure.DeepEqual(t, link.CreatedBy.Int64, bob.ID)
-	ensure.DeepEqual(t, link.ExpiresAt, testNow.Add(24*time.Hour).Unix())
+	ensure.DeepEqual(t, link.ExpiresAt.Unix(), testNow.Add(24*time.Hour).Unix())
 
 	page := ta.get(pSettings, ta.as(bob)).Body.String()
 	ensure.StringContains(t, page, fmt.Sprintf(`id="link-%d"`, link.ID))
@@ -803,7 +803,7 @@ func TestInvitesCreate(t *testing.T) {
 	ensure.DeepEqual(t, inv.CreatedBy.Int64, alice.ID)
 	ensure.False(t, inv.UserID.Valid)
 	ensure.False(t, inv.PermAdmin)
-	ensure.DeepEqual(t, inv.ExpiresAt, testNow.Add(7*24*time.Hour).Unix())
+	ensure.DeepEqual(t, inv.ExpiresAt.Unix(), testNow.Add(7*24*time.Hour).Unix())
 
 	page = ta.get(pInvites, ta.as(alice)).Body.String()
 	ensure.StringContains(t, page, fmt.Sprintf(`id="invite-%d"`, inv.ID))
@@ -1150,7 +1150,7 @@ func TestAdminRecovery(t *testing.T) {
 	ensure.DeepEqual(t, len(links), 1)
 	link := links[0]
 	ensure.DeepEqual(t, link.CreatedBy.Int64, admin.ID)
-	ensure.DeepEqual(t, link.ExpiresAt, testNow.Add(24*time.Hour).Unix())
+	ensure.DeepEqual(t, link.ExpiresAt.Unix(), testNow.Add(24*time.Hour).Unix())
 	page = ta.get(base, ta.as(admin)).Body.String()
 	ensure.StringContains(t, page, `value="`+ta.app.inviteURL(link)+`"`)
 	ensure.StringContains(t, page, "data-copy")
