@@ -502,8 +502,8 @@ type File struct {
 	ID         int64
 	ChatID     int64
 	UserID     int64
-	Kind       string
-	Status     string
+	Kind       fileKind
+	Status     fileStatus
 	Name       string
 	S3Prefix   string
 	UploadID   string
@@ -541,13 +541,13 @@ func (m *Message) media() bool {
 }
 
 func (Message) Configure(b *ant.ModelBuilder[Message]) {
-	b.HasOne(&Messages.Preview).Where(ant.Eq(&Previews.Status, "ready"))
+	b.HasOne(&Messages.Preview).Where(ant.Eq(&Previews.Status, previewReady))
 }
 
 type Preview struct {
 	MessageID   int64
 	URL         string
-	Status      string
+	Status      previewStatus
 	Title       string
 	Description string
 	SiteName    string

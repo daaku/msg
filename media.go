@@ -45,18 +45,33 @@ const (
 	sniffLength    = 4096
 	maxFileName    = 200
 
-	kindImage   = "image"
-	kindVideo   = "video"
-	kindOther   = "other"
-	kindPreview = "preview"
-
-	statusUploading  = "uploading"
-	statusPending    = "pending"
-	statusProcessing = "processing"
-	statusReady      = "ready"
-	statusFailed     = "failed"
-
 	cacheForever = "private, max-age=31536000, immutable"
+)
+
+// fileKind is files.kind, fileStatus is files.status and previewStatus is
+// previews.status. Distinct types keep a kind from being compared with a
+// status, or a file's status with a preview's.
+type (
+	fileKind      string
+	fileStatus    string
+	previewStatus string
+)
+
+const (
+	kindImage   fileKind = "image"
+	kindVideo   fileKind = "video"
+	kindOther   fileKind = "other"
+	kindPreview fileKind = "preview"
+
+	statusUploading  fileStatus = "uploading"
+	statusPending    fileStatus = "pending"
+	statusProcessing fileStatus = "processing"
+	statusReady      fileStatus = "ready"
+	statusFailed     fileStatus = "failed"
+
+	previewPending previewStatus = "pending"
+	previewReady   previewStatus = "ready"
+	previewFailed  previewStatus = "failed"
 )
 
 func fileKey(f File, variant string) string { return f.S3Prefix + "/" + variant }
@@ -64,7 +79,7 @@ func fileKey(f File, variant string) string { return f.S3Prefix + "/" + variant 
 // sniffMedia decides how a file is treated from its first bytes. It returns
 // the kind and the explicit format name the converters are told to use. The
 // file name and the browser's content type play no part.
-func sniffMedia(head []byte) (kind, format string) {
+func sniffMedia(head []byte) (kind fileKind, format string) {
 	has := func(off int, s string) bool {
 		return len(head) >= off+len(s) && string(head[off:off+len(s)]) == s
 	}
@@ -119,7 +134,7 @@ func cleanFileName(name string) string {
 }
 
 // fileSnippet is the one line description of a file message.
-func fileSnippet(kind, name string) string {
+func fileSnippet(kind fileKind, name string) string {
 	switch kind {
 	case kindImage:
 		return "📷 Photo"
@@ -1541,8 +1556,8 @@ func (a *app) processPreview(ctx context.Context, p Preview) {
 		}
 		// A claimed preview is failed until it is ready, see previewOnce.
 		n, err := tx.Previews.Where(ant.Eq(&Previews.MessageID, p.MessageID), ant.Eq(&Previews.URL, p.URL),
-			ant.Eq(&Previews.Status, statusFailed)).Update(ctx,
-			ant.Set(&Previews.Status, statusReady),
+			ant.Eq(&Previews.Status, previewFailed)).Update(ctx,
+			ant.Set(&Previews.Status, previewReady),
 			ant.Set(&Previews.Title, data.Title),
 			ant.Set(&Previews.Description, data.Description),
 			ant.Set(&Previews.SiteName, data.SiteName),
@@ -1571,9 +1586,9 @@ func (a *app) processPreview(ctx context.Context, p Preview) {
 func (a *app) previewOnce(ctx context.Context) bool {
 	// A preview is tried once: claiming it marks it failed, and success
 	// later marks it ready. A crash in between leaves it failed.
-	claimed, err := a.db.Previews.Where(ant.Eq(&Previews.Status, statusPending)).
+	claimed, err := a.db.Previews.Where(ant.Eq(&Previews.Status, previewPending)).
 		OrderBy(&Previews.MessageID).Limit(1).
-		UpdateReturning(ctx, ant.Set(&Previews.Status, statusFailed))
+		UpdateReturning(ctx, ant.Set(&Previews.Status, previewFailed))
 	if err != nil {
 		if ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "preview claim: %+v\n", serr.Wrap(err))
@@ -1622,7 +1637,7 @@ func (a *app) requestPreview(ctx context.Context, msg Message) {
 		return
 	}
 	err := a.db.Previews.Insert(ctx, &Preview{
-		MessageID: msg.ID, URL: u, Status: statusPending,
+		MessageID: msg.ID, URL: u, Status: previewPending,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "preview create: %+v\n", serr.Wrap(err))

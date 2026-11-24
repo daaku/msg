@@ -92,7 +92,9 @@ var tinyMP4 = []byte("\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2\x00\x00\x
 func TestSniffMedia(t *testing.T) {
 	ftyp := func(brand string) string { return "\x00\x00\x00\x18ftyp" + brand + "\x00\x00\x00\x00" }
 	cases := []struct {
-		name, head, kind, format string
+		name, head string
+		kind       fileKind
+		format     string
 	}{
 		{"jpeg", "\xff\xd8\xff\xe0\x00\x10JFIF", kindImage, "jpeg"},
 		{"png", "\x89PNG\r\n\x1a\n\x00\x00", kindImage, "png"},
@@ -608,7 +610,7 @@ func TestMediaBox(t *testing.T) {
 
 // mediaMessage is a message with a converted picture or video, made without
 // running the converters.
-func (ta *testApp) mediaMessage(user *testUser, chat Chat, kind string) Message {
+func (ta *testApp) mediaMessage(user *testUser, chat Chat, kind fileKind) Message {
 	ta.t.Helper()
 	t := ta.t
 	file := ta.upload(user, chat, "p.bin", []byte("x"))

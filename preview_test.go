@@ -343,7 +343,7 @@ func TestPreviewEndToEnd(t *testing.T) {
 
 	c, _ := ta.app.hub.subscribe(alice.ID, chat.ID)
 	m := ta.send(alice, chat, "look at "+link+" and "+srv.URL+"/other please")
-	ensure.DeepEqual(t, ta.preview(m.ID).Status, "pending")
+	ensure.DeepEqual(t, ta.preview(m.ID).Status, previewPending)
 	ensure.DeepEqual(t, ta.preview(m.ID).URL, link, "only the first URL")
 	pinged(c)
 	page := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
@@ -352,7 +352,7 @@ func TestPreviewEndToEnd(t *testing.T) {
 	ta.runPreviews()
 
 	p := ta.preview(m.ID)
-	ensure.DeepEqual(t, p.Status, "ready")
+	ensure.DeepEqual(t, p.Status, previewReady)
 	ensure.DeepEqual(t, p.Title, "A <script>alert(1)</script> title")
 	ensure.DeepEqual(t, p.Description, "Some words")
 	ensure.DeepEqual(t, p.SiteName, "The Site")
@@ -456,24 +456,24 @@ func TestPreviewFailures(t *testing.T) {
 	defer srv.Close()
 
 	c, _ := ta.app.hub.subscribe(alice.ID, chat.ID)
-	check := func(path, status string) Preview {
+	check := func(path string, status previewStatus) Preview {
 		t.Helper()
 		m := ta.send(alice, chat, srv.URL+path)
 		pinged(c)
 		ta.runPreviews()
 		p := ta.preview(m.ID)
 		ensure.DeepEqual(t, p.Status, status, path)
-		ensure.DeepEqual(t, pinged(c), status == "ready", path)
+		ensure.DeepEqual(t, pinged(c), status == previewReady, path)
 		return p
 	}
-	check("/json", "failed")
-	check("/500", "failed")
-	check("/empty", "failed") // neither title nor image
+	check("/json", previewFailed)
+	check("/500", previewFailed)
+	check("/empty", previewFailed) // neither title nor image
 	// an image that is not an image, or is too big, is dropped; the card stays
-	ensure.True(t, check("/htmlimage", "ready").FileID == nil)
-	ensure.True(t, check("/bigimage", "ready").FileID == nil)
+	ensure.True(t, check("/htmlimage", previewReady).FileID == nil)
+	ensure.True(t, check("/bigimage", previewReady).FileID == nil)
 	// an image alone is enough
-	ensure.True(t, check("/imageonly", "ready").FileID != nil)
+	ensure.True(t, check("/imageonly", previewReady).FileID != nil)
 	ensure.DeepEqual(t, countRows(t, ta, "files"), 1)
 
 	// a failed preview renders nothing and is never retried
@@ -531,7 +531,7 @@ func TestPreviewForDeletedOrEditedMessage(t *testing.T) {
 	ta.runPreviews()
 	p := ta.preview(m.ID)
 	ensure.DeepEqual(t, p.URL, srv.URL+"/b")
-	ensure.DeepEqual(t, p.Status, "ready")
+	ensure.DeepEqual(t, p.Status, previewReady)
 	ensure.DeepEqual(t, countRows(t, ta, "files"), 1, "only the image of the current preview")
 	ensure.DeepEqual(t, len(ta.fakeObjects()), 1)
 }
