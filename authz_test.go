@@ -533,8 +533,11 @@ func TestInviteAcceptedOnceUnderConcurrency(t *testing.T) {
 
 // Fifty senders and ten open streams on one group: every message is stored
 // exactly once, nothing fails, and every stream hears about it.
+// TestConcurrentSendersAndStreams is sequential: it loads one database with
+// 200 concurrent writes, which next to the parallel tests can outwait
+// SQLite's busy timeout under -race.
 func TestConcurrentSendersAndStreams(t *testing.T) {
-	ta := newTestApp(t)
+	ta := newTestAppIn(t, t.TempDir())
 	alice := ta.newUser("alice", "group")
 	bob := ta.newUser("bob")
 	chat := ta.newChat(alice, "Team", bob)

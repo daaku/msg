@@ -45,6 +45,7 @@ func endpoints(sends []fakeSend) []string {
 }
 
 func TestVAPIDKeyStable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	a1 := newTestAppIn(t, dir).app
 	a2 := newTestAppIn(t, dir).app
@@ -57,7 +58,7 @@ func TestVAPIDKeyStable(t *testing.T) {
 	pub, err := vapidPublic(key)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, pub, a1.vapidPublic)
-	ensure.NotDeepEqual(t, newTestApp(t).app.vapidPublic, a1.vapidPublic)
+	ensure.NotDeepEqual(t, newTestAppIn(t, t.TempDir()).app.vapidPublic, a1.vapidPublic)
 }
 
 func TestPushSubscriber(t *testing.T) {

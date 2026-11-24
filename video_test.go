@@ -200,11 +200,15 @@ func TestVideoInputSafety(t *testing.T) {
 		}
 	}
 	ensure.DeepEqual(t, args[0], "-nostdin")
+}
 
-	// formats outside the allow list never start a process
+// TestVideoFormatAllowList is sequential: its empty PATH proves that
+// formats outside the allow list never start a process.
+func TestVideoFormatAllowList(t *testing.T) {
+	ta := newTestAppIn(t, t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	for _, format := range []string{"hls", "concat", "lavfi", "mp4", "", "image2"} {
-		_, err := ta.app.convertVideo(ctx, dir, format)
+		_, err := ta.app.convertVideo(t.Context(), t.TempDir(), format)
 		ensure.True(t, isPermanent(err), format)
 		ensure.StringContains(t, err.Error(), "unsupported video format")
 	}

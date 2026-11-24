@@ -378,6 +378,11 @@ the reverted PWA worker and, if there were any, reloads the open pages.
 - No mocks of the database. `newTestApp(t)` in `main_test.go` builds a real
   `*app` on a temporary SQLite file, the fake S3, a fake push sender and a
   fixed clock. Helpers there create users, sessions, groups and messages.
+- `newTestApp(t)` also calls `t.Parallel()`, so every test with an app runs
+  in parallel on its own database. `newTestAppIn(t, dir)` does not: a test
+  that makes more than one app calls `t.Parallel()` itself and uses it for
+  each, and a test that must stay sequential (it calls `t.Setenv`, or loads
+  one database hard) uses it and says why in a comment.
 - Test through HTTP: build a request, call the app's handler, assert on the
   status, the redirect, and the database. Assert on HTML with substring checks
   on ids and text, not on whole documents.

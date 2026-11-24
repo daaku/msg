@@ -91,8 +91,12 @@ func (ta *testApp) sends() []fakeSend {
 
 // newTestApp builds an app with default configuration on a temporary state
 // directory with a real, migrated database and a fixed clock.
+// newTestApp makes an app with a database of its own and marks the test
+// parallel. Use newTestAppIn for a test that must stay sequential, such as
+// one that calls t.Setenv or makes several apps.
 func newTestApp(t *testing.T) *testApp {
 	t.Helper()
+	t.Parallel()
 	return newTestAppIn(t, t.TempDir())
 }
 
@@ -490,13 +494,14 @@ func readOne[T any](ctx context.Context, t *ant.Table[T]) error {
 }
 
 func TestSecret(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	a1 := newTestAppIn(t, dir).app
 	a2 := newTestAppIn(t, dir).app
 	ensure.DeepEqual(t, len(a1.secret("x")), 32)
 	ensure.DeepEqual(t, a1.secret("x"), a2.secret("x"))
 	ensure.NotDeepEqual(t, a1.secret("x"), a1.secret("y"))
-	other := newTestApp(t).app
+	other := newTestAppIn(t, t.TempDir()).app
 	ensure.NotDeepEqual(t, a1.secret("x"), other.secret("x"))
 }
 

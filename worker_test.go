@@ -267,11 +267,15 @@ func TestMagickFormatPinning(t *testing.T) {
 	ensure.True(t, isPermanent(err), err)
 	_, statErr := os.Stat(filepath.Join(dir, "out"))
 	ensure.True(t, os.IsNotExist(statErr), "nothing was written")
+}
 
-	// formats outside the allow list never start a process
+// TestMagickFormatAllowList is sequential: its empty PATH proves that
+// formats outside the allow list never start a process.
+func TestMagickFormatAllowList(t *testing.T) {
+	ta := newTestAppIn(t, t.TempDir())
 	t.Setenv("PATH", t.TempDir())
 	for _, format := range []string{"mvg", "svg", "msl", "url", "", "jpeg:x", "mov"} {
-		_, _, err = ta.app.magickConvert(ctx, dir, format, "in", "out", 100, false)
+		_, _, err := ta.app.magickConvert(t.Context(), t.TempDir(), format, "in", "out", 100, false)
 		ensure.True(t, isPermanent(err), format)
 		ensure.StringContains(t, err.Error(), "unsupported image format")
 	}
