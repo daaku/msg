@@ -393,7 +393,7 @@ const (
 	margin     = 16
 	pad        = 12
 	gap        = 8
-	headHeight = 36
+	headHeight = 48 // room around the 32 of Dismiss all
 	titleH     = 22
 	lineH      = 20
 	maxLines   = 4 // of a chat; the rest are counted
