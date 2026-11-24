@@ -458,6 +458,38 @@ func TestMigrations(t *testing.T) {
 
 }
 
+// TestModelsMatchSchema reads every table through its model, so a field
+// with no column in db/ fails here rather than in a handler.
+func TestModelsMatchSchema(t *testing.T) {
+	db := newTestApp(t).app.db
+	ctx := t.Context()
+	for name, err := range map[string]error{
+		"config":             readOne(ctx, &db.Config),
+		"users":              readOne(ctx, &db.Users),
+		"credentials":        readOne(ctx, &db.Credentials),
+		"invites":            readOne(ctx, &db.Invites),
+		"chats":              readOne(ctx, &db.Chats),
+		"members":            readOne(ctx, &db.Members),
+		"files":              readOne(ctx, &db.Files),
+		"messages":           readOne(ctx, &db.Messages),
+		"previews":           readOne(ctx, &db.Previews),
+		"reactions":          readOne(ctx, &db.Reactions),
+		"snoozes":            readOne(ctx, &db.Snoozes),
+		"push_subscriptions": readOne(ctx, &db.PushSubscriptions),
+		"user_stats":         readOne(ctx, &db.UserStats),
+		"chat_stats":         readOne(ctx, &db.ChatStats),
+		"avatars":            readOne(ctx, &db.Avatars),
+		"chat_icons":         readOne(ctx, &db.ChatIcons),
+	} {
+		ensure.Nil(t, err, name)
+	}
+}
+
+func readOne[T any](ctx context.Context, t *ant.Table[T]) error {
+	_, err := t.Limit(1).All(ctx)
+	return err
+}
+
 func TestSecret(t *testing.T) {
 	dir := t.TempDir()
 	a1 := newTestAppIn(t, dir).app
