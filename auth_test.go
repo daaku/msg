@@ -2,9 +2,9 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/base64"
 	"fmt"
+	"github.com/skudra-go/ant"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -25,14 +25,14 @@ import (
 func countRows(t *testing.T, ta *testApp, table string) int {
 	t.Helper()
 	var n int
-	ensure.Nil(t, ta.app.db.QueryRowContext(t.Context(),
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM "+table).Scan(&n))
 	return n
 }
 
 func bootstrapInvites(t *testing.T, ta *testApp) []Invite {
 	t.Helper()
-	rows, err := ta.app.db.QueryContext(t.Context(),
+	rows, err := ta.app.db.DB().QueryContext(t.Context(),
 		"SELECT token, username, perm_admin, expires_at FROM invites WHERE created_by IS NULL")
 	ensure.Nil(t, err)
 	defer rows.Close()
@@ -87,12 +87,11 @@ func TestBootstrap(t *testing.T) {
 	ensure.DeepEqual(t, ta.get(invitePath(first[0].Token)).Code, http.StatusNotFound)
 
 	// the link creates the admin
-	inv, err := ta.app.q.InviteByToken(ctx, InviteByTokenParams{
-		Token: second[0].Token, Now: testNow.Unix()})
+	inv, err := ta.app.db.Invites.Where(ant.Eq(&Invites.Token, second[0].Token)).Single(ctx)
 	ensure.Nil(t, err)
 	w, _, _ := ta.acceptInvite(inv)
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
-	admin, err := ta.app.q.UserByUsername(ctx, "admin")
+	admin, err := ta.app.db.Users.Where(ant.Eq(&Users.Username, "admin")).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.True(t, admin.PermAdmin)
 	ensure.False(t, admin.InvitedBy.Valid)
@@ -122,7 +121,7 @@ func TestInviteAccept(t *testing.T) {
 	ta := newTestApp(t)
 	ctx := t.Context()
 	inviter := ta.newUser("inviter")
-	inv, err := ta.app.createInvite(ctx, ta.app.q, inviteParams{
+	inv, err := ta.app.createInvite(ctx, ta.app.db, inviteParams{
 		Username: "bob", CreatedBy: inviter.ID, TTL: time.Hour})
 	ensure.Nil(t, err)
 
@@ -130,21 +129,21 @@ func TestInviteAccept(t *testing.T) {
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther, w.Body.String())
 	ensure.DeepEqual(t, w.Header().Get("Location"), pHome)
 
-	bob, err := ta.app.q.UserByUsername(ctx, "bob")
+	bob, err := ta.app.db.Users.Where(ant.Eq(&Users.Username, "bob")).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, bob.Handle, inv.Handle)
 	ensure.False(t, bob.PermAdmin)
 	ensure.False(t, bob.PermInvite)
 	ensure.False(t, bob.PermGroup)
 	ensure.DeepEqual(t, bob.InvitedBy.Int64, inviter.ID)
-	ensure.DeepEqual(t, bob.CreatedAt, testNow.Unix())
+	ensure.DeepEqual(t, bob.CreatedAt.Unix(), testNow.Unix())
 
-	creds, err := ta.app.q.CredentialsByUser(ctx, bob.ID)
+	creds, err := ta.app.credentials(ctx, bob.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(creds), 1)
 	ensure.DeepEqual(t, creds[0].CredentialID, cred.ID)
 
-	_, err = ta.app.q.InviteByToken(ctx, InviteByTokenParams{Token: inv.Token})
+	_, err = ta.app.db.Invites.Where(ant.Eq(&Invites.Token, inv.Token)).Single(ctx)
 	ensure.True(t, err != nil, "invite must be deleted")
 
 	// the returned cookie authenticates
@@ -260,7 +259,7 @@ func TestAddPasskeyLink(t *testing.T) {
 	ta := newTestApp(t)
 	ctx := t.Context()
 	bob := ta.newUser("bob")
-	inv, err := ta.app.createInvite(ctx, ta.app.q, inviteParams{
+	inv, err := ta.app.createInvite(ctx, ta.app.db, inviteParams{
 		User: &bob.User, CreatedBy: bob.ID, TTL: time.Hour})
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, inv.Handle, bob.Handle)
@@ -277,13 +276,13 @@ func TestAddPasskeyLink(t *testing.T) {
 	w, auth, cred := ta.acceptInvite(inv)
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther, w.Body.String())
 	ensure.DeepEqual(t, countRows(t, ta, "users"), 1)
-	creds, err := ta.app.q.CredentialsByUser(ctx, bob.ID)
+	creds, err := ta.app.credentials(ctx, bob.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(creds), 2)
 
 	// the new session is bound to the new passkey
 	ensure.DeepEqual(t, ta.get(pHome, withCookies(w)).Code, http.StatusOK)
-	_, err = ta.app.db.ExecContext(ctx, "DELETE FROM credentials WHERE id = ?", creds[1].ID)
+	_, err = ta.app.db.DB().ExecContext(ctx, "DELETE FROM credentials WHERE id = ?", creds[1].ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, ta.get(pHome, withCookies(w)).Code, http.StatusSeeOther)
 	ensure.DeepEqual(t, ta.get(pHome, ta.as(bob)).Code, http.StatusOK)
@@ -318,7 +317,7 @@ func TestSignIn(t *testing.T) {
 	ensure.DeepEqual(t, w.Header().Get("Location"), pHome)
 	ensure.DeepEqual(t, ta.get(pHome, withCookies(w)).Code, http.StatusOK)
 
-	row, err := ta.app.q.CredentialByCredentialID(ctx, bob.cred.ID)
+	row, err := ta.app.db.Credentials.Where(ant.Col(&Credentials.CredentialID).Eq(bob.cred.ID)).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, row.LastUsedAt, testNow.Add(time.Minute).Unix())
 
@@ -377,7 +376,7 @@ func TestSignInFailures(t *testing.T) {
 	ensure.StringContains(t, flash.Body.String(), "This passkey is not registered here.")
 
 	// a passkey deleted from the database
-	_, err = ta.app.db.ExecContext(ctx, "DELETE FROM credentials WHERE id = ?", bob.credID)
+	_, err = ta.app.db.DB().ExecContext(ctx, "DELETE FROM credentials WHERE id = ?", bob.credID)
 	ensure.Nil(t, err)
 	rejected(ta.signIn(bob.auth, bob.cred))
 }
@@ -386,7 +385,7 @@ func TestSessionDiesWithCredential(t *testing.T) {
 	ta := newTestApp(t)
 	bob := ta.newUser("bob")
 	ensure.DeepEqual(t, ta.get(pHome, ta.as(bob)).Code, http.StatusOK)
-	_, err := ta.app.db.ExecContext(t.Context(),
+	_, err := ta.app.db.DB().ExecContext(t.Context(),
 		"DELETE FROM credentials WHERE id = ?", bob.credID)
 	ensure.Nil(t, err)
 	w := ta.get(pHome, ta.as(bob))
@@ -492,7 +491,7 @@ func TestPermissionChangeAppliesToNextRequest(t *testing.T) {
 		return w.Code
 	}
 	ensure.DeepEqual(t, call(), http.StatusNotFound)
-	_, err := ta.app.db.ExecContext(t.Context(),
+	_, err := ta.app.db.DB().ExecContext(t.Context(),
 		"UPDATE users SET perm_admin = TRUE WHERE id = ?", bob.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, call(), http.StatusOK)
@@ -509,19 +508,16 @@ func (ta *testApp) addPasskey(u *testUser) (*httptest.ResponseRecorder, *virtual
 	return w, &auth, cred
 }
 
-func pendingLinks(t *testing.T, ta *testApp, userID int64) []Invite {
+func pendingLinks(t *testing.T, ta *testApp, userID int64) []*Invite {
 	t.Helper()
-	links, err := ta.app.q.InvitesPendingForUser(t.Context(), InvitesPendingForUserParams{
-		UserID: sql.NullInt64{Int64: userID, Valid: true},
-		Now:    ta.app.now().Unix(),
-	})
+	links, err := ta.app.pendingLinks(t.Context(), ta.app.db, userID)
 	ensure.Nil(t, err)
 	return links
 }
 
 func credCount(t *testing.T, ta *testApp, userID int64) int64 {
 	t.Helper()
-	n, err := ta.app.q.CredentialCountByUser(t.Context(), userID)
+	n, err := ta.app.db.Credentials.Where(ant.Eq(&Credentials.UserID, userID)).Count(t.Context())
 	ensure.Nil(t, err)
 	return n
 }
@@ -584,7 +580,7 @@ func TestSettingsAddPasskey(t *testing.T) {
 	ensure.StringContains(t, ta.flashOf(w, ta.as(bob)), "Passkey added.")
 	ensure.DeepEqual(t, w.Header().Get("Location"), pSettings)
 	ensure.DeepEqual(t, credCount(t, ta, bob.ID), int64(2))
-	row, err := ta.app.q.CredentialByCredentialID(ctx, cred.ID)
+	row, err := ta.app.db.Credentials.Where(ant.Col(&Credentials.CredentialID).Eq(cred.ID)).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, row.UserID, bob.ID)
 
@@ -617,7 +613,7 @@ func TestSettingsPasskeyDelete(t *testing.T) {
 	}
 
 	_, _, cred2 := ta.addPasskey(bob)
-	row2, err := ta.app.q.CredentialByCredentialID(ctx, cred2.ID)
+	row2, err := ta.app.db.Credentials.Where(ant.Col(&Credentials.CredentialID).Eq(cred2.ID)).Single(ctx)
 	ensure.Nil(t, err)
 
 	// another user's passkey is a no op
@@ -746,10 +742,10 @@ func invitesSent(t *testing.T, ta *testApp, userID int64) int64 {
 	return s.InvitesSent
 }
 
-func pendingInvite(t *testing.T, ta *testApp, username string) Invite {
+func pendingInvite(t *testing.T, ta *testApp, username string) *Invite {
 	t.Helper()
-	inv, err := ta.app.q.InvitePendingByUsername(t.Context(), InvitePendingByUsernameParams{
-		Username: username, Now: ta.app.now().Unix()})
+	inv, err := ta.app.db.Invites.Where(ant.Eq(&Invites.Username, username), ant.IsNull(&Invites.UserID),
+		ta.app.inviteLive()).Single(t.Context())
 	ensure.Nil(t, err, username)
 	return inv
 }
@@ -824,7 +820,7 @@ func TestInvitesCreate(t *testing.T) {
 	// the link works end to end
 	aw, _, _ := ta.acceptInvite(inv)
 	ensure.DeepEqual(t, aw.Code, http.StatusSeeOther, aw.Body.String())
-	bob, err := ta.app.q.UserByUsername(ctx, "bob")
+	bob, err := ta.app.db.Users.Where(ant.Eq(&Users.Username, "bob")).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.False(t, bob.PermAdmin)
 	ensure.False(t, bob.PermInvite)
@@ -867,7 +863,7 @@ func TestInvitesUniqueIndexBackstop(t *testing.T) {
 	alice := ta.newUser("alice", "invite")
 	// Simulate a racing request that inserts the same username between the
 	// pending check and the insert.
-	_, err := ta.app.db.ExecContext(t.Context(), `
+	_, err := ta.app.db.DB().ExecContext(t.Context(), `
 		CREATE TRIGGER race BEFORE INSERT ON invites
 		WHEN NEW.username = 'bob' AND NEW.token != 'racer'
 		BEGIN
@@ -903,7 +899,7 @@ func TestInvitesRevoke(t *testing.T) {
 	alice := ta.newUser("alice", "invite")
 	mallory := ta.newUser("mallory", "invite")
 	admin := ta.newUser("boss", "admin")
-	revoke := func(u *testUser, inv Invite) *httptest.ResponseRecorder {
+	revoke := func(u *testUser, inv *Invite) *httptest.ResponseRecorder {
 		return ta.post(pInvitesRevoke, url.Values{"id": {strconv.FormatInt(inv.ID, 10)}}, ta.as(u))
 	}
 	ta.post(pInvites, url.Values{"username": {"bob"}}, ta.as(alice))
@@ -923,7 +919,7 @@ func TestInvitesRevoke(t *testing.T) {
 	ensure.DeepEqual(t, ta.get(invitePath(carl.Token)).Code, http.StatusNotFound)
 
 	// never an add passkey link or the bootstrap invite
-	link, err := ta.app.createInvite(t.Context(), ta.app.q, inviteParams{
+	link, err := ta.app.createInvite(t.Context(), ta.app.db, inviteParams{
 		User: &alice.User, CreatedBy: alice.ID, TTL: time.Hour})
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, revoke(alice, link).Code, http.StatusNotFound)
@@ -940,7 +936,7 @@ func TestInvitesList(t *testing.T) {
 	admin := ta.newUser("boss", "admin")
 	ta.post(pInvites, url.Values{"username": {"bob"}}, ta.as(alice))
 	ta.post(pInvites, url.Values{"username": {"carl"}}, ta.as(mallory))
-	link, err := ta.app.createInvite(t.Context(), ta.app.q, inviteParams{
+	link, err := ta.app.createInvite(t.Context(), ta.app.db, inviteParams{
 		User: &alice.User, CreatedBy: alice.ID, TTL: time.Hour})
 	ensure.Nil(t, err)
 	bob, carl := pendingInvite(t, ta, "bob"), pendingInvite(t, ta, "carl")
@@ -981,7 +977,7 @@ func TestAdminAccess(t *testing.T) {
 	}
 	// nothing changed
 	ensure.DeepEqual(t, credCount(t, ta, plain.ID), int64(1))
-	u, err := ta.app.q.UserByID(t.Context(), plain.ID)
+	u, err := ta.app.db.Users.Find(t.Context(), plain.ID)
 	ensure.Nil(t, err)
 	ensure.False(t, u.PermAdmin)
 	ensure.DeepEqual(t, countRows(t, ta, "invites"), 0)
@@ -1008,11 +1004,11 @@ func TestAdminList(t *testing.T) {
 	ta := newTestApp(t)
 	ctx := t.Context()
 	admin := ta.newUser("boss", "admin")
-	inv, err := ta.app.createInvite(ctx, ta.app.q, inviteParams{
+	inv, err := ta.app.createInvite(ctx, ta.app.db, inviteParams{
 		Username: "carol", CreatedBy: admin.ID, TTL: time.Hour})
 	ensure.Nil(t, err)
 	_, _, _ = ta.acceptInvite(inv)
-	carol, err := ta.app.q.UserByUsername(ctx, "carol")
+	carol, err := ta.app.db.Users.Where(ant.Eq(&Users.Username, "carol")).Single(ctx)
 	ensure.Nil(t, err)
 	alice := ta.newUser("alice", "invite")
 	ta.addPasskey(alice)
@@ -1050,9 +1046,9 @@ func TestAdminPerms(t *testing.T) {
 		w := ta.post(adminUserPath(bob.ID)+"/perms", form, ta.as(admin))
 		ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "Permissions saved.")
 	}
-	get := func() User {
+	get := func() *User {
 		t.Helper()
-		u, err := ta.app.q.UserByID(ctx, bob.ID)
+		u, err := ta.app.db.Users.Find(ctx, bob.ID)
 		ensure.Nil(t, err)
 		return u
 	}
@@ -1101,7 +1097,7 @@ func TestAdminCannotRemoveOwnAdmin(t *testing.T) {
 
 	w := ta.post(adminUserPath(admin.ID)+"/perms", url.Values{"invite": {"1"}}, ta.as(admin))
 	ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "You cannot remove your own admin permission.")
-	u, err := ta.app.q.UserByID(t.Context(), admin.ID)
+	u, err := ta.app.db.Users.Find(t.Context(), admin.ID)
 	ensure.Nil(t, err)
 	ensure.True(t, u.PermAdmin)
 	ensure.False(t, u.PermInvite)
@@ -1109,7 +1105,7 @@ func TestAdminCannotRemoveOwnAdmin(t *testing.T) {
 	// the form as rendered still saves the other permissions
 	w = ta.post(adminUserPath(admin.ID)+"/perms", url.Values{"admin": {"1"}, "invite": {"1"}}, ta.as(admin))
 	ensure.StringContains(t, ta.flashOf(w, ta.as(admin)), "Permissions saved.")
-	u, err = ta.app.q.UserByID(t.Context(), admin.ID)
+	u, err = ta.app.db.Users.Find(t.Context(), admin.ID)
 	ensure.Nil(t, err)
 	ensure.True(t, u.PermAdmin && u.PermInvite)
 
@@ -1177,7 +1173,7 @@ func TestAdminRecovery(t *testing.T) {
 	si := ta.signIn(auth, cred)
 	ensure.DeepEqual(t, si.Header().Get("Location"), pHome)
 	ensure.StringContains(t, ta.get(pSettings, withCookies(si)).Body.String(), "<dd>bob</dd>")
-	row, err := ta.app.q.CredentialByCredentialID(ctx, cred.ID)
+	row, err := ta.app.db.Credentials.Where(ant.Col(&Credentials.CredentialID).Eq(cred.ID)).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, row.UserID, bob.ID)
 	ensure.DeepEqual(t, invitesSent(t, ta, admin.ID), int64(0))
@@ -1211,7 +1207,7 @@ func (ta *testApp) setAvatar(u *testUser, w, h int) *httptest.ResponseRecorder {
 
 func avatarOf(t *testing.T, ta *testApp, userID int64) string {
 	t.Helper()
-	u, err := ta.app.q.UserByID(t.Context(), userID)
+	u, err := ta.app.db.Users.Find(t.Context(), userID)
 	ensure.Nil(t, err)
 	return u.Avatar
 }

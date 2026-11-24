@@ -1,11 +1,8 @@
 package main
 
-//go:generate go tool sqlc generate
-
 import (
 	"context"
 	"crypto/hkdf"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"embed"
@@ -34,6 +31,8 @@ import (
 	"github.com/daaku/sookie"
 	"github.com/daaku/sqlmig"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/skudra-go/ant"
+	"github.com/skudra-go/ant/dialect/sqlite"
 	g "maragu.dev/gomponents"
 	h "maragu.dev/gomponents/html"
 
@@ -314,8 +313,7 @@ type app struct {
 	ctx context.Context
 	bg  sync.WaitGroup
 	now func() time.Time
-	db  *sql.DB
-	q   *Queries
+	db  *AppDB
 	wa  *webauthn.WebAuthn
 	hub *hub
 	s3  *s3Client
@@ -354,16 +352,10 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	db, err := openDB(ctx, filepath.Join(cfg.StateDir, "msg.db"))
-	if err != nil {
-		return nil, err
-	}
 	a := &app{
 		cfg:          cfg,
 		ctx:          ctx,
 		now:          time.Now,
-		db:           db,
-		q:            New(db),
 		wa:           wa,
 		hub:          newHub(),
 		mediaWake:    make(chan struct{}, 1),
@@ -372,6 +364,13 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		previewWake:  make(chan struct{}, 1),
 		previewAllow: previewAllowStrict,
 	}
+	// The clock is read through a.now, which tests replace later.
+	clock := func() time.Time { return a.now() }
+	db, err := openDB(ctx, filepath.Join(cfg.StateDir, "msg.db"), clock)
+	if err != nil {
+		return nil, err
+	}
+	a.db = db
 	if err := a.loadMaster(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -381,8 +380,7 @@ func newApp(ctx context.Context, cfg config) (*app, error) {
 		return nil, err
 	}
 	a.previewClient = a.newPreviewClient()
-	// The clock is read through a.now, which tests replace later.
-	a.s3, a.fakeS3, err = newS3(cfg, func() time.Time { return a.now() })
+	a.s3, a.fakeS3, err = newS3(cfg, clock)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -395,6 +393,297 @@ func (a *app) close() error {
 }
 
 // database
+
+// The schema lives in db/NNN_*.sql and sqlmig applies it: ant has no
+// migrations for SQLite. Each model below is one table of that schema.
+// ant fills CreatedAt on insert from a.now.
+// Relation fields (pointers and slices of models) are not columns. They
+// stay nil unless a query asks for them with Include or IncludeOne.
+
+type Config struct {
+	Key   string
+	Value []byte
+}
+
+func (Config) Configure(b *ant.ModelBuilder[Config]) {
+	b.Table("config")
+	b.Key(&Configs.Key)
+}
+
+type User struct {
+	ID         int64
+	Username   string
+	Handle     []byte
+	PermAdmin  bool
+	PermInvite bool
+	PermGroup  bool
+	InvitedBy  sql.NullInt64
+	CreatedAt  ant.UnixTime
+	Avatar     string
+	Passkeys   int64 `ant:"computed"` // filled only when asked for
+
+	Inviter     *User
+	Credentials []Credential
+	Memberships []Member
+	Stats       *UserStat
+}
+
+func (User) Configure(b *ant.ModelBuilder[User]) {
+	b.BelongsTo(&Users.Inviter).ForeignKey(&Users.InvitedBy)
+	b.HasOne(&Users.Stats).ForeignKey(&UserStats.UserID)
+}
+
+type Credential struct {
+	ID           int64
+	UserID       int64
+	CredentialID []byte
+	Credential   []byte
+	Label        string
+	CreatedAt    ant.UnixTime
+	LastUsedAt   int64
+}
+
+type Invite struct {
+	ID        int64
+	Token     string
+	Username  string
+	Handle    []byte
+	UserID    sql.NullInt64 // set for an add passkey link
+	PermAdmin bool
+	CreatedBy sql.NullInt64 // unset for the bootstrap invite
+	CreatedAt ant.UnixTime
+	ExpiresAt int64
+
+	Creator *User
+}
+
+func (Invite) Configure(b *ant.ModelBuilder[Invite]) {
+	b.BelongsTo(&Invites.Creator).ForeignKey(&Invites.CreatedBy)
+}
+
+type Chat struct {
+	ID            int64
+	Name          string
+	IsDM          bool
+	DMKey         sql.NullString
+	CreatedBy     int64
+	CreatedAt     ant.UnixTime
+	LastMessageAt int64
+	Icon          string
+	MemberCount   int64 `ant:"computed"` // filled only when asked for
+
+	Creator *User
+	Members []Member
+	Last    *Message // the latest message
+	Stats   *ChatStat
+}
+
+func (Chat) Configure(b *ant.ModelBuilder[Chat]) {
+	b.BelongsTo(&Chats.Creator).ForeignKey(&Chats.CreatedBy)
+	b.HasOne(&Chats.Last).ForeignKey(&Messages.ChatID).Latest(&Messages.ID)
+	b.HasOne(&Chats.Stats).ForeignKey(&ChatStats.ChatID)
+}
+
+type Member struct {
+	ChatID    int64
+	UserID    int64
+	AddedBy   int64
+	Archived  bool
+	CreatedAt ant.UnixTime
+
+	Chat *Chat
+	User *User
+}
+
+func (Member) Configure(b *ant.ModelBuilder[Member]) {
+	b.CompositeKey(ant.F(&Members.ChatID), ant.F(&Members.UserID))
+}
+
+type File struct {
+	ID         int64
+	ChatID     int64
+	UserID     int64
+	Kind       string
+	Status     string
+	Name       string
+	S3Prefix   string
+	UploadID   string
+	Size       int64
+	ConvType   string
+	ConvSize   int64
+	PosterType string
+	PosterSize int64
+	Width      int64
+	Height     int64
+	Duration   int64
+	Attempts   int64
+	CreatedAt  ant.UnixTime
+}
+
+type Message struct {
+	ID        int64
+	ChatID    int64
+	UserID    int64
+	Body      string
+	FileID    sql.NullInt64
+	CreatedAt ant.UnixTime
+	EditedAt  int64
+
+	User      *User
+	File      *File
+	Preview   *Preview // a ready preview only, see Configure
+	Reactions []Reaction
+}
+
+// media reports whether the message is a picture or a video.
+func (m *Message) media() bool {
+	return m.File != nil && isMedia(*m.File)
+}
+
+func (Message) Configure(b *ant.ModelBuilder[Message]) {
+	b.HasOne(&Messages.Preview).Where(ant.Eq(&Previews.Status, "ready"))
+}
+
+type Preview struct {
+	MessageID   int64
+	URL         string
+	Status      string
+	Title       string
+	Description string
+	SiteName    string
+	FileID      sql.NullInt64
+	CreatedAt   ant.UnixTime
+
+	File *File
+}
+
+func (Preview) Configure(b *ant.ModelBuilder[Preview]) {
+	b.Key(&Previews.MessageID).NotGenerated()
+}
+
+type Reaction struct {
+	MessageID int64
+	UserID    int64
+	Emoji     string
+	CreatedAt ant.UnixTime
+
+	User *User
+}
+
+func (Reaction) Configure(b *ant.ModelBuilder[Reaction]) {
+	b.CompositeKey(ant.F(&Reactions.MessageID), ant.F(&Reactions.UserID), ant.F(&Reactions.Emoji))
+}
+
+type Snooze struct {
+	MessageID int64
+	UserID    int64
+	DueAt     int64
+	CreatedAt ant.UnixTime
+}
+
+func (Snooze) Configure(b *ant.ModelBuilder[Snooze]) {
+	b.CompositeKey(ant.F(&Snoozes.MessageID), ant.F(&Snoozes.UserID))
+}
+
+type PushSubscription struct {
+	ID           int64
+	UserID       int64
+	Endpoint     string
+	Subscription []byte
+	Label        string
+	CreatedAt    ant.UnixTime
+}
+
+// UserStat and ChatStat are counters. A missing row counts as all zero.
+type UserStat struct {
+	UserID          int64
+	MessagesSent    int64
+	ImagesUploaded  int64
+	VideosUploaded  int64
+	FilesUploaded   int64
+	BytesUploaded   int64
+	BytesDownloaded int64
+	PushesSent      int64
+	PushesOpened    int64
+	InvitesSent     int64
+}
+
+func (UserStat) Configure(b *ant.ModelBuilder[UserStat]) {
+	b.Key(&UserStats.UserID).NotGenerated()
+}
+
+type ChatStat struct {
+	ChatID          int64
+	ImagesUploaded  int64
+	VideosUploaded  int64
+	FilesUploaded   int64
+	BytesUploaded   int64
+	BytesDownloaded int64
+}
+
+func (ChatStat) Configure(b *ant.ModelBuilder[ChatStat]) {
+	b.Key(&ChatStats.ChatID).NotGenerated()
+}
+
+// Avatar and ChatIcon hold the image bytes behind users.avatar and
+// chats.icon.
+type Avatar struct {
+	UserID int64
+	Image  []byte
+}
+
+func (Avatar) Configure(b *ant.ModelBuilder[Avatar]) {
+	b.Key(&Avatars.UserID).NotGenerated()
+}
+
+type ChatIcon struct {
+	ChatID int64
+	Image  []byte
+}
+
+func (ChatIcon) Configure(b *ant.ModelBuilder[ChatIcon]) {
+	b.Key(&ChatIcons.ChatID).NotGenerated()
+}
+
+type AppDB struct {
+	ant.Context
+	Config            ant.Table[Config]
+	Users             ant.Table[User]
+	Credentials       ant.Table[Credential]
+	Invites           ant.Table[Invite]
+	Chats             ant.Table[Chat]
+	Members           ant.Table[Member]
+	Files             ant.Table[File]
+	Messages          ant.Table[Message]
+	Previews          ant.Table[Preview]
+	Reactions         ant.Table[Reaction]
+	Snoozes           ant.Table[Snooze]
+	PushSubscriptions ant.Table[PushSubscription]
+	UserStats         ant.Table[UserStat]
+	ChatStats         ant.Table[ChatStat]
+	Avatars           ant.Table[Avatar]
+	ChatIcons         ant.Table[ChatIcon]
+}
+
+// Probes name columns: &Users.Username is users.username.
+var (
+	Configs           = ant.Fields[Config]()
+	Users             = ant.Fields[User]()
+	Credentials       = ant.Fields[Credential]()
+	Invites           = ant.Fields[Invite]()
+	Chats             = ant.Fields[Chat]()
+	Members           = ant.Fields[Member]()
+	Files             = ant.Fields[File]()
+	Messages          = ant.Fields[Message]()
+	Previews          = ant.Fields[Preview]()
+	Reactions         = ant.Fields[Reaction]()
+	Snoozes           = ant.Fields[Snooze]()
+	PushSubscriptions = ant.Fields[PushSubscription]()
+	UserStats         = ant.Fields[UserStat]()
+	ChatStats         = ant.Fields[ChatStat]()
+	Avatars           = ant.Fields[Avatar]()
+	ChatIcons         = ant.Fields[ChatIcon]()
+)
 
 //go:embed db/[0-9]*.sql
 var migrationsFS embed.FS
@@ -415,57 +704,43 @@ var sqliteDSN = strings.Join([]string{
 	"_txlock=immediate",
 }, "&")
 
-// openDB opens the SQLite database at file and runs the migrations.
-func openDB(ctx context.Context, file string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", "file:"+file+"?"+sqliteDSN)
+// openDB opens the SQLite database at file and runs the migrations. The
+// returned *AppDB does not track changes, so every request shares it, and
+// all writes are explicit statements. now is the clock for CreatedAt.
+func openDB(ctx context.Context, file string, now func() time.Time) (*AppDB, error) {
+	db, err := ant.Open[AppDB](ctx, sqlite.Dialect, "file:"+file+"?"+sqliteDSN, ant.WithNow(now))
 	if err != nil {
 		return nil, serr.Wrap(err)
 	}
-	if err := migrations.Migrate(ctx, db); err != nil {
+	if err := migrations.Migrate(ctx, db.DB()); err != nil {
 		db.Close()
 		return nil, serr.Wrap(err)
 	}
 	return db, nil
 }
 
-// tx runs fn inside a transaction, committing when it returns nil and
-// rolling back on an error or a panic.
-func (a *app) tx(ctx context.Context, fn func(q *Queries) error) (err error) {
-	tx, err := a.db.BeginTx(ctx, nil)
+// configDefault returns the stored config value for key, storing fresh
+// first when there is none. Reading it back after the insert makes two
+// racing starts agree.
+func (a *app) configDefault(ctx context.Context, key string, fresh []byte) ([]byte, error) {
+	_, err := a.db.Config.Upsert(ctx, &Config{Key: key, Value: fresh},
+		ant.OnConflict(&Configs.Key).DoNothing())
 	if err != nil {
-		return serr.Wrap(err)
+		return nil, serr.Wrap(err)
 	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-	if err := fn(a.q.WithTx(tx)); err != nil {
-		return err
+	c, err := a.db.Config.Find(ctx, key)
+	if err != nil {
+		return nil, serr.Wrap(err)
 	}
-	if err := tx.Commit(); err != nil {
-		return serr.Wrap(err)
-	}
-	committed = true
-	return nil
+	return c.Value, nil
 }
 
 // loadMaster loads the master secret, generating and storing it on first
-// start. Reading it back after the insert makes two racing starts agree.
+// start.
 func (a *app) loadMaster(ctx context.Context) error {
-	fresh := make([]byte, 32)
-	_, _ = rand.Read(fresh) // never returns an error
-	err := a.q.ConfigSetDefault(ctx, ConfigSetDefaultParams{
-		Key:   "secret",
-		Value: fresh,
-	})
+	master, err := a.configDefault(ctx, "secret", randBytes(32))
 	if err != nil {
-		return serr.Wrap(err)
-	}
-	master, err := a.q.ConfigGet(ctx, "secret")
-	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
 	if len(master) != 32 {
 		return serr.Errorf("stored secret has %d bytes, want 32", len(master))

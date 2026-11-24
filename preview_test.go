@@ -32,9 +32,9 @@ func (ta *testApp) runPreviews() {
 
 func (ta *testApp) preview(msgID int64) Preview {
 	ta.t.Helper()
-	p, err := ta.app.q.PreviewByMessage(ta.t.Context(), msgID)
+	p, err := ta.app.db.Previews.Find(ta.t.Context(), msgID)
 	ensure.Nil(ta.t, err)
-	return p
+	return *p
 }
 
 // send posts a text message through the handler and returns it.
@@ -43,11 +43,11 @@ func (ta *testApp) send(u *testUser, chat Chat, body string) Message {
 	w := ta.post(chatPath(chat.ID)+"/send", url.Values{"body": {body}}, ta.as(u))
 	ensure.DeepEqual(ta.t, w.Code, http.StatusSeeOther)
 	var id int64
-	ensure.Nil(ta.t, ta.app.db.QueryRowContext(ta.t.Context(),
+	ensure.Nil(ta.t, ta.app.db.DB().QueryRowContext(ta.t.Context(),
 		"SELECT max(id) FROM messages WHERE chat_id = ?", chat.ID).Scan(&id))
-	m, err := ta.app.q.MessageByID(ta.t.Context(), id)
+	m, err := ta.app.db.Messages.Find(ta.t.Context(), id)
 	ensure.Nil(ta.t, err)
-	return m
+	return *m
 }
 
 func htmlPage(head string) string {
@@ -344,7 +344,7 @@ func TestPreviewEndToEnd(t *testing.T) {
 	c, _ := ta.app.hub.subscribe(alice.ID, chat.ID)
 	m := ta.send(alice, chat, "look at "+link+" and "+srv.URL+"/other please")
 	ensure.DeepEqual(t, ta.preview(m.ID).Status, "pending")
-	ensure.DeepEqual(t, ta.preview(m.ID).Url, link, "only the first URL")
+	ensure.DeepEqual(t, ta.preview(m.ID).URL, link, "only the first URL")
 	pinged(c)
 	page := ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
 	ensure.False(t, strings.Contains(page, "-preview"), "a pending preview renders nothing")
@@ -402,12 +402,12 @@ func TestPreviewEndToEnd(t *testing.T) {
 	ensure.DeepEqual(t, p2.Title, "Other page")
 	ensure.False(t, p2.FileID.Valid)
 	ensure.True(t, ta.objectMissing(fileKey(f, "converted")))
-	_, err := ta.app.q.FileByID(ctx, f.ID)
+	_, err := ta.app.db.Files.Find(ctx, f.ID)
 	ensure.True(t, err != nil, "the old image row is gone")
 
 	// editing the URL away removes the preview
 	edit("no link any more")
-	_, err = ta.app.q.PreviewByMessage(ctx, m.ID)
+	_, err = ta.app.db.Previews.Find(ctx, m.ID)
 	ensure.True(t, err != nil)
 
 	// deleting a message with a ready preview leaves nothing behind
@@ -530,7 +530,7 @@ func TestPreviewForDeletedOrEditedMessage(t *testing.T) {
 	m = ta.send(alice, chat, srv.URL+"/a")
 	ta.runPreviews()
 	p := ta.preview(m.ID)
-	ensure.DeepEqual(t, p.Url, srv.URL+"/b")
+	ensure.DeepEqual(t, p.URL, srv.URL+"/b")
 	ensure.DeepEqual(t, p.Status, "ready")
 	ensure.DeepEqual(t, countRows(t, ta, "files"), 1, "only the image of the current preview")
 	ensure.DeepEqual(t, len(ta.fakeObjects()), 1)

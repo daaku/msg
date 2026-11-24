@@ -65,9 +65,9 @@ func (ta *testApp) upload(user *testUser, chat Chat, name string, data []byte) i
 
 func (ta *testApp) file(id int64) File {
 	ta.t.Helper()
-	f, err := ta.app.q.FileByID(ta.t.Context(), id)
+	f, err := ta.app.db.Files.Find(ta.t.Context(), id)
 	ensure.Nil(ta.t, err)
-	return f
+	return *f
 }
 
 func (ta *testApp) stats(userID, chatID int64) (UserStat, ChatStat) {
@@ -198,7 +198,7 @@ func TestUploadHappyPath(t *testing.T) {
 
 		var msgID, fileID int64
 		var body string
-		ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
+		ensure.Nil(t, ta.app.db.DB().QueryRowContext(ctx,
 			"SELECT id, file_id, body FROM messages WHERE file_id = ?", id).Scan(&msgID, &fileID, &body))
 		ensure.DeepEqual(t, body, "")
 
@@ -267,7 +267,7 @@ func TestUploadKinds(t *testing.T) {
 	ensure.DeepEqual(t, us.MessagesSent, int64(3))
 
 	// a failed conversion falls back to the download row
-	_, err := ta.app.db.ExecContext(t.Context(), "UPDATE files SET status = 'failed' WHERE id = ?", img)
+	_, err := ta.app.db.DB().ExecContext(t.Context(), "UPDATE files SET status = 'failed' WHERE id = ?", img)
 	ensure.Nil(t, err)
 	page = ta.get(chatPath(chat.ID), ta.as(alice)).Body.String()
 	ensure.StringContains(t, page, `href="/f/`+idStr(img)+`/o"`)
@@ -326,7 +326,7 @@ func TestUploadCompleteRejections(t *testing.T) {
 	}
 	gone := func(id int64) {
 		t.Helper()
-		_, err := ta.app.q.FileByID(ctx, id)
+		_, err := ta.app.db.Files.Find(ctx, id)
 		ensure.True(t, err != nil, "the row must be deleted")
 	}
 	data := randData(t, partSize+10)
@@ -371,7 +371,7 @@ func TestUploadCompleteRejections(t *testing.T) {
 	// removed from the group between init and complete
 	bobUp := ta.uploadInit(bob, chat, "b", 5)
 	ta.uploadParts(bobUp.URLs, []byte("12345"))
-	_, err := ta.app.db.ExecContext(ctx, "DELETE FROM members WHERE chat_id = ? AND user_id = ?", chat.ID, bob.ID)
+	_, err := ta.app.db.DB().ExecContext(ctx, "DELETE FROM members WHERE chat_id = ? AND user_id = ?", chat.ID, bob.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, complete(bob, bobUp.File), http.StatusNotFound)
 	gone(bobUp.File)
@@ -439,7 +439,7 @@ func TestUploadAbort(t *testing.T) {
 
 	w = ta.apiPost(pUploadAbort, uploadFileIn{File: out.File}, ta.as(alice))
 	ensure.DeepEqual(t, w.Code, http.StatusOK)
-	_, err := ta.app.q.FileByID(ctx, out.File)
+	_, err := ta.app.db.Files.Find(ctx, out.File)
 	ensure.True(t, err != nil)
 	_, err = ta.app.s3.listParts(ctx, fileKey(f, "original"), f.UploadID)
 	ensure.DeepEqual(t, s3Status(err), http.StatusNotFound, "the multipart upload is gone")
@@ -506,7 +506,7 @@ func TestFileRedirect(t *testing.T) {
 	ensure.DeepEqual(t, ta.get(filePath(out.File, "o"), ta.as(alice)).Code, http.StatusNotFound)
 
 	// a removed member loses access
-	_, err = ta.app.db.ExecContext(t.Context(),
+	_, err = ta.app.db.DB().ExecContext(t.Context(),
 		"DELETE FROM members WHERE chat_id = ? AND user_id = ?", chat.ID, bob.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, ta.get(path, ta.as(bob)).Code, http.StatusNotFound)
@@ -525,7 +525,7 @@ func TestDeleteFileMessage(t *testing.T) {
 	msgOf := func(fileID int64) int64 {
 		t.Helper()
 		var id int64
-		ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
+		ensure.Nil(t, ta.app.db.DB().QueryRowContext(ctx,
 			"SELECT id FROM messages WHERE file_id = ?", fileID).Scan(&id))
 		return id
 	}
@@ -577,7 +577,7 @@ func TestStaleUploadCleanup(t *testing.T) {
 
 	ta.app.cleanStaleUploads(ctx)
 
-	_, err := ta.app.q.FileByID(ctx, old.File)
+	_, err := ta.app.db.Files.Find(ctx, old.File)
 	ensure.True(t, err != nil, "the stale upload is deleted")
 	_, err = ta.app.s3.listParts(ctx, fileKey(oldFile, "original"), oldFile.UploadID)
 	ensure.DeepEqual(t, s3Status(err), http.StatusNotFound, "and aborted")
@@ -612,21 +612,21 @@ func (ta *testApp) mediaMessage(user *testUser, chat Chat, kind string) Message 
 	ta.t.Helper()
 	t := ta.t
 	file := ta.upload(user, chat, "p.bin", []byte("x"))
-	_, err := ta.app.db.ExecContext(t.Context(), `UPDATE files SET kind = ?, status = 'ready', name = 'p.jpg',
+	_, err := ta.app.db.DB().ExecContext(t.Context(), `UPDATE files SET kind = ?, status = 'ready', name = 'p.jpg',
 		conv_type = 'image/webp', conv_size = 1, poster_type = 'image/webp', poster_size = 1,
 		width = 800, height = 600 WHERE id = ?`, kind, file)
 	ensure.Nil(t, err)
 	var id int64
-	ensure.Nil(t, ta.app.db.QueryRowContext(t.Context(), "SELECT id FROM messages WHERE file_id = ?", file).Scan(&id))
-	m, err := ta.app.q.MessageByID(t.Context(), id)
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(t.Context(), "SELECT id FROM messages WHERE file_id = ?", file).Scan(&id))
+	m, err := ta.app.db.Messages.Find(t.Context(), id)
 	ensure.Nil(t, err)
-	return m
+	return *m
 }
 
 // sentAt moves a message in time, in minutes after the test clock.
 func (ta *testApp) sentAt(m Message, minutes int64) {
 	ta.t.Helper()
-	_, err := ta.app.db.ExecContext(ta.t.Context(), "UPDATE messages SET created_at = ? WHERE id = ?",
+	_, err := ta.app.db.DB().ExecContext(ta.t.Context(), "UPDATE messages SET created_at = ? WHERE id = ?",
 		testNow.Unix()+minutes*60, m.ID)
 	ensure.Nil(ta.t, err)
 }
@@ -726,7 +726,7 @@ func TestAlbum(t *testing.T) {
 	_ = more
 
 	// a picture that is not converted yet is not part of a run
-	_, err := ta.app.db.ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", ms[2].FileID.Int64)
+	_, err := ta.app.db.DB().ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", ms[2].FileID.Int64)
 	ensure.Nil(t, err)
 	body = page()
 	ensure.StringDoesNotContain(t, body, "album")
@@ -846,7 +846,7 @@ func TestChatMediaPage(t *testing.T) {
 	ensure.DeepEqual(t, ta.get(path(first.ID, ms[3].ID, first.ID), ta.as(alice)).Code, http.StatusOK)
 	ensure.DeepEqual(t, ta.get(path(ms[4].ID, last.ID, last.ID), ta.as(alice)).Code, http.StatusOK)
 
-	_, err := ta.app.db.ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", ms[1].FileID.Int64)
+	_, err := ta.app.db.DB().ExecContext(t.Context(), "UPDATE files SET status = 'pending' WHERE id = ?", ms[1].FileID.Int64)
 	ensure.Nil(t, err)
 	notFound("not converted yet", path(first.ID, ms[3].ID, first.ID))
 	notFound("starts with one not converted", path(ms[1].ID, ms[3].ID, ms[1].ID))

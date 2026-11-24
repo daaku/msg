@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/skudra-go/ant"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,9 +29,9 @@ func (ta *testApp) subscribe(u *testUser, endpoint string) {
 	ensure.DeepEqual(ta.t, w.Header().Get("Location"), pSettings)
 }
 
-func (ta *testApp) subs(userID int64) []PushSubscription {
+func (ta *testApp) subs(userID int64) []*PushSubscription {
 	ta.t.Helper()
-	subs, err := ta.app.q.PushSubsByUser(ta.t.Context(), userID)
+	subs, err := ta.app.pushSubsOf(ta.t.Context(), userID)
 	ensure.Nil(ta.t, err)
 	return subs
 }
@@ -49,9 +50,9 @@ func TestVAPIDKeyStable(t *testing.T) {
 	a2 := newTestAppIn(t, dir).app
 	ensure.True(t, a1.vapidPublic != "")
 	ensure.DeepEqual(t, a1.vapidPublic, a2.vapidPublic)
-	stored, err := a1.q.ConfigGet(t.Context(), "vapid")
+	stored, err := a1.db.Config.Find(t.Context(), "vapid")
 	ensure.Nil(t, err)
-	key, err := webpush.ParseVAPIDKey(string(stored))
+	key, err := webpush.ParseVAPIDKey(string(stored.Value))
 	ensure.Nil(t, err)
 	pub, err := vapidPublic(key)
 	ensure.Nil(t, err)
@@ -125,7 +126,7 @@ func TestPushUnsubscribe(t *testing.T) {
 	a1 := ta.subs(alice.ID)[0]
 	b := ta.subs(bob.ID)[0]
 
-	id := func(s PushSubscription) url.Values { return url.Values{"id": {idStr(s.ID)}} }
+	id := func(s *PushSubscription) url.Values { return url.Values{"id": {idStr(s.ID)}} }
 	ensure.DeepEqual(t, ta.post(pPushUnsubscribe, id(a1)).Code, http.StatusUnauthorized)
 	// someone else's row is not found and stays
 	ensure.DeepEqual(t, ta.post(pPushUnsubscribe, id(b), ta.as(alice)).Code, http.StatusNotFound)
@@ -241,7 +242,7 @@ func TestPushErrors(t *testing.T) {
 	ensure.DeepEqual(t, us.PushesSent, int64(1))
 
 	// a stored subscription that cannot be read is deleted
-	_, err := ta.app.db.ExecContext(t.Context(),
+	_, err := ta.app.db.DB().ExecContext(t.Context(),
 		"UPDATE push_subscriptions SET subscription = 'junk' WHERE endpoint = 'https://push.example/ok'")
 	ensure.Nil(t, err)
 	ta.newMessage(chat, alice, "again")
@@ -367,9 +368,9 @@ func (ta *testApp) snooze(u *testUser, chat Chat, m Message, when string, opts .
 		append([]reqOpt{ta.as(u)}, opts...)...).Code
 }
 
-func (ta *testApp) snoozeRows() []Snooze {
+func (ta *testApp) snoozeRows() []*Snooze {
 	ta.t.Helper()
-	rows, err := ta.app.q.SnoozesDue(ta.t.Context(), 1<<62)
+	rows, err := ta.app.snoozesDue(ta.t.Context(), time.Unix(1<<62, 0))
 	ensure.Nil(ta.t, err)
 	return rows
 }
@@ -465,8 +466,8 @@ func TestSnoozeRoutes(t *testing.T) {
 	bobS.quiet()
 	rows := ta.snoozeRows()
 	ensure.DeepEqual(t, len(rows), 1)
-	ensure.DeepEqual(t, rows[0], Snooze{MessageID: m.ID, UserID: alice.ID,
-		DueAt: time.Date(2026, 1, 3, 5, 0, 0, 0, time.UTC).Unix(), CreatedAt: testNow.Unix()})
+	ensure.DeepEqual(t, *rows[0], Snooze{MessageID: m.ID, UserID: alice.ID,
+		DueAt: time.Date(2026, 1, 3, 5, 0, 0, 0, time.UTC).Unix(), CreatedAt: ant.UnixTime{Time: testNow}})
 
 	// again replaces the time; one's own message works too
 	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "1h"), http.StatusSeeOther)
@@ -614,12 +615,12 @@ func TestSnoozeMovedBeforeFiring(t *testing.T) {
 	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "1h"), http.StatusSeeOther)
 
 	ta.app.now = func() time.Time { return testNow.Add(time.Hour) }
-	due, err := ta.app.q.SnoozesDue(ctx, ta.app.now().Unix())
+	due, err := ta.app.snoozesDue(ctx, ta.app.now())
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(due), 1)
 	// moved to later in between
 	ensure.DeepEqual(t, ta.snooze(alice, chat, m, "3h"), http.StatusSeeOther)
-	ensure.Nil(t, ta.app.fireSnooze(ctx, due[0]))
+	ensure.Nil(t, ta.app.fireSnooze(ctx, *due[0]))
 	ensure.DeepEqual(t, len(ta.sends()), 0)
 	rows := ta.snoozeRows()
 	ensure.DeepEqual(t, len(rows), 1)

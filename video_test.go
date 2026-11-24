@@ -132,7 +132,7 @@ func TestVideoConversionH264(t *testing.T) {
 
 	// deleting the message removes all three objects
 	var msgID int64
-	ensure.Nil(t, ta.app.db.QueryRowContext(t.Context(),
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(t.Context(),
 		"SELECT id FROM messages WHERE file_id = ?", id).Scan(&msgID))
 	ta.post(messagePath(chat.ID, msgID)+"/delete", nil, ta.as(alice))
 	for _, variant := range []string{"original", "converted", "poster"} {
@@ -233,7 +233,7 @@ func TestVideoConversionCancelledOnShutdown(t *testing.T) {
 	ensure.DeepEqual(t, f.Status, statusProcessing)
 	ensure.True(t, ta.objectMissing(fileKey(f, "converted")))
 	// and is picked up again after a restart
-	ensure.Nil(t, ta.app.q.FilesResetProcessing(t.Context()))
+	ensure.Nil(t, ta.app.resetProcessing(t.Context()))
 	ensure.DeepEqual(t, ta.file(id).Status, statusPending)
 	ta.app.beforeConvert = nil
 	ta.runMedia()

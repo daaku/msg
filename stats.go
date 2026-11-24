@@ -1,48 +1,67 @@
 package main
 
 import (
+	"cmp"
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/daaku/serr"
+	"github.com/skudra-go/ant"
 	g "maragu.dev/gomponents"
 	h "maragu.dev/gomponents/html"
 )
 
-// statUser adds the deltas in d to the stats of userID. Pass the q of an
-// a.tx to count inside a transaction.
-func (a *app) statUser(ctx context.Context, q *Queries, userID int64, d UserStatsAddParams) error {
-	d.UserID = userID
-	return serr.Wrap(q.UserStatsAdd(ctx, d))
+// statUser adds the counts in d to the stats of d.UserID. Pass the tx of a
+// db.Tx to count inside a transaction.
+func (a *app) statUser(ctx context.Context, db *AppDB, d UserStat) error {
+	_, err := db.UserStats.Upsert(ctx, &d, ant.OnConflict(&UserStats.UserID).Set(
+		ant.Inc(&UserStats.MessagesSent, d.MessagesSent),
+		ant.Inc(&UserStats.ImagesUploaded, d.ImagesUploaded),
+		ant.Inc(&UserStats.VideosUploaded, d.VideosUploaded),
+		ant.Inc(&UserStats.FilesUploaded, d.FilesUploaded),
+		ant.Inc(&UserStats.BytesUploaded, d.BytesUploaded),
+		ant.Inc(&UserStats.BytesDownloaded, d.BytesDownloaded),
+		ant.Inc(&UserStats.PushesSent, d.PushesSent),
+		ant.Inc(&UserStats.PushesOpened, d.PushesOpened),
+		ant.Inc(&UserStats.InvitesSent, d.InvitesSent)))
+	return serr.Wrap(err)
 }
 
-// statChat adds the deltas in d to the stats of chatID.
-func (a *app) statChat(ctx context.Context, q *Queries, chatID int64, d ChatStatsAddParams) error {
-	d.ChatID = chatID
-	return serr.Wrap(q.ChatStatsAdd(ctx, d))
+// statChat adds the counts in d to the stats of d.ChatID.
+func (a *app) statChat(ctx context.Context, db *AppDB, d ChatStat) error {
+	_, err := db.ChatStats.Upsert(ctx, &d, ant.OnConflict(&ChatStats.ChatID).Set(
+		ant.Inc(&ChatStats.ImagesUploaded, d.ImagesUploaded),
+		ant.Inc(&ChatStats.VideosUploaded, d.VideosUploaded),
+		ant.Inc(&ChatStats.FilesUploaded, d.FilesUploaded),
+		ant.Inc(&ChatStats.BytesUploaded, d.BytesUploaded),
+		ant.Inc(&ChatStats.BytesDownloaded, d.BytesDownloaded)))
+	return serr.Wrap(err)
+}
+
+// orZero returns *p, or zero when err is ant.ErrNotFound.
+func orZero[T any](zero T, p *T, err error) (T, error) {
+	if errors.Is(err, ant.ErrNotFound) {
+		return zero, nil
+	}
+	if err != nil {
+		return zero, serr.Wrap(err)
+	}
+	return *p, nil
 }
 
 // userStats returns the stats of userID, all zero when nothing was counted.
 func (a *app) userStats(ctx context.Context, userID int64) (UserStat, error) {
-	s, err := a.q.UserStatsGet(ctx, userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return UserStat{UserID: userID}, nil
-	}
-	return s, serr.Wrap(err)
+	s, err := a.db.UserStats.Find(ctx, userID)
+	return orZero(UserStat{UserID: userID}, s, err)
 }
 
 // chatStats returns the stats of chatID, all zero when nothing was counted.
 func (a *app) chatStats(ctx context.Context, chatID int64) (ChatStat, error) {
-	s, err := a.q.ChatStatsGet(ctx, chatID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ChatStat{ChatID: chatID}, nil
-	}
-	return s, serr.Wrap(err)
+	s, err := a.db.ChatStats.Find(ctx, chatID)
+	return orZero(ChatStat{ChatID: chatID}, s, err)
 }
 
 // rendering
@@ -111,7 +130,12 @@ func (a *app) chatStatsSection(ctx context.Context, chatID int64) (g.Node, error
 
 // adminGroups lists every group, never direct messages, with its stats.
 func (a *app) adminGroups(w http.ResponseWriter, r *http.Request) error {
-	rows, err := a.q.GroupsAllWithStats(r.Context())
+	groups, err := a.db.Chats.Where(ant.Eq(&Chats.IsDM, false)).
+		IncludeOne(&Chats.Creator).
+		IncludeOne(&Chats.Stats).
+		With(&Chats.MemberCount, ant.CountRelated(&Chats.Members)).
+		OrderBy(&Chats.Name).ThenBy(&Chats.ID).
+		All(r.Context())
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -120,24 +144,24 @@ func (a *app) adminGroups(w http.ResponseWriter, r *http.Request) error {
 	}
 	num := func(n int64) g.Node { return g.Text(strconv.FormatInt(n, 10)) }
 	var list g.Node = h.P(h.Class("muted"), g.Text("No groups yet."))
-	if len(rows) > 0 {
+	if len(groups) > 0 {
 		list = h.Table(h.ID("groups"), h.Class("table"),
 			h.THead(h.Tr(
 				h.Th(g.Text("Name")), h.Th(g.Text("Members")), h.Th(g.Text("Created")),
 				h.Th(g.Text("Creator")), h.Th(g.Text("Images")), h.Th(g.Text("Videos")),
 				h.Th(g.Text("Other files")), h.Th(g.Text("Uploaded")), h.Th(g.Text("Downloaded")))),
-			h.TBody(g.Map(rows, func(row GroupsAllWithStatsRow) g.Node {
-				c := row.Chat
+			h.TBody(g.Map(groups, func(c *Chat) g.Node {
+				st := cmp.Or(c.Stats, &ChatStat{})
 				return h.Tr(h.ID(fmt.Sprintf("group-%d", c.ID)),
 					cell("Name", h.A(h.Href(chatPath(c.ID)+"/info"), g.Text(c.Name))),
-					cell("Members", num(row.MemberCount)),
-					cell("Created", g.Text(fmtTime(time.Unix(c.CreatedAt, 0), nil))),
-					cell("Creator", g.Text(row.Creator)),
-					cell("Images", num(row.ImagesUploaded)),
-					cell("Videos", num(row.VideosUploaded)),
-					cell("Other files", num(row.FilesUploaded)),
-					cell("Uploaded", g.Text(fmtBytes(row.BytesUploaded))),
-					cell("Downloaded", g.Text(fmtBytes(row.BytesDownloaded))))
+					cell("Members", num(c.MemberCount)),
+					cell("Created", g.Text(fmtTime(c.CreatedAt.Time, nil))),
+					cell("Creator", g.Text(c.Creator.Username)),
+					cell("Images", num(st.ImagesUploaded)),
+					cell("Videos", num(st.VideosUploaded)),
+					cell("Other files", num(st.FilesUploaded)),
+					cell("Uploaded", g.Text(fmtBytes(st.BytesUploaded))),
+					cell("Downloaded", g.Text(fmtBytes(st.BytesDownloaded))))
 			})))
 	}
 	return a.page(w, r, "Groups",

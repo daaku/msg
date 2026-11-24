@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -23,9 +24,9 @@ import (
 	"github.com/daaku/sookie"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/skudra-go/ant"
 	g "maragu.dev/gomponents"
 	h "maragu.dev/gomponents/html"
-	"modernc.org/sqlite"
 )
 
 const (
@@ -54,12 +55,6 @@ func validUsername(s string) (string, error) {
 		return "", errors.New(msgUsernameRule)
 	}
 	return s, nil
-}
-
-// isUniqueErr reports whether err is an SQLite constraint violation.
-func isUniqueErr(err error) bool {
-	se, ok := errors.AsType[*sqlite.Error](err)
-	return ok && se.Code()&0xff == 19 // SQLITE_CONSTRAINT
 }
 
 func randBytes(n int) []byte {
@@ -97,7 +92,7 @@ func (u waUser) WebAuthnName() string                       { return u.name }
 func (u waUser) WebAuthnDisplayName() string                { return u.name }
 func (u waUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
-func decodeCredentials(rows []Credential) ([]webauthn.Credential, error) {
+func decodeCredentials(rows []*Credential) ([]webauthn.Credential, error) {
 	creds := make([]webauthn.Credential, len(rows))
 	for i, row := range rows {
 		if err := json.Unmarshal(row.Credential, &creds[i]); err != nil {
@@ -113,12 +108,19 @@ func (a *app) waUserFor(ctx context.Context, handle []byte, name string, userID 
 	if userID == 0 {
 		return u, nil
 	}
-	rows, err := a.q.CredentialsByUser(ctx, userID)
+	rows, err := a.credentials(ctx, userID)
 	if err != nil {
-		return u, serr.Wrap(err)
+		return u, err
 	}
 	u.creds, err = decodeCredentials(rows)
 	return u, err
+}
+
+// credentials returns the passkeys of userID, oldest first.
+func (a *app) credentials(ctx context.Context, userID int64) ([]*Credential, error) {
+	creds, err := a.db.Credentials.Where(ant.Eq(&Credentials.UserID, userID)).
+		OrderBy(&Credentials.ID).All(ctx)
+	return creds, serr.Wrap(err)
 }
 
 // registrationOptions starts a passkey registration for u, excluding the
@@ -162,19 +164,18 @@ func (a *app) finishRegistration(w http.ResponseWriter, r *http.Request, u waUse
 	return cred, nil
 }
 
-// credentialParams builds the row for a freshly registered passkey.
-func (a *app) credentialParams(r *http.Request, userID int64, cred *webauthn.Credential) (CredentialCreateParams, error) {
+// newCredential builds the row for a freshly registered passkey.
+func (a *app) newCredential(r *http.Request, userID int64, cred *webauthn.Credential) (*Credential, error) {
 	credJSON, err := json.Marshal(cred)
 	if err != nil {
-		return CredentialCreateParams{}, serr.Wrap(err)
+		return nil, serr.Wrap(err)
 	}
 	now := a.now().Unix()
-	return CredentialCreateParams{
+	return &Credential{
 		UserID:       userID,
 		CredentialID: cred.ID,
 		Credential:   credJSON,
 		Label:        deviceLabel(r),
-		CreatedAt:    now,
 		LastUsedAt:   now,
 	}, nil
 }
@@ -252,11 +253,10 @@ func (a *app) withSession(w http.ResponseWriter, r *http.Request) (*http.Request
 		}
 		return r, nil
 	}
-	user, err := a.q.UserBySession(r.Context(), UserBySessionParams{
-		UserID:       s.UserID,
-		CredentialID: s.CredentialID,
-	})
-	if errors.Is(err, sql.ErrNoRows) {
+	user, err := a.db.Users.Where(ant.Eq(&Users.ID, s.UserID),
+		ant.Has(&Users.Credentials, ant.Eq(&Credentials.ID, s.CredentialID))).
+		Single(r.Context())
+	if errors.Is(err, ant.ErrNotFound) {
 		sookie.Del(w, r, c)
 		return r, nil
 	}
@@ -268,7 +268,7 @@ func (a *app) withSession(w http.ResponseWriter, r *http.Request) (*http.Request
 			return r, err
 		}
 	}
-	ai := &authInfo{user: &user, credentialID: s.CredentialID}
+	ai := &authInfo{user: user, credentialID: s.CredentialID}
 	return r.WithContext(context.WithValue(r.Context(), authKey{}, ai)), nil
 }
 
@@ -338,11 +338,11 @@ func (a *app) signInPost(w http.ResponseWriter, r *http.Request) error {
 		return fail("The passkey response was not understood.")
 	}
 
-	var user User
+	var user *User
 	var lookupErr error
 	_, cred, err := a.wa.ValidatePasskeyLogin(
 		func(rawID, userHandle []byte) (webauthn.User, error) {
-			user, lookupErr = a.q.UserByHandle(ctx, userHandle)
+			user, lookupErr = a.db.Users.Where(ant.Col(&Users.Handle).Eq(userHandle)).Single(ctx)
 			if lookupErr != nil {
 				return nil, lookupErr
 			}
@@ -350,15 +350,15 @@ func (a *app) signInPost(w http.ResponseWriter, r *http.Request) error {
 			wu, lookupErr = a.waUserFor(ctx, user.Handle, user.Username, user.ID)
 			return wu, lookupErr
 		}, data, parsed)
-	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+	if lookupErr != nil && !errors.Is(lookupErr, ant.ErrNotFound) {
 		return serr.Wrap(lookupErr)
 	}
 	if err != nil {
 		return fail("This passkey is not registered here.")
 	}
 
-	row, err := a.q.CredentialByCredentialID(ctx, cred.ID)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && row.UserID != user.ID) {
+	row, err := a.db.Credentials.Where(ant.Col(&Credentials.CredentialID).Eq(cred.ID)).Single(ctx)
+	if errors.Is(err, ant.ErrNotFound) || (err == nil && row.UserID != user.ID) {
 		return fail("This passkey is not registered here.")
 	}
 	if err != nil {
@@ -368,11 +368,9 @@ func (a *app) signInPost(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return serr.Wrap(err)
 	}
-	err = a.q.CredentialUpdate(ctx, CredentialUpdateParams{
-		ID:         row.ID,
-		Credential: credJSON,
-		LastUsedAt: a.now().Unix(),
-	})
+	_, err = a.db.Credentials.Where(ant.Eq(&Credentials.ID, row.ID)).Update(ctx,
+		ant.Set(&Credentials.Credential, credJSON),
+		ant.Set(&Credentials.LastUsedAt, a.now().Unix()))
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -401,45 +399,66 @@ type inviteParams struct {
 
 // createInvite stores a single use link. For a new user it reserves the
 // username and picks the handle the user will get.
-func (a *app) createInvite(ctx context.Context, q *Queries, p inviteParams) (Invite, error) {
+func (a *app) createInvite(ctx context.Context, db *AppDB, p inviteParams) (*Invite, error) {
 	now := a.now()
-	arg := InviteCreateParams{
+	inv := &Invite{
 		Token:     base64.RawURLEncoding.EncodeToString(randBytes(32)),
 		Username:  p.Username,
 		Handle:    randBytes(16),
 		PermAdmin: p.Admin,
-		CreatedBy: sql.NullInt64{Int64: p.CreatedBy, Valid: p.CreatedBy != 0},
-		CreatedAt: now.Unix(),
+		CreatedBy: nullID(p.CreatedBy),
 		ExpiresAt: now.Add(p.TTL).Unix(),
 	}
 	if p.User != nil {
-		arg.Username = p.User.Username
-		arg.Handle = p.User.Handle
-		arg.UserID = sql.NullInt64{Int64: p.User.ID, Valid: true}
-		arg.PermAdmin = false
+		inv.Username = p.User.Username
+		inv.Handle = p.User.Handle
+		inv.UserID = nullID(p.User.ID)
+		inv.PermAdmin = false
 	}
-	inv, err := q.InviteCreate(ctx, arg)
-	return inv, serr.Wrap(err)
+	return inv, serr.Wrap(db.Invites.Insert(ctx, inv))
+}
+
+// nullID is id as a nullable reference, NULL for 0.
+func nullID(id int64) sql.NullInt64 {
+	return sql.NullInt64{Int64: id, Valid: id != 0}
+}
+
+// inviteLive matches the invites that have not expired.
+func (a *app) inviteLive() ant.Cond {
+	return ant.Gt(&Invites.ExpiresAt, a.now().Unix())
+}
+
+// pendingLinks returns the live add passkey links of userID, newest first.
+func (a *app) pendingLinks(ctx context.Context, db *AppDB, userID int64) ([]*Invite, error) {
+	links, err := db.Invites.Where(ant.Eq(&Invites.UserID, nullID(userID)), a.inviteLive()).
+		OrderByDesc(&Invites.ID).All(ctx)
+	return links, serr.Wrap(err)
+}
+
+// revokeLink deletes the add passkey link id of userID, reporting whether
+// there was one.
+func (a *app) revokeLink(ctx context.Context, id, userID int64) (bool, error) {
+	n, err := a.db.Invites.Where(ant.Eq(&Invites.ID, id),
+		ant.Eq(&Invites.UserID, nullID(userID))).Delete(ctx)
+	return n > 0, serr.Wrap(err)
 }
 
 func invitePath(token string) string {
 	return pInvite + url.PathEscape(token)
 }
 
-func (a *app) inviteURL(inv Invite) string {
+func (a *app) inviteURL(inv *Invite) string {
 	return a.cfg.PublicURL + invitePath(inv.Token)
 }
 
 // inviteFor loads the live invite named in the request path and marks the
 // response so the token does not leak through caches or referrers.
-func (a *app) inviteFor(w http.ResponseWriter, r *http.Request) (Invite, error) {
+func (a *app) inviteFor(w http.ResponseWriter, r *http.Request) (*Invite, error) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Cache-Control", "no-store")
-	inv, err := a.q.InviteByToken(r.Context(), InviteByTokenParams{
-		Token: r.PathValue("token"),
-		Now:   a.now().Unix(),
-	})
-	if errors.Is(err, sql.ErrNoRows) {
+	inv, err := a.db.Invites.Where(ant.Eq(&Invites.Token, r.PathValue("token")), a.inviteLive()).
+		Single(r.Context())
+	if errors.Is(err, ant.ErrNotFound) {
 		return inv, httpErr(http.StatusNotFound, msgInviteInvalid)
 	}
 	return inv, serr.Wrap(err)
@@ -492,36 +511,36 @@ func (a *app) invitePost(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	var row Credential
-	err = a.tx(ctx, func(q *Queries) error {
+	var row *Credential
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
 		// Deleting the invite first is what makes the link single use.
-		used, err := q.InviteUse(ctx, InviteUseParams{Token: inv.Token, Now: a.now().Unix()})
-		if errors.Is(err, sql.ErrNoRows) {
-			return httpErr(http.StatusNotFound, msgInviteInvalid)
-		}
+		deleted, err := tx.Invites.Where(ant.Eq(&Invites.Token, inv.Token), a.inviteLive()).
+			DeleteReturning(ctx)
 		if err != nil {
 			return serr.Wrap(err)
 		}
+		if len(deleted) == 0 {
+			return httpErr(http.StatusNotFound, msgInviteInvalid)
+		}
+		used := deleted[0]
 		userID := used.UserID.Int64
 		if !used.UserID.Valid {
-			user, err := q.UserCreate(ctx, UserCreateParams{
+			user := &User{
 				Username:  used.Username,
 				Handle:    used.Handle,
 				PermAdmin: used.PermAdmin,
 				InvitedBy: used.CreatedBy,
-				CreatedAt: a.now().Unix(),
-			})
-			if err != nil {
+			}
+			if err := tx.Users.Insert(ctx, user); err != nil {
 				return serr.Wrap(err)
 			}
 			userID = user.ID
 		}
-		arg, err := a.credentialParams(r, userID, cred)
-		if err != nil {
+		if row, err = a.newCredential(r, userID, cred); err != nil {
 			return err
 		}
-		row, err = q.CredentialCreate(ctx, arg)
-		if isUniqueErr(err) {
+		err = tx.Credentials.Insert(ctx, row)
+		if ant.IsUniqueViolation(err) {
 			return httpErr(http.StatusBadRequest, "This passkey is already registered.")
 		}
 		return serr.Wrap(err)
@@ -539,19 +558,21 @@ func (a *app) invitePost(w http.ResponseWriter, r *http.Request) error {
 // bootstrap prints a sign up link for the first admin while there are no
 // users. Each start replaces the previous link.
 func (a *app) bootstrap(ctx context.Context) error {
-	n, err := a.q.UserCount(ctx)
+	n, err := a.db.Users.Count(ctx)
 	if err != nil {
 		return serr.Wrap(err)
 	}
 	if n > 0 {
 		return nil
 	}
-	var inv Invite
-	err = a.tx(ctx, func(q *Queries) error {
-		if err := q.InviteDeleteBootstrap(ctx); err != nil {
+	var inv *Invite
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		_, err := tx.Invites.Where(ant.IsNull(&Invites.CreatedBy), ant.IsNull(&Invites.UserID)).
+			Delete(ctx)
+		if err != nil {
 			return serr.Wrap(err)
 		}
-		inv, err = a.createInvite(ctx, q, inviteParams{
+		inv, err = a.createInvite(ctx, tx, inviteParams{
 			Username: a.cfg.AdminUsername,
 			Admin:    true,
 			TTL:      bootstrapTTL,
@@ -604,17 +625,17 @@ func dateCell(label string, unix int64) g.Node {
 // passkeyList renders passkey rows. current is the row id marked "this
 // device" (0 for none). A delete button posting to deleteAction is rendered
 // for each row when canDelete is true.
-func passkeyList(creds []Credential, current int64, deleteAction string, canDelete bool) g.Node {
+func passkeyList(creds []*Credential, current int64, deleteAction string, canDelete bool) g.Node {
 	if len(creds) == 0 {
 		return h.P(h.Class("muted"), g.Text("No passkeys."))
 	}
-	return h.Ul(h.Class("list"), g.Map(creds, func(c Credential) g.Node {
+	return h.Ul(h.Class("list"), g.Map(creds, func(c *Credential) g.Node {
 		return h.Li(h.ID(fmt.Sprintf("passkey-%d", c.ID)), h.Class("row"),
 			h.Div(h.Class("stack-tight"),
 				h.Span(h.Class("cluster"),
 					h.Strong(g.Text(c.Label)),
 					g.If(c.ID == current, h.Span(h.Class("badge"), g.Text("this device")))),
-				dateCell("Created", c.CreatedAt),
+				dateCell("Created", c.CreatedAt.Unix()),
 				dateCell("Last used", c.LastUsedAt)),
 			g.If(canDelete, h.Form(h.Method("post"), h.Action(deleteAction),
 				h.Input(h.Type("hidden"), h.Name("id"), h.Value(strconv.FormatInt(c.ID, 10))),
@@ -624,18 +645,18 @@ func passkeyList(creds []Credential, current int64, deleteAction string, canDele
 
 // copyField is a read only field holding the full URL of an invite, selected
 // as a whole when focused.
-func (a *app) copyField(id string, inv Invite) g.Node {
+func (a *app) copyField(id string, inv *Invite) g.Node {
 	return h.Input(h.ID(id), h.Type("text"), h.ReadOnly(), h.Data("copy", ""),
 		h.Value(a.inviteURL(inv)), h.Aria("label", "Link"))
 }
 
 // linkList renders pending add passkey links, each with a copyable URL, its
 // expiry, and a revoke button posting to revokeAction.
-func (a *app) linkList(links []Invite, revokeAction string) g.Node {
+func (a *app) linkList(links []*Invite, revokeAction string) g.Node {
 	if len(links) == 0 {
 		return h.P(h.Class("muted"), g.Text("No pending links."))
 	}
-	return h.Ul(h.Class("list"), g.Map(links, func(inv Invite) g.Node {
+	return h.Ul(h.Class("list"), g.Map(links, func(inv *Invite) g.Node {
 		id := fmt.Sprintf("link-%d", inv.ID)
 		return h.Li(h.ID(id), h.Class("stack-tight"),
 			a.copyField(id+"-url", inv),
@@ -754,12 +775,14 @@ func (a *app) settingsAvatar(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return a.flash(w, r, pSettings, Flash{Kind: flashError, Content: msgBadPicture})
 	}
-	err = a.tx(ctx, func(q *Queries) error {
-		if err := q.AvatarSet(ctx, AvatarSetParams{UserID: user.ID, Image: img}); err != nil {
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		_, err := tx.Avatars.Upsert(ctx, &Avatar{UserID: user.ID, Image: img},
+			ant.OnConflict(&Avatars.UserID))
+		if err != nil {
 			return serr.Wrap(err)
 		}
-		return serr.Wrap(q.UserSetAvatar(ctx, UserSetAvatarParams{
-			ID: user.ID, Avatar: name}))
+		_, err = tx.Users.Where(ant.Eq(&Users.ID, user.ID)).Update(ctx, ant.Set(&Users.Avatar, name))
+		return serr.Wrap(err)
 	})
 	if err != nil {
 		return err
@@ -770,11 +793,12 @@ func (a *app) settingsAvatar(w http.ResponseWriter, r *http.Request) error {
 func (a *app) settingsAvatarRemove(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	user := userFrom(ctx)
-	err := a.tx(ctx, func(q *Queries) error {
-		if err := q.AvatarDelete(ctx, user.ID); err != nil {
+	err := a.db.Tx(ctx, func(tx *AppDB) error {
+		if _, err := tx.Avatars.Where(ant.Eq(&Avatars.UserID, user.ID)).Delete(ctx); err != nil {
 			return serr.Wrap(err)
 		}
-		return serr.Wrap(q.UserSetAvatar(ctx, UserSetAvatarParams{ID: user.ID}))
+		_, err := tx.Users.Where(ant.Eq(&Users.ID, user.ID)).Update(ctx, ant.Set(&Users.Avatar, ""))
+		return serr.Wrap(err)
 	})
 	if err != nil {
 		return err
@@ -790,14 +814,16 @@ func (a *app) avatarImage(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return errNotFound
 	}
-	img, err := a.q.AvatarGet(r.Context(), AvatarGetParams{UserID: id, Avatar: r.PathValue("name")})
-	if errors.Is(err, sql.ErrNoRows) {
+	img, err := a.db.Avatars.Where(ant.Eq(&Avatars.UserID, id),
+		ant.Exists(a.db.Users.Where(ant.Eq(&Users.ID, id), ant.Eq(&Users.Avatar, r.PathValue("name"))))).
+		Single(r.Context())
+	if errors.Is(err, ant.ErrNotFound) {
 		return errNotFound
 	}
 	if err != nil {
 		return serr.Wrap(err)
 	}
-	servePicture(w, img)
+	servePicture(w, img.Image)
 	return nil
 }
 
@@ -810,9 +836,9 @@ func servePicture(w http.ResponseWriter, img []byte) {
 }
 
 func (a *app) settingsPasskeys(r *http.Request, u *User) (g.Node, error) {
-	creds, err := a.q.CredentialsByUser(r.Context(), u.ID)
+	creds, err := a.credentials(r.Context(), u.ID)
 	if err != nil {
-		return nil, serr.Wrap(err)
+		return nil, err
 	}
 	return h.Section(h.ID("passkeys"), h.Class("stack"),
 		h.H2(g.Text("Passkeys")),
@@ -822,12 +848,9 @@ func (a *app) settingsPasskeys(r *http.Request, u *User) (g.Node, error) {
 }
 
 func (a *app) settingsDevices(r *http.Request, u *User) (g.Node, error) {
-	links, err := a.q.InvitesPendingForUser(r.Context(), InvitesPendingForUserParams{
-		UserID: sql.NullInt64{Int64: u.ID, Valid: true},
-		Now:    a.now().Unix(),
-	})
+	links, err := a.pendingLinks(r.Context(), a.db, u.ID)
 	if err != nil {
-		return nil, serr.Wrap(err)
+		return nil, err
 	}
 	return h.Section(h.ID("devices"), h.Class("stack"),
 		h.H2(g.Text("Add a passkey on another device")),
@@ -865,11 +888,11 @@ func (a *app) passkeyCreate(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	arg, err := a.credentialParams(r, user.ID, cred)
+	row, err := a.newCredential(r, user.ID, cred)
 	if err != nil {
 		return err
 	}
-	if _, err := a.q.CredentialCreate(ctx, arg); isUniqueErr(err) {
+	if err := a.db.Credentials.Insert(ctx, row); ant.IsUniqueViolation(err) {
 		return fail("This passkey is already registered.")
 	} else if err != nil {
 		return serr.Wrap(err)
@@ -886,8 +909,9 @@ func (a *app) passkeyDelete(w http.ResponseWriter, r *http.Request) error {
 	}
 	var last bool
 	var deleted int64
-	err = a.tx(ctx, func(q *Queries) error {
-		n, err := q.CredentialCountByUser(ctx, user.ID)
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		own := tx.Credentials.Where(ant.Eq(&Credentials.UserID, user.ID))
+		n, err := own.Count(ctx)
 		if err != nil {
 			return serr.Wrap(err)
 		}
@@ -895,7 +919,7 @@ func (a *app) passkeyDelete(w http.ResponseWriter, r *http.Request) error {
 			last = true
 			return nil
 		}
-		deleted, err = q.CredentialDelete(ctx, CredentialDeleteParams{ID: id, UserID: user.ID})
+		deleted, err = own.Where(ant.Eq(&Credentials.ID, id)).Delete(ctx)
 		return serr.Wrap(err)
 	})
 	switch {
@@ -920,19 +944,16 @@ func (a *app) settingsLink(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	user := userFrom(ctx)
 	var full bool
-	err := a.tx(ctx, func(q *Queries) error {
-		links, err := q.InvitesPendingForUser(ctx, InvitesPendingForUserParams{
-			UserID: sql.NullInt64{Int64: user.ID, Valid: true},
-			Now:    a.now().Unix(),
-		})
+	err := a.db.Tx(ctx, func(tx *AppDB) error {
+		links, err := a.pendingLinks(ctx, tx, user.ID)
 		if err != nil {
-			return serr.Wrap(err)
+			return err
 		}
 		if len(links) >= maxPendingLinks {
 			full = true
 			return nil
 		}
-		_, err = a.createInvite(ctx, q, inviteParams{
+		_, err = a.createInvite(ctx, tx, inviteParams{
 			User:      user,
 			CreatedBy: user.ID,
 			TTL:       addPasskeyTTL,
@@ -957,14 +978,11 @@ func (a *app) settingsLinkRevoke(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	n, err := a.q.InviteRevokeForUser(ctx, InviteRevokeForUserParams{
-		ID:     id,
-		UserID: sql.NullInt64{Int64: user.ID, Valid: true},
-	})
+	found, err := a.revokeLink(ctx, id, user.ID)
 	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
-	if n == 0 {
+	if !found {
 		return httpErr(http.StatusNotFound, "Not found.")
 	}
 	return a.flash(w, r, pSettings+"#devices", Flash{Kind: flashSuccess, Content: "Link revoked."})
@@ -987,46 +1005,36 @@ func (a *app) invites(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	user := userFrom(ctx)
 	w.Header().Set("Cache-Control", "no-store") // holds invite links
-	type row struct {
-		inv     Invite
-		creator string
-	}
-	var rows []row
-	if allowed(user, accAdmin) {
-		all, err := a.q.InvitesPendingAll(ctx, a.now().Unix())
-		if err != nil {
-			return serr.Wrap(err)
-		}
-		for _, r := range all {
-			rows = append(rows, row{r.Invite, r.Creator})
-		}
-	} else {
-		own, err := a.q.InvitesPendingByCreator(ctx, InvitesPendingByCreatorParams{
-			CreatedBy: sql.NullInt64{Int64: user.ID, Valid: true},
-			Now:       a.now().Unix(),
-		})
-		if err != nil {
-			return serr.Wrap(err)
-		}
-		for _, inv := range own {
-			rows = append(rows, row{inv: inv})
-		}
+	// Admins see every pending invite with its creator, others their own.
+	admin := allowed(user, accAdmin)
+	invs, err := a.db.Invites.Where(ant.IsNull(&Invites.UserID), a.inviteLive()).
+		When(admin, func(q *ant.Query[Invite]) *ant.Query[Invite] {
+			return q.Where(ant.IsNotNull(&Invites.CreatedBy)).IncludeOne(&Invites.Creator)
+		}).
+		When(!admin, func(q *ant.Query[Invite]) *ant.Query[Invite] {
+			return q.Where(ant.Eq(&Invites.CreatedBy, nullID(user.ID)))
+		}).
+		OrderByDesc(&Invites.ID).All(ctx)
+	if err != nil {
+		return serr.Wrap(err)
 	}
 
 	var list g.Node = h.P(h.Class("muted"), g.Text("No pending invites."))
-	if len(rows) > 0 {
-		list = h.Ul(h.Class("list"), g.Map(rows, func(rw row) g.Node {
-			id := fmt.Sprintf("invite-%d", rw.inv.ID)
+	if len(invs) > 0 {
+		list = h.Ul(h.Class("list"), g.Map(invs, func(inv *Invite) g.Node {
+			id := fmt.Sprintf("invite-%d", inv.ID)
+			var by g.Node
+			if inv.Creator != nil {
+				by = h.Span(h.Class("muted"), g.Text("by "+inv.Creator.Username))
+			}
 			return h.Li(h.ID(id), h.Class("stack-tight"),
-				h.Span(h.Class("cluster"),
-					h.Strong(g.Text(rw.inv.Username)),
-					g.If(rw.creator != "", h.Span(h.Class("muted"), g.Text("by "+rw.creator)))),
-				a.copyField(id+"-url", rw.inv),
+				h.Span(h.Class("cluster"), h.Strong(g.Text(inv.Username)), by),
+				a.copyField(id+"-url", inv),
 				h.Div(h.Class("row"),
-					h.Span(h.Class("muted"), g.Text(a.expiresIn(rw.inv.ExpiresAt))),
+					h.Span(h.Class("muted"), g.Text(a.expiresIn(inv.ExpiresAt))),
 					h.Form(h.Method("post"), h.Action(pInvitesRevoke),
 						h.Input(h.Type("hidden"), h.Name("id"),
-							h.Value(strconv.FormatInt(rw.inv.ID, 10))),
+							h.Value(strconv.FormatInt(inv.ID, 10))),
 						h.Button(h.Class("btn secondary"), g.Text("Revoke")))))
 		}))
 	}
@@ -1064,32 +1072,29 @@ func (a *app) invitesPost(w http.ResponseWriter, r *http.Request) error {
 		return fail(err.Error())
 	}
 	var refused string
-	err = a.tx(ctx, func(q *Queries) error {
-		now := a.now().Unix()
-		err := q.InviteDeleteExpiredByUsername(ctx, InviteDeleteExpiredByUsernameParams{
-			Username: username,
-			Now:      now,
-		})
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		forName := tx.Invites.Where(ant.Eq(&Invites.Username, username), ant.IsNull(&Invites.UserID))
+		_, err := forName.Where(ant.Not(a.inviteLive())).Delete(ctx)
 		if err != nil {
 			return serr.Wrap(err)
 		}
-		if _, err := q.UserByUsername(ctx, username); err == nil {
+		taken, err := tx.Users.Where(ant.Eq(&Users.Username, username)).Exists(ctx)
+		if err != nil {
+			return serr.Wrap(err)
+		}
+		if taken {
 			refused = msgTaken
 			return nil
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		}
+		pending, err := forName.Exists(ctx)
+		if err != nil {
 			return serr.Wrap(err)
 		}
-		_, err = q.InvitePendingByUsername(ctx, InvitePendingByUsernameParams{
-			Username: username,
-			Now:      now,
-		})
-		if err == nil {
+		if pending {
 			refused = msgPending
 			return nil
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return serr.Wrap(err)
 		}
-		_, err = a.createInvite(ctx, q, inviteParams{
+		_, err = a.createInvite(ctx, tx, inviteParams{
 			Username:  username,
 			CreatedBy: user.ID,
 			TTL:       inviteTTL,
@@ -1097,9 +1102,9 @@ func (a *app) invitesPost(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return err
 		}
-		return a.statUser(ctx, q, user.ID, UserStatsAddParams{InvitesSent: 1})
+		return a.statUser(ctx, tx, UserStat{UserID: user.ID, InvitesSent: 1})
 	})
-	if isUniqueErr(err) {
+	if ant.IsUniqueViolation(err) {
 		// invites_new_username caught a racing invite for the same username.
 		return fail(msgPending)
 	}
@@ -1120,11 +1125,13 @@ func (a *app) invitesRevoke(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	n, err := a.q.InviteRevoke(ctx, InviteRevokeParams{
-		ID:         id,
-		CreatedBy:  sql.NullInt64{Int64: user.ID, Valid: true},
-		AnyCreator: allowed(user, accAdmin),
-	})
+	// Admins may revoke any user's invite, never the bootstrap one.
+	n, err := a.db.Invites.Where(ant.Eq(&Invites.ID, id), ant.IsNull(&Invites.UserID),
+		ant.IsNotNull(&Invites.CreatedBy)).
+		When(!allowed(user, accAdmin), func(q *ant.Query[Invite]) *ant.Query[Invite] {
+			return q.Where(ant.Eq(&Invites.CreatedBy, nullID(user.ID)))
+		}).
+		Delete(ctx)
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -1152,7 +1159,12 @@ func permBadges(u User) g.Node {
 }
 
 func (a *app) admin(w http.ResponseWriter, r *http.Request) error {
-	rows, err := a.q.UsersAll(r.Context())
+	users, err := a.db.Users.
+		IncludeOne(&Users.Inviter).
+		IncludeOne(&Users.Stats).
+		With(&Users.Passkeys, ant.CountRelated(&Users.Credentials)).
+		OrderBy(&Users.Username).
+		All(r.Context())
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -1169,32 +1181,32 @@ func (a *app) admin(w http.ResponseWriter, r *http.Request) error {
 					h.Th(g.Text("Created")), h.Th(g.Text("Invited by")),
 					h.Th(g.Text("Passkeys")), h.Th(g.Text("Messages sent")),
 					h.Th(g.Text("Uploaded")), h.Th(g.Text("Downloaded")))),
-				h.TBody(g.Map(rows, func(row UsersAllRow) g.Node {
-					u := row.User
-					inviter := row.Inviter
-					if inviter == "" {
-						inviter = "-"
+				h.TBody(g.Map(users, func(u *User) g.Node {
+					inviter := "-"
+					if u.Inviter != nil {
+						inviter = u.Inviter.Username
 					}
+					st := cmp.Or(u.Stats, &UserStat{})
 					return h.Tr(h.ID(fmt.Sprintf("user-%d", u.ID)),
 						cell("Username", h.A(h.Href(adminUserPath(u.ID)), g.Text(u.Username))),
-						cell("Permissions", permBadges(u)),
-						cell("Created", g.Text(fmtTime(time.Unix(u.CreatedAt, 0), nil))),
+						cell("Permissions", permBadges(*u)),
+						cell("Created", g.Text(fmtTime(u.CreatedAt.Time, nil))),
 						cell("Invited by", g.Text(inviter)),
-						cell("Passkeys", g.Text(strconv.FormatInt(row.Passkeys, 10))),
-						cell("Messages sent", g.Text(strconv.FormatInt(row.MessagesSent, 10))),
-						cell("Uploaded", g.Text(fmtBytes(row.BytesUploaded))),
-						cell("Downloaded", g.Text(fmtBytes(row.BytesDownloaded))))
+						cell("Passkeys", g.Text(strconv.FormatInt(u.Passkeys, 10))),
+						cell("Messages sent", g.Text(strconv.FormatInt(st.MessagesSent, 10))),
+						cell("Uploaded", g.Text(fmtBytes(st.BytesUploaded))),
+						cell("Downloaded", g.Text(fmtBytes(st.BytesDownloaded))))
 				}))))).Render(w)
 }
 
 // adminTarget loads the user named by the {id} path value.
-func (a *app) adminTarget(r *http.Request) (User, error) {
+func (a *app) adminTarget(r *http.Request) (*User, error) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		return User{}, httpErr(http.StatusNotFound, "Not found.")
+		return nil, httpErr(http.StatusNotFound, "Not found.")
 	}
-	u, err := a.q.UserByID(r.Context(), id)
-	if errors.Is(err, sql.ErrNoRows) {
+	u, err := a.db.Users.Find(r.Context(), id)
+	if errors.Is(err, ant.ErrNotFound) {
 		return u, httpErr(http.StatusNotFound, "Not found.")
 	}
 	return u, serr.Wrap(err)
@@ -1208,16 +1220,13 @@ func (a *app) adminUser(w http.ResponseWriter, r *http.Request) error {
 	}
 	w.Header().Set("Cache-Control", "no-store") // holds recovery links
 	self := target.ID == userFrom(ctx).ID
-	creds, err := a.q.CredentialsByUser(ctx, target.ID)
+	creds, err := a.credentials(ctx, target.ID)
 	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
-	links, err := a.q.InvitesPendingForUser(ctx, InvitesPendingForUserParams{
-		UserID: sql.NullInt64{Int64: target.ID, Valid: true},
-		Now:    a.now().Unix(),
-	})
+	links, err := a.pendingLinks(ctx, a.db, target.ID)
 	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
 	stats, err := a.userStatsSection(ctx, target.ID)
 	if err != nil {
@@ -1276,18 +1285,17 @@ func (a *app) adminUserPerms(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	arg := UserSetPermsParams{
-		ID:         target.ID,
-		PermAdmin:  r.FormValue("admin") != "",
-		PermInvite: r.FormValue("invite") != "",
-		PermGroup:  r.FormValue("group") != "",
-	}
+	permAdmin := r.FormValue("admin") != ""
 	back := adminUserPath(target.ID)
-	if target.ID == userFrom(ctx).ID && !arg.PermAdmin {
+	if target.ID == userFrom(ctx).ID && !permAdmin {
 		return a.flash(w, r, back, Flash{Kind: flashError,
 			Content: "You cannot remove your own admin permission."})
 	}
-	if err := a.q.UserSetPerms(ctx, arg); err != nil {
+	_, err = a.db.Users.Where(ant.Eq(&Users.ID, target.ID)).Update(ctx,
+		ant.Set(&Users.PermAdmin, permAdmin),
+		ant.Set(&Users.PermInvite, r.FormValue("invite") != ""),
+		ant.Set(&Users.PermGroup, r.FormValue("group") != ""))
+	if err != nil {
 		return serr.Wrap(err)
 	}
 	return a.flash(w, r, back, Flash{Kind: flashSuccess, Content: "Permissions saved."})
@@ -1309,11 +1317,9 @@ func (a *app) adminUserPasskeyDelete(w http.ResponseWriter, r *http.Request) err
 		return a.flash(w, r, back, Flash{Kind: flashError,
 			Content: "Manage your own passkeys in Settings."})
 	}
-	n, err := a.q.CredentialDeleteByAdmin(ctx, CredentialDeleteByAdminParams{
-		ID:      id,
-		UserID:  target.ID,
-		AdminID: admin.ID,
-	})
+	n, err := a.db.Credentials.Where(ant.Eq(&Credentials.ID, id),
+		ant.Eq(&Credentials.UserID, target.ID), ant.Ne(&Credentials.UserID, admin.ID)).
+		Delete(ctx)
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -1329,8 +1335,8 @@ func (a *app) adminUserLink(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	_, err = a.createInvite(ctx, a.q, inviteParams{
-		User:      &target,
+	_, err = a.createInvite(ctx, a.db, inviteParams{
+		User:      target,
 		CreatedBy: userFrom(ctx).ID,
 		TTL:       addPasskeyTTL,
 	})
@@ -1351,14 +1357,11 @@ func (a *app) adminUserLinkRevoke(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	n, err := a.q.InviteRevokeForUser(ctx, InviteRevokeForUserParams{
-		ID:     id,
-		UserID: sql.NullInt64{Int64: target.ID, Valid: true},
-	})
+	found, err := a.revokeLink(ctx, id, target.ID)
 	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
-	if n == 0 {
+	if !found {
 		return httpErr(http.StatusNotFound, "Not found.")
 	}
 	return a.flash(w, r, adminUserPath(target.ID)+"#recovery", Flash{Kind: flashSuccess,

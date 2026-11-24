@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
-	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/daaku/serr"
 	"github.com/daaku/webpush"
+	"github.com/skudra-go/ant"
 	g "maragu.dev/gomponents"
 	h "maragu.dev/gomponents/html"
 )
@@ -49,20 +49,15 @@ func pushSubscriber(publicURL string) string {
 }
 
 // loadVAPID loads the VAPID key, generating and storing it on first start,
-// and sets up the real sender. Reading it back after the insert makes two
-// racing starts agree.
+// and sets up the real sender.
 func (a *app) loadVAPID(ctx context.Context) error {
 	fresh, err := webpush.GenerateVAPIDKey()
 	if err != nil {
 		return serr.Wrap(err)
 	}
-	err = a.q.ConfigSetDefault(ctx, ConfigSetDefaultParams{Key: "vapid", Value: []byte(fresh)})
+	stored, err := a.configDefault(ctx, "vapid", []byte(fresh))
 	if err != nil {
-		return serr.Wrap(err)
-	}
-	stored, err := a.q.ConfigGet(ctx, "vapid")
-	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
 	key, err := webpush.ParseVAPIDKey(string(stored))
 	if err != nil {
@@ -132,13 +127,13 @@ func (a *app) pushSubscribe(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return serr.Wrap(err)
 	}
-	err = a.q.PushSubUpsert(r.Context(), PushSubUpsertParams{
+	_, err = a.db.PushSubscriptions.Upsert(r.Context(), &PushSubscription{
 		UserID:       user.ID,
 		Endpoint:     s.Endpoint,
 		Subscription: stored,
 		Label:        deviceLabel(r),
-		CreatedAt:    a.now().Unix(),
-	})
+	}, ant.OnConflict(&PushSubscriptions.Endpoint).DoUpdate(ant.F(&PushSubscriptions.UserID),
+		ant.F(&PushSubscriptions.Subscription), ant.F(&PushSubscriptions.Label)))
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -152,7 +147,8 @@ func (a *app) pushUnsubscribe(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	n, err := a.q.PushSubDelete(r.Context(), PushSubDeleteParams{ID: id, UserID: user.ID})
+	n, err := a.db.PushSubscriptions.Where(ant.Eq(&PushSubscriptions.ID, id),
+		ant.Eq(&PushSubscriptions.UserID, user.ID)).Delete(r.Context())
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -167,7 +163,7 @@ func (a *app) pushUnsubscribe(w http.ResponseWriter, r *http.Request) error {
 // posts it.
 func (a *app) pushOpened(w http.ResponseWriter, r *http.Request) error {
 	user := userFrom(r.Context())
-	if err := a.statUser(r.Context(), a.q, user.ID, UserStatsAddParams{PushesOpened: 1}); err != nil {
+	if err := a.statUser(r.Context(), a.db, UserStat{UserID: user.ID, PushesOpened: 1}); err != nil {
 		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -185,17 +181,17 @@ func (a *app) serviceWorker(w http.ResponseWriter, r *http.Request) error {
 // Which hint and controls show depends on the push-* class main.js puts on
 // <body>.
 func (a *app) settingsNotifications(r *http.Request, u *User) (g.Node, error) {
-	subs, err := a.q.PushSubsByUser(r.Context(), u.ID)
+	subs, err := a.pushSubsOf(r.Context(), u.ID)
 	if err != nil {
-		return nil, serr.Wrap(err)
+		return nil, err
 	}
 	var list g.Node = h.P(h.Class("muted"), g.Text("No devices get notifications."))
 	if len(subs) > 0 {
-		list = h.Ul(h.ID("push-subs"), h.Class("list"), g.Map(subs, func(s PushSubscription) g.Node {
+		list = h.Ul(h.ID("push-subs"), h.Class("list"), g.Map(subs, func(s *PushSubscription) g.Node {
 			return h.Li(h.ID(fmt.Sprintf("push-sub-%d", s.ID)), h.Class("row"),
 				h.Div(h.Class("stack-tight"),
 					h.Strong(g.Text(s.Label)),
-					dateCell("Added", s.CreatedAt)),
+					dateCell("Added", s.CreatedAt.Unix())),
 				h.Form(h.Method("post"), h.Action(pPushUnsubscribe),
 					h.Input(h.Type("hidden"), h.Name("id"), h.Value(strconv.FormatInt(s.ID, 10))),
 					h.Button(h.Class("btn secondary"), g.Text("Remove"))))
@@ -236,7 +232,7 @@ type pushPayloadData struct {
 // text, or what kind of file it is.
 func (a *app) pushSnippet(ctx context.Context, msg Message) (string, error) {
 	if msg.FileID.Valid {
-		f, err := a.q.FileByID(ctx, msg.FileID.Int64)
+		f, err := a.db.Files.Find(ctx, msg.FileID.Int64)
 		if err != nil {
 			return "", serr.Wrap(err)
 		}
@@ -250,7 +246,7 @@ func (a *app) pushSnippet(ctx context.Context, msg Message) (string, error) {
 
 // messagePayload is the notification for a new message.
 func (a *app) messagePayload(ctx context.Context, chat Chat, msg Message) ([]byte, error) {
-	author, err := a.q.UserByID(ctx, msg.UserID)
+	author, err := a.db.Users.Find(ctx, msg.UserID)
 	if err != nil {
 		return nil, serr.Wrap(err)
 	}
@@ -264,7 +260,7 @@ func (a *app) messagePayload(ctx context.Context, chat Chat, msg Message) ([]byt
 		Tag:   fmt.Sprintf("chat-%d", chat.ID),
 		Data:  pushPayloadData{URL: chatPath(chat.ID)},
 	}
-	if chat.IsDm {
+	if chat.IsDM {
 		p.Title, p.Body = author.Username, text
 	}
 	b, err := json.Marshal(p)
@@ -283,9 +279,9 @@ func (a *app) pushMessage(chat Chat, msg Message) {
 }
 
 func (a *app) pushMessageNow(ctx context.Context, chat Chat, msg Message) error {
-	ids, err := a.q.MemberIDs(ctx, chat.ID)
+	ids, err := a.memberIDs(ctx, chat.ID)
 	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
 	var to []int64
 	for _, id := range ids {
@@ -296,9 +292,9 @@ func (a *app) pushMessageNow(ctx context.Context, chat Chat, msg Message) error 
 	if len(to) == 0 {
 		return nil
 	}
-	subs, err := a.q.PushSubsByUsers(ctx, to)
+	subs, err := a.pushSubsOf(ctx, to...)
 	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
 	if len(subs) == 0 {
 		return nil
@@ -313,14 +309,21 @@ func (a *app) pushMessageNow(ctx context.Context, chat Chat, msg Message) error 
 
 // pushTo sends payload to every device of the user. It does not block.
 func (a *app) pushTo(userID int64, payload []byte) {
-	subs, err := a.q.PushSubsByUser(a.ctx, userID)
+	subs, err := a.pushSubsOf(a.ctx, userID)
 	if err != nil {
 		if a.ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "push to user %d: %+v\n", userID, serr.Wrap(err))
+			fmt.Fprintf(os.Stderr, "push to user %d: %+v\n", userID, err)
 		}
 		return
 	}
 	a.pushSubs(subs, payload)
+}
+
+// pushSubsOf returns the push subscriptions of the given users.
+func (a *app) pushSubsOf(ctx context.Context, userIDs ...int64) ([]*PushSubscription, error) {
+	subs, err := a.db.PushSubscriptions.Where(ant.In(&PushSubscriptions.UserID, userIDs...)).
+		OrderBy(&PushSubscriptions.ID).All(ctx)
+	return subs, serr.Wrap(err)
 }
 
 // pushSubs sends payload to each subscription in the background, at most
@@ -328,7 +331,7 @@ func (a *app) pushTo(userID int64, payload []byte) {
 // for the subscription's user. A subscription the push service says is gone
 // for good, or one that cannot be read, is deleted. Other failures are
 // logged and not retried.
-func (a *app) pushSubs(subs []PushSubscription, payload []byte) {
+func (a *app) pushSubs(subs []*PushSubscription, payload []byte) {
 	for _, row := range subs {
 		a.bg.Go(func() {
 			select {
@@ -365,15 +368,15 @@ func (a *app) pushSubs(subs []PushSubscription, payload []byte) {
 				fmt.Fprintf(os.Stderr, "push to %s failed%s\n", host, status)
 				return
 			}
-			if err := a.statUser(ctx, a.q, row.UserID, UserStatsAddParams{PushesSent: 1}); err != nil {
+			if err := a.statUser(ctx, a.db, UserStat{UserID: row.UserID, PushesSent: 1}); err != nil {
 				fmt.Fprintf(os.Stderr, "push stat: %+v\n", err)
 			}
 		})
 	}
 }
 
-func (a *app) dropSub(ctx context.Context, row PushSubscription) {
-	if err := a.q.PushSubDeleteByID(ctx, row.ID); err != nil {
+func (a *app) dropSub(ctx context.Context, row *PushSubscription) {
+	if err := a.db.PushSubscriptions.DeleteByID(ctx, row.ID); err != nil {
 		fmt.Fprintf(os.Stderr, "delete push subscription %d: %+v\n", row.ID, serr.Wrap(err))
 	}
 }
@@ -437,21 +440,19 @@ type snoozeView struct {
 
 // snoozesFor loads the viewer's snoozes on the rendered messages and whether
 // they can get a reminder at all, with one query each.
-func (a *app) snoozesFor(ctx context.Context, userID int64, rows []MessagesLatestRow, loc *time.Location) (snoozeView, error) {
+func (a *app) snoozesFor(ctx context.Context, userID int64, rows []*Message, loc *time.Location) (snoozeView, error) {
 	sv := snoozeView{due: map[int64]string{}}
-	n, err := a.q.PushSubCountByUser(ctx, userID)
+	var err error
+	sv.hasPush, err = a.db.PushSubscriptions.Where(ant.Eq(&PushSubscriptions.UserID, userID)).Exists(ctx)
 	if err != nil {
 		return sv, serr.Wrap(err)
 	}
-	sv.hasPush = n > 0
-	if len(rows) == 0 {
-		return sv, nil
-	}
 	ids := make([]int64, len(rows))
-	for i, row := range rows {
-		ids[i] = row.Message.ID
+	for i, m := range rows {
+		ids[i] = m.ID
 	}
-	snoozes, err := a.q.SnoozesForUserMessages(ctx, SnoozesForUserMessagesParams{UserID: userID, Ids: ids})
+	snoozes, err := a.db.Snoozes.Where(ant.Eq(&Snoozes.UserID, userID), ant.In(&Snoozes.MessageID, ids...)).
+		All(ctx)
 	if err != nil {
 		return sv, serr.Wrap(err)
 	}
@@ -518,12 +519,12 @@ func (a *app) messageSnooze(w http.ResponseWriter, r *http.Request) error {
 	if !ok {
 		return httpErr(http.StatusBadRequest, "Unknown reminder time.")
 	}
-	err = a.q.SnoozeUpsert(r.Context(), SnoozeUpsertParams{
+	_, err = a.db.Snoozes.Upsert(r.Context(), &Snooze{
 		MessageID: m.ID,
 		UserID:    v.User.ID,
 		DueAt:     due.Unix(),
-		CreatedAt: now.Unix(),
-	})
+	}, ant.OnConflict(&Snoozes.MessageID).And(ant.F(&Snoozes.UserID)).
+		DoUpdate(ant.F(&Snoozes.DueAt), ant.F(&Snoozes.CreatedAt)))
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -537,7 +538,8 @@ func (a *app) messageUnsnooze(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	err = a.q.SnoozeDelete(r.Context(), SnoozeDeleteParams{MessageID: m.ID, UserID: v.User.ID})
+	_, err = a.db.Snoozes.Where(ant.Eq(&Snoozes.MessageID, m.ID), ant.Eq(&Snoozes.UserID, v.User.ID)).
+		Delete(r.Context())
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -565,46 +567,53 @@ func (a *app) startSnoozes() {
 
 // snoozeRound fires the reminders that are due, oldest first.
 func (a *app) snoozeRound(ctx context.Context) {
-	due, err := a.q.SnoozesDue(ctx, a.now().Unix())
+	due, err := a.snoozesDue(ctx, a.now())
 	if err != nil {
 		if ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "snoozes due: %+v\n", serr.Wrap(err))
+			fmt.Fprintf(os.Stderr, "snoozes due: %+v\n", err)
 		}
 		return
 	}
 	for _, s := range due {
-		if err := a.fireSnooze(ctx, s); err != nil && ctx.Err() == nil {
+		if err := a.fireSnooze(ctx, *s); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "snooze %d/%d: %+v\n", s.MessageID, s.UserID, err)
 		}
 	}
+}
+
+// snoozesDue returns up to 100 snoozes due at now, oldest first.
+func (a *app) snoozesDue(ctx context.Context, now time.Time) ([]*Snooze, error) {
+	due, err := a.db.Snoozes.Where(ant.Lte(&Snoozes.DueAt, now.Unix())).
+		OrderBy(&Snoozes.DueAt).ThenBy(&Snoozes.MessageID).ThenBy(&Snoozes.UserID).
+		Limit(100).All(ctx)
+	return due, serr.Wrap(err)
 }
 
 // fireSnooze sends one reminder. Taking the row first, guarded by its due
 // time, makes a reminder fire at most once and leaves alone one that was
 // just moved to a later time.
 func (a *app) fireSnooze(ctx context.Context, s Snooze) error {
-	n, err := a.q.SnoozeTake(ctx, SnoozeTakeParams{MessageID: s.MessageID, UserID: s.UserID, DueAt: s.DueAt})
+	n, err := a.db.Snoozes.Where(ant.Eq(&Snoozes.MessageID, s.MessageID), ant.Eq(&Snoozes.UserID, s.UserID),
+		ant.Eq(&Snoozes.DueAt, s.DueAt)).Delete(ctx)
 	if err != nil {
 		return serr.Wrap(err)
 	}
 	if n == 0 {
 		return nil
 	}
-	msg, err := a.q.MessageByID(ctx, s.MessageID)
-	if errors.Is(err, sql.ErrNoRows) {
+	// Nothing is sent for a deleted message, or to a user who is no longer
+	// a member of its chat.
+	msg, err := a.db.Messages.Where(ant.Eq(&Messages.ID, s.MessageID),
+		ant.Exists(a.db.Members.Where(ant.EqCol(&Members.ChatID, &Messages.ChatID),
+			ant.Eq(&Members.UserID, s.UserID)))).
+		Single(ctx)
+	if errors.Is(err, ant.ErrNotFound) {
 		return nil
 	}
 	if err != nil {
 		return serr.Wrap(err)
 	}
-	_, err = a.q.MemberGet(ctx, MemberGetParams{ChatID: msg.ChatID, UserID: s.UserID})
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil // no longer a member: dropped silently
-	}
-	if err != nil {
-		return serr.Wrap(err)
-	}
-	payload, err := a.reminderPayload(ctx, s.UserID, msg)
+	payload, err := a.reminderPayload(ctx, s.UserID, *msg)
 	if err != nil {
 		return err
 	}
@@ -615,19 +624,19 @@ func (a *app) fireSnooze(ctx context.Context, s Snooze) error {
 // reminderPayload is the notification for a snoozed message, titled with
 // the chat as the user sees it.
 func (a *app) reminderPayload(ctx context.Context, userID int64, msg Message) ([]byte, error) {
-	chat, err := a.q.ChatByID(ctx, msg.ChatID)
+	chat, err := a.db.Chats.Find(ctx, msg.ChatID)
 	if err != nil {
 		return nil, serr.Wrap(err)
 	}
-	viewer, err := a.q.UserByID(ctx, userID)
+	viewer, err := a.db.Users.Find(ctx, userID)
 	if err != nil {
 		return nil, serr.Wrap(err)
 	}
-	title, err := a.chatName(ctx, chat, &viewer)
+	title, err := a.chatName(ctx, *chat, viewer)
 	if err != nil {
 		return nil, err
 	}
-	author, err := a.q.UserByID(ctx, msg.UserID)
+	author, err := a.db.Users.Find(ctx, msg.UserID)
 	if err != nil {
 		return nil, serr.Wrap(err)
 	}
@@ -651,16 +660,17 @@ func (a *app) jumpToMessage(w http.ResponseWriter, r *http.Request, v chatView, 
 	to := chatPath(v.Chat.ID)
 	id, err := strconv.ParseInt(mid, 10, 64)
 	if err == nil {
-		_, err = a.q.MessageInChat(ctx, MessageInChatParams{ID: id, ChatID: v.Chat.ID})
-		switch {
-		case err == nil:
-			n, err := a.q.MessagesCountFrom(ctx, MessagesCountFromParams{ChatID: v.Chat.ID, ID: id})
+		inChat, err := a.messageInChat(ctx, id, v.Chat.ID)
+		if err != nil {
+			return err
+		}
+		if inChat {
+			n, err := a.db.Messages.Where(ant.Eq(&Messages.ChatID, v.Chat.ID), ant.Gte(&Messages.ID, id)).
+				Count(ctx)
 			if err != nil {
 				return serr.Wrap(err)
 			}
 			to = fmt.Sprintf("%s?n=%d#m%d", to, max(defaultPage, n), id)
-		case !errors.Is(err, sql.ErrNoRows):
-			return serr.Wrap(err)
 		}
 	}
 	http.Redirect(w, r, to, http.StatusSeeOther)

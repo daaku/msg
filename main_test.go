@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/skudra-go/ant"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -433,7 +434,7 @@ func TestMigrations(t *testing.T) {
 	ensure.Nil(t, err)
 	ensure.True(t, len(files) > 0)
 	var applied int
-	ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(ctx,
 		"SELECT count(*) FROM db_migrations").Scan(&applied))
 	ensure.DeepEqual(t, applied, len(files))
 
@@ -442,23 +443,19 @@ func TestMigrations(t *testing.T) {
 		"chats", "members", "files", "messages", "previews", "reactions",
 		"snoozes", "push_subscriptions", "user_stats", "chat_stats", "avatars", "chat_icons"} {
 		var n int
-		ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
+		ensure.Nil(t, ta.app.db.DB().QueryRowContext(ctx,
 			"SELECT count(*) FROM "+table).Scan(&n), table)
 	}
-	n, err := ta.app.q.UserCount(ctx)
+	n, err := ta.app.db.Users.Count(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, n, int64(0))
 
 	// applying again is a no op
-	ensure.Nil(t, migrations.Migrate(ctx, ta.app.db))
-	ensure.Nil(t, ta.app.db.QueryRowContext(ctx,
+	ensure.Nil(t, migrations.Migrate(ctx, ta.app.db.DB()))
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(ctx,
 		"SELECT count(*) FROM db_migrations").Scan(&applied))
 	ensure.DeepEqual(t, applied, len(files))
 
-	// query.sql is not a migration
-	for _, f := range files {
-		ensure.StringDoesNotContain(t, f, "query.sql")
-	}
 }
 
 func TestSecret(t *testing.T) {
@@ -477,39 +474,43 @@ func TestTxRollsBack(t *testing.T) {
 	a := ta.app
 	ctx := t.Context()
 	errBoom := errors.New("boom")
-	err := a.tx(ctx, func(q *Queries) error {
-		ensure.Nil(t, q.ConfigSetDefault(ctx, ConfigSetDefaultParams{Key: "k", Value: []byte("v")}))
+	insert := func(tx *AppDB) {
+		ensure.Nil(t, tx.Config.Insert(ctx, &Config{Key: "k", Value: []byte("v")}))
+	}
+	err := a.db.Tx(ctx, func(tx *AppDB) error {
+		insert(tx)
 		return errBoom
 	})
 	ensure.True(t, errors.Is(err, errBoom))
-	_, err = a.q.ConfigGet(ctx, "k")
-	ensure.True(t, errors.Is(err, sql.ErrNoRows), err)
+	_, err = a.db.Config.Find(ctx, "k")
+	ensure.True(t, errors.Is(err, ant.ErrNotFound), err)
 
 	func() {
 		defer ensure.PanicDeepEqual(t, "oops")
-		_ = a.tx(ctx, func(q *Queries) error {
-			ensure.Nil(t, q.ConfigSetDefault(ctx, ConfigSetDefaultParams{Key: "k", Value: []byte("v")}))
+		_ = a.db.Tx(ctx, func(tx *AppDB) error {
+			insert(tx)
 			panic("oops")
 		})
 	}()
-	_, err = a.q.ConfigGet(ctx, "k")
-	ensure.True(t, errors.Is(err, sql.ErrNoRows), err)
+	_, err = a.db.Config.Find(ctx, "k")
+	ensure.True(t, errors.Is(err, ant.ErrNotFound), err)
 
-	ensure.Nil(t, a.tx(ctx, func(q *Queries) error {
-		return q.ConfigSetDefault(ctx, ConfigSetDefaultParams{Key: "k", Value: []byte("v")})
+	ensure.Nil(t, a.db.Tx(ctx, func(tx *AppDB) error {
+		insert(tx)
+		return nil
 	}))
-	v, err := a.q.ConfigGet(ctx, "k")
+	v, err := a.db.Config.Find(ctx, "k")
 	ensure.Nil(t, err)
-	ensure.DeepEqual(t, v, []byte("v"))
+	ensure.DeepEqual(t, v.Value, []byte("v"))
 }
 
 func TestForeignKeysEnforced(t *testing.T) {
 	ta := newTestApp(t)
 	ctx := t.Context()
-	_, err := ta.app.db.ExecContext(ctx,
+	_, err := ta.app.db.DB().ExecContext(ctx,
 		"INSERT INTO users (id, username, handle, created_at) VALUES (1, 'a', x'01', 1)")
 	ensure.Nil(t, err)
-	_, err = ta.app.db.ExecContext(ctx,
+	_, err = ta.app.db.DB().ExecContext(ctx,
 		"INSERT INTO members (chat_id, user_id, added_by, created_at) VALUES (99, 1, 1, 1)")
 	ensure.Err(t, err, regexp.MustCompile("FOREIGN KEY"))
 }
@@ -573,7 +574,7 @@ func (ta *testApp) register(optionsPath, postPath string, auth *virtualwebauthn.
 }
 
 // acceptInvite registers a new passkey through an invite link.
-func (ta *testApp) acceptInvite(inv Invite) (*httptest.ResponseRecorder, *virtualwebauthn.Authenticator, virtualwebauthn.Credential) {
+func (ta *testApp) acceptInvite(inv *Invite) (*httptest.ResponseRecorder, *virtualwebauthn.Authenticator, virtualwebauthn.Credential) {
 	ta.t.Helper()
 	auth := virtualwebauthn.NewAuthenticatorWithOptions(virtualwebauthn.AuthenticatorOptions{
 		UserHandle: inv.Handle,
@@ -586,9 +587,9 @@ func (ta *testApp) acceptInvite(inv Invite) (*httptest.ResponseRecorder, *virtua
 }
 
 // newInvite stores a new user invite created by nobody.
-func (ta *testApp) newInvite(username string, admin bool) Invite {
+func (ta *testApp) newInvite(username string, admin bool) *Invite {
 	ta.t.Helper()
-	inv, err := ta.app.createInvite(ta.t.Context(), ta.app.q, inviteParams{
+	inv, err := ta.app.createInvite(ta.t.Context(), ta.app.db, inviteParams{
 		Username: username,
 		Admin:    admin,
 		TTL:      time.Hour,
@@ -605,16 +606,16 @@ func (ta *testApp) newUser(username string, perms ...string) *testUser {
 	w, auth, cred := ta.acceptInvite(ta.newInvite(username, false))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther, w.Body.String())
 	for _, p := range perms {
-		_, err := ta.app.db.ExecContext(t.Context(),
+		_, err := ta.app.db.DB().ExecContext(t.Context(),
 			"UPDATE users SET perm_"+p+" = TRUE WHERE username = ?", username)
 		ensure.Nil(t, err)
 	}
-	user, err := ta.app.q.UserByUsername(t.Context(), username)
+	user, err := ta.app.db.Users.Where(ant.Eq(&Users.Username, username)).Single(t.Context())
 	ensure.Nil(t, err)
-	row, err := ta.app.q.CredentialByCredentialID(t.Context(), cred.ID)
+	row, err := ta.app.db.Credentials.Where(ant.Col(&Credentials.CredentialID).Eq(cred.ID)).Single(t.Context())
 	ensure.Nil(t, err)
 	return &testUser{
-		User:   user,
+		User:   *user,
 		auth:   auth,
 		cred:   cred,
 		credID: row.ID,

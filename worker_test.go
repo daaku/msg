@@ -366,7 +366,7 @@ func TestWorkerStartupRecovery(t *testing.T) {
 	ta.app.ctx = ctx
 	id := ta.upload(alice, chat, "a.png", pngOf(t, 10, 10))
 	// a previous process died in the middle of this file
-	_, err := ta.app.db.ExecContext(ctx, "UPDATE files SET status = 'processing' WHERE id = ?", id)
+	_, err := ta.app.db.DB().ExecContext(ctx, "UPDATE files SET status = 'processing' WHERE id = ?", id)
 	ensure.Nil(t, err)
 	stale := filepath.Join(ta.app.tmpDir(), "f1-old")
 	ensure.Nil(t, os.MkdirAll(stale, 0o700))
@@ -431,7 +431,7 @@ func TestDeleteWhileConverting(t *testing.T) {
 	id := ta.upload(alice, chat, "a.png", pngOf(t, 10, 10))
 	f := ta.file(id)
 	var msgID int64
-	ensure.Nil(t, ta.app.db.QueryRowContext(ctx, "SELECT id FROM messages WHERE file_id = ?", id).Scan(&msgID))
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(ctx, "SELECT id FROM messages WHERE file_id = ?", id).Scan(&msgID))
 
 	ta.app.beforeConvert = func(File) {
 		w := ta.post(messagePath(chat.ID, msgID)+"/delete", nil, ta.as(alice))
@@ -454,7 +454,7 @@ func TestDeleteConvertedImage(t *testing.T) {
 	f := ta.file(id)
 	ensure.False(t, ta.objectMissing(fileKey(f, "converted")))
 	var msgID int64
-	ensure.Nil(t, ta.app.db.QueryRowContext(ctx, "SELECT id FROM messages WHERE file_id = ?", id).Scan(&msgID))
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(ctx, "SELECT id FROM messages WHERE file_id = ?", id).Scan(&msgID))
 	ta.post(messagePath(chat.ID, msgID)+"/delete", nil, ta.as(alice))
 	ensure.True(t, ta.objectMissing(fileKey(f, "converted")))
 	ensure.True(t, ta.objectMissing(fileKey(f, "original")))
@@ -464,7 +464,7 @@ func TestKindMismatchFails(t *testing.T) {
 	ta, alice, chat := mediaSetup(t)
 	id := ta.upload(alice, chat, "a.bin", []byte("just some text"))
 	// the row claims an image, the bytes say otherwise
-	_, err := ta.app.db.ExecContext(t.Context(),
+	_, err := ta.app.db.DB().ExecContext(t.Context(),
 		"UPDATE files SET kind = 'image', status = 'pending' WHERE id = ?", id)
 	ensure.Nil(t, err)
 	ta.runMedia()

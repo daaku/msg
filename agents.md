@@ -65,7 +65,7 @@ message is visible only to its two participants.
 | --- | --- |
 | HTTP | `net/http` `ServeMux` with method patterns, `github.com/daaku/lands` to listen |
 | HTML | `maragu.dev/gomponents` (`g` and `h` import aliases) |
-| DB | `modernc.org/sqlite`, `github.com/daaku/sqlmig` migrations, `sqlc` generated queries |
+| DB | `modernc.org/sqlite`, `github.com/daaku/sqlmig` migrations, `github.com/skudra-go/ant` queries |
 | Errors | `github.com/daaku/serr` for stack traces |
 | Cookies | `github.com/daaku/sookie` (encrypted) |
 | Passkeys | `github.com/go-webauthn/webauthn` |
@@ -87,7 +87,7 @@ mocks, sessions bound to a passkey, CSP).
 Everything is `package main` in the repository root.
 
 ```
-main.go        config, app struct, routing, middleware, helpers, run()
+main.go        config, app struct, routing, middleware, helpers, run(), ant models
 ui.go          page shell, shared components, icons, formatting helpers
 auth.go        sessions, passkeys, invites, bootstrap, settings page, admin user pages
 chat.go        groups, direct messages, members, archiving, messages, edit and
@@ -98,22 +98,18 @@ push.go        push subscriptions, sending, opened tracking, snooze reminders
 stats.go       stats helpers and stats pages
 *_test.go      one test file per source file, plus main_test.go for the harness
 db/NNN_*.sql   migrations (sqlmig)
-db/query.sql   all sqlc queries
-sqlc.yaml      sqlc config; output is sqlc_db.go, sqlc_models.go, query.sql.go
 assets/        main.css, main.js, sw.js, paxi.js, icons, robots.txt
 .hooks/        pre-commit (fast) and pre-push (full) checks
 ```
 
-Generated files (`sqlc_db.go`, `sqlc_models.go`, `query.sql.go`) are committed
-and never edited by hand. Regenerate with `go generate ./...`.
+There is no generated code.
 
 ## Commands
 
 ```sh
-go generate ./...        # regenerate sqlc code after editing db/
 go build ./...
 go test ./...
-./.hooks/pre-push        # tidy check, generate check, build, test. Must pass.
+./.hooks/pre-push        # tidy check, build, test. Must pass.
 S3_ENDPOINT=fake DEV=1 go run .   # run locally, no external services needed
 ```
 
@@ -179,11 +175,23 @@ generated on first start and stored in the `config` table.
 - All timestamps are `INTEGER` unix seconds and are always passed in from Go
   using `a.now()`. Never use SQL time functions or column defaults for time.
   Tests replace `a.now`.
-- Queries live in `db/query.sql`, named `ThingVerb` (`UserByID`,
-  `MessageCreate`). Use `@name` parameters when a query has more than two.
-  `sqlc.slice('ids')` for `IN` lists.
-- Use `a.tx(ctx, func(q *Queries) error { ... })` when more than one statement
-  must succeed together. The DSN sets `_txlock=immediate`.
+- Queries are written with ant (`github.com/skudra-go/ant`) where they are
+  used. Read its skill first: `skills/ant/SKILL.md` in the directory
+  `go list -m -f '{{.Dir}}' github.com/skudra-go/ant` prints. Models,
+  `AppDB` and the probes (`Users`, `Chats`, ...) are in `main.go`. Columns
+  are probe field pointers (`&Users.Username`), never strings. A query used
+  in more than one place gets a small helper (`a.credentials`,
+  `a.pendingLinks`, `loadMessages`), not a copy.
+- `a.db` does not track changes and is shared by every request. Write with
+  explicit statements (`Insert`, `Upsert`, `Where(...).Update`,
+  `Where(...).Delete`), not `SaveChanges`. Load related rows with
+  `Include`/`IncludeOne` instead of joins into ad hoc row structs.
+- A model's struct must match its table in `db/`. A new column is a new
+  migration and a new field. ant fills `CreatedAt` (an `ant.UnixTime`) on
+  insert from `a.now`; other times are `int64` set from `a.now()`.
+- Use `a.db.Tx(ctx, func(tx *AppDB) error { ... })` when more than one
+  statement must succeed together, and use `tx`, not `a.db`, inside it. The
+  DSN sets `_txlock=immediate`.
 - A schema change is a new `db/NNN_name.sql` file. Never edit a migration that
   has been committed in an earlier task.
 - Status columns are plain text. `files.status`: `uploading`, `pending`,

@@ -27,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/daaku/serr"
+	"github.com/skudra-go/ant"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
 	g "maragu.dev/gomponents"
@@ -221,16 +222,17 @@ func (a *app) uploadInit(r *http.Request, in uploadInitIn) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := a.q.FileCreate(ctx, FileCreateParams{
-		ChatID:    chat.ID,
-		UserID:    user.ID,
-		Name:      name,
-		S3Prefix:  prefix,
-		UploadID:  uploadID,
-		Size:      in.Size,
-		CreatedAt: a.now().Unix(),
-	})
-	if err != nil {
+	file := &File{
+		ChatID:   chat.ID,
+		UserID:   user.ID,
+		Kind:     kindOther,
+		Status:   statusUploading,
+		Name:     name,
+		S3Prefix: prefix,
+		UploadID: uploadID,
+		Size:     in.Size,
+	}
+	if err := a.db.Files.Insert(ctx, file); err != nil {
 		_ = a.s3.abortMultipart(context.WithoutCancel(ctx), key, uploadID)
 		return nil, serr.Wrap(err)
 	}
@@ -253,7 +255,8 @@ func (a *app) dropUpload(ctx context.Context, f File) {
 	if err := a.s3.abortMultipart(ctx, fileKey(f, "original"), f.UploadID); err != nil {
 		fmt.Fprintf(os.Stderr, "abort upload %d: %v\n", f.ID, err)
 	}
-	if _, err := a.q.FileDeleteUploading(ctx, f.ID); err != nil {
+	_, err := a.db.Files.Where(ant.Eq(&Files.ID, f.ID), ant.Eq(&Files.Status, statusUploading)).Delete(ctx)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "delete upload %d: %v\n", f.ID, err)
 	}
 }
@@ -280,14 +283,11 @@ func (a *app) uploadComplete(r *http.Request, in uploadFileIn) (any, error) {
 	user := userFrom(ctx)
 	defer a.lockFile(in.File)()
 
-	file, err := a.q.FileByID(ctx, in.File)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil &&
-		(file.UserID != user.ID || file.Status != statusUploading)) {
-		return nil, errNotFound
-	}
+	f, err := a.uploading(ctx, in.File)
 	if err != nil {
-		return nil, serr.Wrap(err)
+		return nil, err
 	}
+	file := *f
 	// The user must still be a member now, not only when the upload began.
 	chat, member, _, err := a.chatAccess(ctx, user, file.ChatID)
 	if err != nil || !member {
@@ -323,18 +323,17 @@ func (a *app) uploadComplete(r *http.Request, in uploadFileIn) (any, error) {
 		status = statusPending
 	}
 
-	err = a.tx(ctx, func(q *Queries) error {
-		n, err := q.FileCompleteUpload(ctx, FileCompleteUploadParams{
-			ID: file.ID, Kind: kind, Status: status,
-		})
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		n, err := tx.Files.Where(ant.Eq(&Files.ID, file.ID), ant.Eq(&Files.Status, statusUploading)).
+			Update(ctx, ant.Set(&Files.Kind, kind), ant.Set(&Files.Status, status), ant.Set(&Files.UploadID, ""))
 		if err != nil {
 			return serr.Wrap(err)
 		}
 		if n == 0 {
 			return errNotFound
 		}
-		us := UserStatsAddParams{BytesUploaded: file.Size}
-		chatStats := ChatStatsAddParams{BytesUploaded: file.Size}
+		us := UserStat{UserID: file.UserID, BytesUploaded: file.Size}
+		chatStats := ChatStat{ChatID: file.ChatID, BytesUploaded: file.Size}
 		switch kind {
 		case kindImage:
 			us.ImagesUploaded, chatStats.ImagesUploaded = 1, 1
@@ -343,10 +342,10 @@ func (a *app) uploadComplete(r *http.Request, in uploadFileIn) (any, error) {
 		default:
 			us.FilesUploaded, chatStats.FilesUploaded = 1, 1
 		}
-		if err := a.statUser(ctx, q, file.UserID, us); err != nil {
+		if err := a.statUser(ctx, tx, us); err != nil {
 			return err
 		}
-		return a.statChat(ctx, q, file.ChatID, chatStats)
+		return a.statChat(ctx, tx, chatStats)
 	})
 	if err != nil {
 		return nil, err
@@ -362,11 +361,20 @@ func (a *app) uploadComplete(r *http.Request, in uploadFileIn) (any, error) {
 func (a *app) uploadAbort(r *http.Request, in uploadFileIn) (any, error) {
 	ctx := r.Context()
 	defer a.lockFile(in.File)()
-	file, err := a.q.FileByID(ctx, in.File)
-	if err == nil && file.UserID == userFrom(ctx).ID && file.Status == statusUploading {
-		a.dropUpload(ctx, file)
+	if f, err := a.uploading(ctx, in.File); err == nil {
+		a.dropUpload(ctx, *f)
 	}
 	return okJSON, nil
+}
+
+// uploading loads a file the signed in user is still uploading.
+func (a *app) uploading(ctx context.Context, id int64) (*File, error) {
+	f, err := a.db.Files.Where(ant.Eq(&Files.ID, id), ant.Eq(&Files.UserID, userFrom(ctx).ID),
+		ant.Eq(&Files.Status, statusUploading)).Single(ctx)
+	if errors.Is(err, ant.ErrNotFound) {
+		return nil, errNotFound
+	}
+	return f, serr.Wrap(err)
 }
 
 // serving
@@ -381,8 +389,8 @@ func (a *app) fileRedirect(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return errNotFound
 	}
-	file, err := a.q.FileByID(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) {
+	file, err := a.db.Files.Find(ctx, id)
+	if errors.Is(err, ant.ErrNotFound) {
 		return errNotFound
 	}
 	if err != nil {
@@ -403,12 +411,12 @@ func (a *app) fileRedirect(w http.ResponseWriter, r *http.Request) error {
 	default:
 		return errNotFound
 	}
-	u, maxAge := a.s3.presignStable(fileKey(file, variant), a.cfg.S3URLValidity)
-	err = a.tx(ctx, func(q *Queries) error {
-		if err := a.statUser(ctx, q, user.ID, UserStatsAddParams{BytesDownloaded: size}); err != nil {
+	u, maxAge := a.s3.presignStable(fileKey(*file, variant), a.cfg.S3URLValidity)
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		if err := a.statUser(ctx, tx, UserStat{UserID: user.ID, BytesDownloaded: size}); err != nil {
 			return err
 		}
-		return a.statChat(ctx, q, file.ChatID, ChatStatsAddParams{BytesDownloaded: size})
+		return a.statChat(ctx, tx, ChatStat{ChatID: file.ChatID, BytesDownloaded: size})
 	})
 	if err != nil {
 		return err
@@ -422,26 +430,20 @@ func filePath(id int64, variant string) string {
 	return fmt.Sprintf("%s%d/%s", pFile, id, variant)
 }
 
-// filesFor loads the files attached to the given messages in one query.
-func (a *app) filesFor(ctx context.Context, rows []MessagesLatestRow) (map[int64]File, error) {
-	var ids []int64
-	for _, row := range rows {
-		if row.Message.FileID.Valid {
-			ids = append(ids, row.Message.FileID.Int64)
-		}
-	}
-	out := map[int64]File{}
-	if len(ids) == 0 {
-		return out, nil
-	}
-	files, err := a.q.FilesByIDs(ctx, ids)
-	if err != nil {
-		return nil, serr.Wrap(err)
-	}
-	for _, f := range files {
-		out[f.ID] = f
-	}
-	return out, nil
+// loadMessages runs q with everything a rendered message shows: its
+// author, its file, its ready preview and its reactions with their users.
+func loadMessages(ctx context.Context, q *ant.Query[Message]) ([]*Message, error) {
+	ms, err := q.
+		IncludeOne(&Messages.User).
+		IncludeOne(&Messages.File).
+		IncludeOne(&Messages.Preview, func(q *ant.Query[Preview]) *ant.Query[Preview] {
+			return q.IncludeOne(&Previews.File)
+		}).
+		Include(&Messages.Reactions, func(q *ant.Query[Reaction]) *ant.Query[Reaction] {
+			return q.IncludeOne(&Reactions.User).OrderBy(&Reactions.CreatedAt).ThenBy(&Reactions.UserID)
+		}).
+		All(ctx)
+	return ms, serr.Wrap(err)
 }
 
 // fileNode renders the attachment of a message.
@@ -490,13 +492,13 @@ const (
 // mediaFollows reports whether rows[k] continues a run of pictures and
 // videos from rows[k-1]: it is a converted picture or video by the same
 // person, sent at most albumGap later.
-func mediaFollows(rows []MessagesLatestRow, files map[int64]File, k int) bool {
+func mediaFollows(rows []*Message, k int) bool {
 	if k < 1 || k >= len(rows) {
 		return false
 	}
-	prev, m := rows[k-1].Message, rows[k].Message
-	return m.FileID.Valid && isMedia(files[m.FileID.Int64]) && m.UserID == prev.UserID &&
-		m.CreatedAt-prev.CreatedAt <= int64(albumGap/time.Second)
+	prev, m := rows[k-1], rows[k]
+	return m.media() && m.UserID == prev.UserID &&
+		m.CreatedAt.Sub(prev.CreatedAt.Time) <= albumGap
 }
 
 // mediaPath is the page that shows the pictures and videos of the messages
@@ -519,18 +521,17 @@ func mediaThumb(f File, size int) g.Node {
 
 // albumNode is the content of an album bubble: a grid of the first few
 // pictures and videos of the run, each a link to the media page.
-func albumNode(v chatView, run []MessagesLatestRow, files map[int64]File, loc *time.Location) g.Node {
-	first, last := run[0].Message, run[len(run)-1].Message
+func albumNode(v chatView, run []*Message, loc *time.Location) g.Node {
+	first, last := run[0], run[len(run)-1]
 	id := fmt.Sprintf("m%d", first.ID)
 	// The bubble carries the id of its first message. The others get an
 	// anchor, so that #m{id} leads here for every message of the album.
 	var anchors, cells g.Group
-	for _, row := range run[1:] {
-		anchors = append(anchors, h.Span(h.ID(fmt.Sprintf("m%d", row.Message.ID))))
+	for _, m := range run[1:] {
+		anchors = append(anchors, h.Span(h.ID(fmt.Sprintf("m%d", m.ID))))
 	}
-	for k, row := range run[:min(albumShown, len(run))] {
-		m := row.Message
-		f := files[m.FileID.Int64]
+	for k, m := range run[:min(albumShown, len(run))] {
+		f := *m.File
 		more := k == albumShown-1 && len(run) > albumShown
 		cells = append(cells, h.A(h.ID(fmt.Sprintf("%s-c%d", id, m.ID)), h.Class("album-cell"),
 			h.Href(mediaPath(v.Chat.ID, first.ID, last.ID, m.ID)),
@@ -539,7 +540,7 @@ func albumNode(v chatView, run []MessagesLatestRow, files map[int64]File, loc *t
 			g.If(more, h.Span(h.Class("album-more"), g.Textf("+%d", len(run)-albumShown))),
 			g.If(f.Kind == kindVideo && !more, h.Span(h.Class("album-play"), icon("play")))))
 	}
-	at := time.Unix(last.CreatedAt, 0).In(loc)
+	at := last.CreatedAt.In(loc)
 	return g.Group{anchors,
 		h.Div(h.ID(id+"-album"), h.Class("msg-media album"), cells,
 			h.Div(h.ID(id+"-meta"), h.Class("msg-meta"),
@@ -563,51 +564,37 @@ func (a *app) chatMedia(w http.ResponseWriter, r *http.Request) error {
 		return errNotFound
 	}
 	// one more than a chat page can hold, to notice a longer range
-	found, err := a.q.MessagesRange(ctx, MessagesRangeParams{ChatID: v.Chat.ID, FromID: from, ToID: to, N: maxPage + 1})
-	if err != nil {
-		return serr.Wrap(err)
-	}
-	if len(found) == 0 || len(found) > maxPage {
-		return errNotFound
-	}
-	rows := make([]MessagesLatestRow, len(found))
-	for i, row := range found {
-		rows[i] = MessagesLatestRow(row)
-	}
-	files, err := a.filesFor(ctx, rows)
+	rows, err := loadMessages(ctx, a.db.Messages.
+		Where(ant.Eq(&Messages.ChatID, v.Chat.ID), ant.Between(&Messages.ID, from, to)).
+		OrderBy(&Messages.ID).Limit(maxPage+1))
 	if err != nil {
 		return err
 	}
-	if m := rows[0].Message; !m.FileID.Valid || !isMedia(files[m.FileID.Int64]) {
+	if len(rows) == 0 || len(rows) > maxPage || !rows[0].media() {
 		return errNotFound
 	}
 	for k := 1; k < len(rows); k++ {
-		if !mediaFollows(rows, files, k) {
+		if !mediaFollows(rows, k) {
 			return errNotFound
 		}
 	}
 
 	cur := 0
 	if at, err := strconv.ParseInt(r.URL.Query().Get("at"), 10, 64); err == nil {
-		for i, row := range rows {
-			if row.Message.ID == at {
+		for i, m := range rows {
+			if m.ID == at {
 				cur = i
 			}
 		}
 	}
-	row := rows[cur]
-	m := row.Message
-	f := files[m.FileID.Int64]
+	m := rows[cur]
+	f := *m.File
 	loc := viewerLoc(r)
-	reactions, err := a.reactionsFor(ctx, v.User.ID, rows[cur:cur+1])
-	if err != nil {
-		return err
-	}
 	if v.Snoozes, err = a.snoozesFor(ctx, v.User.ID, rows[cur:cur+1], loc); err != nil {
 		return err
 	}
-	first, last := rows[0].Message.ID, rows[len(rows)-1].Message.ID
-	link := func(i int) g.Node { return h.Href(mediaPath(v.Chat.ID, first, last, rows[i].Message.ID)) }
+	first, last := rows[0].ID, rows[len(rows)-1].ID
+	link := func(i int) g.Node { return h.Href(mediaPath(v.Chat.ID, first, last, rows[i].ID)) }
 
 	// The shown item is the only one in the page at full size, and every
 	// picture is lazy, so the browser fetches what is on screen and no more.
@@ -630,15 +617,15 @@ func (a *app) chatMedia(w http.ResponseWriter, r *http.Request) error {
 			h.Aria("label", label), h.Title(label), icon(iconName))
 	}
 	var thumbs g.Group
-	for i, tr := range rows {
-		tf := files[tr.Message.FileID.Int64]
-		thumbs = append(thumbs, h.A(h.ID(fmt.Sprintf("thumb-%d", tr.Message.ID)), h.Class("gallery-thumb"),
+	for i, tm := range rows {
+		tf := *tm.File
+		thumbs = append(thumbs, h.A(h.ID(fmt.Sprintf("thumb-%d", tm.ID)), h.Class("gallery-thumb"),
 			link(i), g.Attr("data-morph"),
 			g.If(i == cur, h.Aria("current", "true")),
 			mediaThumb(tf, 64),
 			g.If(tf.Kind == kindVideo, h.Span(h.Class("album-play"), icon("play")))))
 	}
-	at := time.Unix(m.CreatedAt, 0)
+	at := m.CreatedAt.Time
 	return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("gallery"), h.Class("gallery"),
 		// The chat's own header, with the back link always shown. ?m= shows
 		// enough of the chat to hold the album and jumps to it.
@@ -653,9 +640,9 @@ func (a *app) chatMedia(w http.ResponseWriter, r *http.Request) error {
 			step("gallery-next", "Next", "right", cur+1)),
 		h.Div(h.ID("gallery-bar"), h.Class("gallery-bar"),
 			h.Span(h.ID("gallery-caption"), h.Class("muted"),
-				g.Text(row.Username+" · "), h.Time(h.DateTime(at.UTC().Format(time.RFC3339)), g.Text(fmtTime(at, loc)))),
-			a.reactionChips(v, m, reactions[m.ID]),
-			a.messageMenu(v, m)),
+				g.Text(m.User.Username+" · "), h.Time(h.DateTime(at.UTC().Format(time.RFC3339)), g.Text(fmtTime(at, loc)))),
+			a.reactionChips(v, *m, reactionGroups(v.User.ID, m.Reactions)),
+			a.messageMenu(v, *m)),
 		h.Nav(h.ID("gallery-strip"), h.Class("gallery-strip"), h.Aria("label", "All pictures and videos"), thumbs)))
 }
 
@@ -695,8 +682,8 @@ func fileDownload(f File) g.Node {
 
 // deleteFile removes a file row and then its objects. The database is the
 // source of truth: an S3 failure is logged and leaves a harmless orphan.
-func (a *app) deleteFile(ctx context.Context, q *Queries, f File) (cleanup func(), err error) {
-	if err := q.FileDelete(ctx, f.ID); err != nil {
+func (a *app) deleteFile(ctx context.Context, db *AppDB, f File) (cleanup func(), err error) {
+	if err := db.Files.DeleteByID(ctx, f.ID); err != nil {
 		return nil, serr.Wrap(err)
 	}
 	return func() {
@@ -711,14 +698,15 @@ func (a *app) deleteFile(ctx context.Context, q *Queries, f File) (cleanup func(
 
 // cleanStaleUploads drops uploads that were started but never finished.
 func (a *app) cleanStaleUploads(ctx context.Context) {
-	files, err := a.q.FilesStaleUploads(ctx, a.now().Add(-staleUploadAge).Unix())
+	files, err := a.db.Files.Where(ant.Eq(&Files.Status, statusUploading),
+		ant.Lt(&Files.CreatedAt, ant.UnixTime{Time: a.now().Add(-staleUploadAge)})).OrderBy(&Files.ID).All(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stale uploads: %+v\n", serr.Wrap(err))
 		return
 	}
 	for _, f := range files {
 		unlock := a.lockFile(f.ID)
-		a.dropUpload(ctx, f)
+		a.dropUpload(ctx, *f)
 		unlock()
 	}
 }
@@ -1035,11 +1023,11 @@ func (a *app) processFile(ctx context.Context, f File) error {
 	}
 
 	// store the outputs
-	arg := FileSetReadyParams{
-		ID:       f.ID,
-		Width:    int64(res.width),
-		Height:   int64(res.height),
-		Duration: int64(res.duration),
+	ready := []ant.Assignment{
+		ant.Set(&Files.Status, statusReady),
+		ant.Set(&Files.Width, int64(res.width)),
+		ant.Set(&Files.Height, int64(res.height)),
+		ant.Set(&Files.Duration, int64(res.duration)),
 	}
 	var stored []string
 	removeStored := func() {
@@ -1071,12 +1059,15 @@ func (a *app) processFile(ctx context.Context, f File) error {
 			return serr.Wrap(err)
 		}
 		if out.variant == "poster" {
-			arg.PosterType, arg.PosterSize = out.contentType, stat.Size()
+			ready = append(ready, ant.Set(&Files.PosterType, out.contentType),
+				ant.Set(&Files.PosterSize, stat.Size()))
 		} else {
-			arg.ConvType, arg.ConvSize = out.contentType, stat.Size()
+			ready = append(ready, ant.Set(&Files.ConvType, out.contentType),
+				ant.Set(&Files.ConvSize, stat.Size()))
 		}
 	}
-	changed, err := a.q.FileSetReady(ctx, arg)
+	changed, err := a.db.Files.Where(ant.Eq(&Files.ID, f.ID), ant.Eq(&Files.Status, statusProcessing)).
+		Update(ctx, ready...)
 	if err != nil {
 		removeStored()
 		return serr.Wrap(err)
@@ -1093,16 +1084,20 @@ func (a *app) processFile(ctx context.Context, f File) error {
 // mediaOnce claims and processes one pending file. It reports whether there
 // was one.
 func (a *app) mediaOnce(ctx context.Context) bool {
-	f, err := a.q.FileClaim(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false
-	}
+	claimed, err := a.db.Files.
+		Where(ant.Eq(&Files.Status, statusPending), ant.In(&Files.Kind, kindImage, kindVideo)).
+		OrderBy(&Files.ID).Limit(1).
+		UpdateReturning(ctx, ant.Set(&Files.Status, statusProcessing), ant.Inc(&Files.Attempts, 1))
 	if err != nil {
 		if ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "media claim: %+v\n", serr.Wrap(err))
 		}
 		return false
 	}
+	if len(claimed) == 0 {
+		return false
+	}
+	f := *claimed[0]
 	err = a.processFile(ctx, f)
 	if err == nil {
 		return true
@@ -1117,7 +1112,9 @@ func (a *app) mediaOnce(ctx context.Context) bool {
 		status = statusPending
 	}
 	fmt.Fprintf(os.Stderr, "media file %d (attempt %d, now %s): %v\n", f.ID, f.Attempts, status, err)
-	if _, err := a.q.FileSetStatus(ctx, FileSetStatusParams{ID: f.ID, Status: status}); err != nil {
+	_, err = a.db.Files.Where(ant.Eq(&Files.ID, f.ID), ant.Eq(&Files.Status, statusProcessing)).
+		Update(ctx, ant.Set(&Files.Status, status))
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "media file %d: %+v\n", f.ID, serr.Wrap(err))
 	}
 	if status == statusFailed {
@@ -1126,13 +1123,20 @@ func (a *app) mediaOnce(ctx context.Context) bool {
 	return true
 }
 
+// resetProcessing puts back the files a stopped worker was converting.
+func (a *app) resetProcessing(ctx context.Context) error {
+	_, err := a.db.Files.Where(ant.Eq(&Files.Status, statusProcessing)).
+		Update(ctx, ant.Set(&Files.Status, statusPending))
+	return serr.Wrap(err)
+}
+
 // startMedia recovers from a previous run and starts the workers.
 func (a *app) startMedia() error {
 	if err := os.RemoveAll(a.tmpDir()); err != nil {
 		return serr.Wrap(err)
 	}
-	if err := a.q.FilesResetProcessing(a.ctx); err != nil {
-		return serr.Wrap(err)
+	if err := a.resetProcessing(a.ctx); err != nil {
+		return err
 	}
 	for _, name := range []string{"magick", "ffmpeg", "ffprobe"} {
 		if _, err := exec.LookPath(name); err != nil {
@@ -1486,17 +1490,17 @@ func (a *app) processPreview(ctx context.Context, p Preview) {
 	fail := func(err error) {
 		if ctx.Err() == nil {
 			host := ""
-			if u, perr := url.Parse(p.Url); perr == nil {
+			if u, perr := url.Parse(p.URL); perr == nil {
 				host = u.Hostname()
 			}
 			fmt.Fprintf(os.Stderr, "preview for message %d (%s): %v\n", p.MessageID, host, withoutURL(err))
 		}
 	}
-	msg, err := a.q.MessageByID(ctx, p.MessageID)
+	msg, err := a.db.Messages.Find(ctx, p.MessageID)
 	if err != nil {
 		return // deleted meanwhile
 	}
-	data, err := a.fetchPreview(ctx, p.Url)
+	data, err := a.fetchPreview(ctx, p.URL)
 	if err != nil {
 		fail(err)
 		return
@@ -1516,31 +1520,34 @@ func (a *app) processPreview(ctx context.Context, p Preview) {
 		fail(errors.New("nothing to show"))
 		return
 	}
-	err = a.tx(ctx, func(q *Queries) error {
-		arg := PreviewSetReadyParams{
-			MessageID:   p.MessageID,
-			Url:         p.Url,
-			Title:       data.Title,
-			Description: data.Description,
-			SiteName:    data.SiteName,
-		}
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		var fileID sql.NullInt64
 		if img != nil {
-			f, err := q.FileCreatePreview(ctx, FileCreatePreviewParams{
-				ChatID:    msg.ChatID,
-				UserID:    msg.UserID,
-				S3Prefix:  img.prefix,
-				ConvType:  img.contentType,
-				ConvSize:  img.size,
-				Width:     int64(img.width),
-				Height:    int64(img.height),
-				CreatedAt: a.now().Unix(),
-			})
-			if err != nil {
+			f := &File{
+				ChatID:   msg.ChatID,
+				UserID:   msg.UserID,
+				Kind:     kindPreview,
+				Status:   statusReady,
+				Name:     "preview",
+				S3Prefix: img.prefix,
+				ConvType: img.contentType,
+				ConvSize: img.size,
+				Width:    int64(img.width),
+				Height:   int64(img.height),
+			}
+			if err := tx.Files.Insert(ctx, f); err != nil {
 				return serr.Wrap(err)
 			}
-			arg.FileID = sql.NullInt64{Int64: f.ID, Valid: true}
+			fileID = nullID(f.ID)
 		}
-		n, err := q.PreviewSetReady(ctx, arg)
+		// A claimed preview is failed until it is ready, see previewOnce.
+		n, err := tx.Previews.Where(ant.Eq(&Previews.MessageID, p.MessageID), ant.Eq(&Previews.URL, p.URL),
+			ant.Eq(&Previews.Status, statusFailed)).Update(ctx,
+			ant.Set(&Previews.Status, statusReady),
+			ant.Set(&Previews.Title, data.Title),
+			ant.Set(&Previews.Description, data.Description),
+			ant.Set(&Previews.SiteName, data.SiteName),
+			ant.Set(&Previews.FileID, fileID))
 		if err != nil {
 			return serr.Wrap(err)
 		}
@@ -1563,14 +1570,21 @@ func (a *app) processPreview(ctx context.Context, p Preview) {
 // previewOnce claims and processes one pending preview. It reports whether
 // there was one.
 func (a *app) previewOnce(ctx context.Context) bool {
-	p, err := a.q.PreviewClaim(ctx)
+	// A preview is tried once: claiming it marks it failed, and success
+	// later marks it ready. A crash in between leaves it failed.
+	claimed, err := a.db.Previews.Where(ant.Eq(&Previews.Status, statusPending)).
+		OrderBy(&Previews.MessageID).Limit(1).
+		UpdateReturning(ctx, ant.Set(&Previews.Status, statusFailed))
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
+		if ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "preview claim: %+v\n", serr.Wrap(err))
 		}
 		return false
 	}
-	a.processPreview(ctx, p)
+	if len(claimed) == 0 {
+		return false
+	}
+	a.processPreview(ctx, *claimed[0])
 	return true
 }
 
@@ -1608,8 +1622,8 @@ func (a *app) requestPreview(ctx context.Context, msg Message) {
 	if _, err := checkPreviewURL(u); err != nil {
 		return
 	}
-	err := a.q.PreviewCreate(ctx, PreviewCreateParams{
-		MessageID: msg.ID, Url: u, CreatedAt: a.now().Unix(),
+	err := a.db.Previews.Insert(ctx, &Preview{
+		MessageID: msg.ID, URL: u, Status: statusPending,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "preview create: %+v\n", serr.Wrap(err))
@@ -1618,44 +1632,40 @@ func (a *app) requestPreview(ctx context.Context, msg Message) {
 	a.wakePreviews()
 }
 
-// dropPreview removes a message's preview and its image, inside q. The
+// dropPreview removes a message's preview and its image, inside tx. The
 // returned cleanup deletes the image object and must run after commit.
-func (a *app) dropPreview(ctx context.Context, q *Queries, messageID int64) (cleanup func(), err error) {
+func (a *app) dropPreview(ctx context.Context, tx *AppDB, messageID int64) (cleanup func(), err error) {
 	cleanup = func() {}
-	p, err := q.PreviewByMessage(ctx, messageID)
-	if errors.Is(err, sql.ErrNoRows) {
+	p, err := tx.Previews.IncludeOne(&Previews.File).Find(ctx, messageID)
+	if errors.Is(err, ant.ErrNotFound) {
 		return cleanup, nil
 	}
 	if err != nil {
 		return cleanup, serr.Wrap(err)
 	}
-	if err := q.PreviewDelete(ctx, messageID); err != nil {
+	if err := tx.Previews.DeleteByID(ctx, messageID); err != nil {
 		return cleanup, serr.Wrap(err)
 	}
-	if !p.FileID.Valid {
+	if p.File == nil {
 		return cleanup, nil
 	}
-	f, err := q.FileByID(ctx, p.FileID.Int64)
-	if err != nil {
-		return cleanup, serr.Wrap(err)
-	}
-	return a.deleteFile(ctx, q, f)
+	return a.deleteFile(ctx, tx, *p.File)
 }
 
 // refreshPreview brings the preview in line with an edited message.
 func (a *app) refreshPreview(ctx context.Context, msg Message) {
 	cleanup := func() {}
 	changed := false
-	err := a.tx(ctx, func(q *Queries) error {
-		p, err := q.PreviewByMessage(ctx, msg.ID)
-		if err == nil && p.Url == firstURL(msg.Body) {
+	err := a.db.Tx(ctx, func(tx *AppDB) error {
+		p, err := tx.Previews.Find(ctx, msg.ID)
+		if err == nil && p.URL == firstURL(msg.Body) {
 			return nil
 		}
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		if err != nil && !errors.Is(err, ant.ErrNotFound) {
 			return serr.Wrap(err)
 		}
 		changed = true
-		cleanup, err = a.dropPreview(ctx, q, msg.ID)
+		cleanup, err = a.dropPreview(ctx, tx, msg.ID)
 		return err
 	})
 	if err != nil {
@@ -1668,40 +1678,20 @@ func (a *app) refreshPreview(ctx context.Context, msg Message) {
 	}
 }
 
-// previewsFor loads the ready previews of the given messages in one query.
-func (a *app) previewsFor(ctx context.Context, rows []MessagesLatestRow) (map[int64]PreviewsForMessagesRow, error) {
-	out := map[int64]PreviewsForMessagesRow{}
-	if len(rows) == 0 {
-		return out, nil
-	}
-	ids := make([]int64, len(rows))
-	for i, row := range rows {
-		ids[i] = row.Message.ID
-	}
-	previews, err := a.q.PreviewsForMessages(ctx, ids)
-	if err != nil {
-		return nil, serr.Wrap(err)
-	}
-	for _, p := range previews {
-		out[p.Preview.MessageID] = p
-	}
-	return out, nil
-}
-
 // previewNode renders a ready preview card. The link is the URL from the
 // message, never anything taken from the fetched page.
-func previewNode(id string, p PreviewsForMessagesRow) g.Node {
+func previewNode(id string, p *Preview) g.Node {
 	var img g.Node
-	if p.Preview.FileID.Valid && p.Width > 0 {
-		img = h.Img(h.ID(fmt.Sprintf("f%d", p.Preview.FileID.Int64)),
-			h.Src(filePath(p.Preview.FileID.Int64, "c")),
-			h.Width(strconv.FormatInt(p.Width, 10)), h.Height(strconv.FormatInt(p.Height, 10)),
+	if f := p.File; f != nil && f.Width > 0 {
+		img = h.Img(h.ID(fmt.Sprintf("f%d", f.ID)),
+			h.Src(filePath(f.ID, "c")),
+			h.Width(strconv.FormatInt(f.Width, 10)), h.Height(strconv.FormatInt(f.Height, 10)),
 			h.Alt(""), h.Loading("lazy"), g.Attr("decoding", "async"))
 	}
-	return h.A(h.ID(id+"-preview"), h.Class("preview"), h.Href(p.Preview.Url),
+	return h.A(h.ID(id+"-preview"), h.Class("preview"), h.Href(p.URL),
 		h.Target("_blank"), h.Rel("noopener noreferrer nofollow"),
 		img,
-		h.Span(h.Class("preview-site"), g.Text(p.Preview.SiteName)),
-		g.If(p.Preview.Title != "", h.Strong(h.Class("preview-title"), g.Text(p.Preview.Title))),
-		g.If(p.Preview.Description != "", h.Span(h.Class("preview-desc"), g.Text(p.Preview.Description))))
+		h.Span(h.Class("preview-site"), g.Text(p.SiteName)),
+		g.If(p.Title != "", h.Strong(h.Class("preview-title"), g.Text(p.Title))),
+		g.If(p.Description != "", h.Span(h.Class("preview-desc"), g.Text(p.Description))))
 }

@@ -26,7 +26,7 @@ func TestStatsAccumulate(t *testing.T) {
 	ta := newTestApp(t)
 	a := ta.app
 	ctx := t.Context()
-	db := a.db
+	db := a.db.DB()
 	_, err := db.ExecContext(ctx,
 		"INSERT INTO users (id, username, handle, created_at) VALUES (1, 'a', x'01', 1)")
 	ensure.Nil(t, err)
@@ -34,14 +34,14 @@ func TestStatsAccumulate(t *testing.T) {
 		"INSERT INTO chats (id, name, created_by, created_at, last_message_at) VALUES (5, 'g', 1, 1, 1)")
 	ensure.Nil(t, err)
 
-	ensure.Nil(t, a.statUser(ctx, a.q, 1, UserStatsAddParams{
-		MessagesSent: 1, ImagesUploaded: 2, VideosUploaded: 3, FilesUploaded: 4,
+	ensure.Nil(t, a.statUser(ctx, a.db, UserStat{
+		UserID: 1, MessagesSent: 1, ImagesUploaded: 2, VideosUploaded: 3, FilesUploaded: 4,
 		BytesUploaded: 5, BytesDownloaded: 6, PushesSent: 7, PushesOpened: 8,
 		InvitesSent: 9,
 	}))
-	ensure.Nil(t, a.tx(ctx, func(q *Queries) error {
-		return a.statUser(ctx, q, 1, UserStatsAddParams{
-			UserID:       999, // ignored, the userID argument wins
+	ensure.Nil(t, a.db.Tx(ctx, func(tx *AppDB) error {
+		return a.statUser(ctx, tx, UserStat{
+			UserID:       1,
 			MessagesSent: 10, ImagesUploaded: 20, VideosUploaded: 30, FilesUploaded: 40,
 			BytesUploaded: 50, BytesDownloaded: 60, PushesSent: 70, PushesOpened: 80,
 			InvitesSent: 90,
@@ -56,8 +56,8 @@ func TestStatsAccumulate(t *testing.T) {
 	})
 
 	for range 2 {
-		ensure.Nil(t, a.statChat(ctx, a.q, 5, ChatStatsAddParams{
-			ImagesUploaded: 1, VideosUploaded: 2, FilesUploaded: 3,
+		ensure.Nil(t, a.statChat(ctx, a.db, ChatStat{
+			ChatID: 5, ImagesUploaded: 1, VideosUploaded: 2, FilesUploaded: 3,
 			BytesUploaded: 4, BytesDownloaded: 5,
 		}))
 	}
@@ -75,7 +75,7 @@ func statsSnapshot(t *testing.T, ta *testApp) map[string]int64 {
 	t.Helper()
 	ta.app.bg.Wait() // pushes are counted in the background
 	out := map[string]int64{}
-	rows, err := ta.app.db.QueryContext(t.Context(), `SELECT users.username, messages_sent,
+	rows, err := ta.app.db.DB().QueryContext(t.Context(), `SELECT users.username, messages_sent,
 		images_uploaded, videos_uploaded, files_uploaded, bytes_uploaded, bytes_downloaded,
 		pushes_sent, pushes_opened, invites_sent
 		FROM user_stats JOIN users ON users.id = user_stats.user_id`)
@@ -92,7 +92,7 @@ func statsSnapshot(t *testing.T, ta *testApp) map[string]int64 {
 	}
 	ensure.Nil(t, rows.Err())
 	rows.Close()
-	rows, err = ta.app.db.QueryContext(t.Context(), `SELECT chat_id, images_uploaded,
+	rows, err = ta.app.db.DB().QueryContext(t.Context(), `SELECT chat_id, images_uploaded,
 		videos_uploaded, files_uploaded, bytes_uploaded, bytes_downloaded FROM chat_stats`)
 	ensure.Nil(t, err)
 	chatCols := []string{"images_uploaded", "videos_uploaded", "files_uploaded", "bytes_uploaded", "bytes_downloaded"}

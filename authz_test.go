@@ -129,14 +129,14 @@ func (m *matrix) pendingUpload() int64 {
 
 func (m *matrix) exists(table string, id int64) bool {
 	var n int
-	ensure.Nil(m.t, m.ta.app.db.QueryRowContext(m.t.Context(),
+	ensure.Nil(m.t, m.ta.app.db.DB().QueryRowContext(m.t.Context(),
 		"SELECT count(*) FROM "+table+" WHERE id = ?", id).Scan(&n))
 	return n == 1
 }
 
-func (m *matrix) invite(by *testUser, target *User) Invite {
+func (m *matrix) invite(by *testUser, target *User) *Invite {
 	m.n++
-	inv, err := m.ta.app.createInvite(m.t.Context(), m.ta.app.q, inviteParams{
+	inv, err := m.ta.app.createInvite(m.t.Context(), m.ta.app.db, inviteParams{
 		Username: fmt.Sprintf("guest%d", m.n), User: target, CreatedBy: by.ID, TTL: time.Hour,
 	})
 	ensure.Nil(m.t, err)
@@ -150,7 +150,7 @@ func (m *matrix) setMember(chat Chat, u *testUser, in bool) {
 		q = "INSERT OR IGNORE INTO members (chat_id, user_id, added_by, created_at) VALUES (?, ?, ?, ?)"
 		args = append(args, chat.CreatedBy, testNow.Unix())
 	}
-	_, err := m.ta.app.db.ExecContext(m.t.Context(), q, args...)
+	_, err := m.ta.app.db.DB().ExecContext(m.t.Context(), q, args...)
 	ensure.Nil(m.t, err)
 }
 
@@ -176,7 +176,7 @@ func TestAuthorisationMatrix(t *testing.T) {
 	dmFile := ta.upload(member, m.dm, "private.bin", []byte("secret"))
 	dmMsg := ta.newMessage(m.dm, member, "just between us")
 	ta.subscribe(member, "https://push.example/member")
-	subs, err := ta.app.q.PushSubsByUser(ctx, member.ID)
+	subs, err := ta.app.pushSubsOf(ctx, member.ID)
 	ensure.Nil(t, err)
 	memberSub := subs[0].ID
 	g, dm := chatPath(m.g.ID), chatPath(m.dm.ID)
@@ -330,7 +330,7 @@ func TestAuthorisationMatrix(t *testing.T) {
 			req: func(r role) *http.Request {
 				if r == rMember { // remove a spare one, keep memberSub for the others
 					ta.subscribe(member, "https://push.example/spare")
-					subs, err := ta.app.q.PushSubsByUser(ctx, member.ID)
+					subs, err := ta.app.pushSubsOf(ctx, member.ID)
 					ensure.Nil(t, err)
 					return m.form(http.MethodPost, pPushUnsubscribe, "id", idStr(subs[len(subs)-1].ID))
 				}
@@ -347,7 +347,7 @@ func TestAuthorisationMatrix(t *testing.T) {
 		"GET /admin/u/{id}": {allowed: roles(rAdmin), req: m.get(adminUser)},
 		"POST /admin/u/{id}/perms": {allowed: roles(rAdmin), req: m.post(adminUser+"/perms", "invite", "1"),
 			after: func(r role, w *httptest.ResponseRecorder) {
-				u, err := ta.app.q.UserByID(ctx, victim.ID)
+				u, err := ta.app.db.Users.Find(ctx, victim.ID)
 				ensure.Nil(t, err)
 				ensure.DeepEqual(t, u.PermInvite, r == rAdmin, roleNames[r])
 			}},
@@ -565,7 +565,7 @@ func TestConcurrentSendersAndStreams(t *testing.T) {
 		ensure.DeepEqual(t, c, http.StatusSeeOther)
 	}
 	var total, distinct int
-	ensure.Nil(t, ta.app.db.QueryRowContext(t.Context(),
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(t.Context(),
 		"SELECT count(*), count(DISTINCT body) FROM messages WHERE chat_id = ?", chat.ID).Scan(&total, &distinct))
 	ensure.DeepEqual(t, []int{total, distinct}, []int{senders * each, senders * each})
 	us, _ := ta.stats(alice.ID, chat.ID)

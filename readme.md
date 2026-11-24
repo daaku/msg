@@ -70,16 +70,11 @@ State lives in `data/` (the database is `data/msg.db`). Delete the directory
 to start over.
 
 The `pre-commit` hook runs the tests. The `pre-push` hook checks `go mod
-tidy`, regenerates code, requires a clean tree, builds and runs the tests.
+tidy`, builds and runs the tests.
 
-The database queries are generated with sqlc from `db/query.sql`. After
-changing anything in `db/`, run
-
-```sh
-go generate ./...
-```
-
-and commit the generated files.
+The database queries are written in Go with
+[ant](https://github.com/skudra-go/ant). The schema is the migrations in
+`db/`, and the models in `main.go` match it. There is no code generation.
 
 ## Configuration
 

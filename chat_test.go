@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/skudra-go/ant"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -23,7 +24,7 @@ func idStr(id int64) string { return strconv.FormatInt(id, 10) }
 func isMember(t *testing.T, ta *testApp, chatID, userID int64) bool {
 	t.Helper()
 	var n int
-	ensure.Nil(t, ta.app.db.QueryRowContext(t.Context(),
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM members WHERE chat_id = ? AND user_id = ?", chatID, userID).Scan(&n))
 	return n == 1
 }
@@ -31,14 +32,14 @@ func isMember(t *testing.T, ta *testApp, chatID, userID int64) bool {
 func memberCount(t *testing.T, ta *testApp, chatID int64) int {
 	t.Helper()
 	var n int
-	ensure.Nil(t, ta.app.db.QueryRowContext(t.Context(),
+	ensure.Nil(t, ta.app.db.DB().QueryRowContext(t.Context(),
 		"SELECT count(*) FROM members WHERE chat_id = ?", chatID).Scan(&n))
 	return n
 }
 
 func setLastMessageAt(t *testing.T, ta *testApp, chatID, at int64) {
 	t.Helper()
-	_, err := ta.app.db.ExecContext(t.Context(),
+	_, err := ta.app.db.DB().ExecContext(t.Context(),
 		"UPDATE chats SET last_message_at = ? WHERE id = ?", at, chatID)
 	ensure.Nil(t, err)
 }
@@ -78,20 +79,20 @@ func TestGroupCreate(t *testing.T) {
 		"user": {idStr(bob.ID), "9999"},
 	}, ta.as(alice))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther, w.Body.String())
-	chats, err := ta.app.q.ChatsForUserWithLast(ctx, ChatsForUserWithLastParams{UserID: alice.ID})
+	chats, err := ta.app.db.Chats.Where(ant.Eq(&Chats.CreatedBy, alice.ID)).All(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(chats), 1)
-	chat := chats[0].Chat
+	chat := chats[0]
 	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
 	ensure.DeepEqual(t, chat.Name, strings.Repeat("é", 64))
-	ensure.False(t, chat.IsDm)
+	ensure.False(t, chat.IsDM)
 	ensure.DeepEqual(t, chat.CreatedBy, alice.ID)
 	ensure.DeepEqual(t, chat.LastMessageAt, testNow.Unix())
 	ensure.True(t, isMember(t, ta, chat.ID, alice.ID))
 	ensure.True(t, isMember(t, ta, chat.ID, bob.ID))
 	ensure.False(t, isMember(t, ta, chat.ID, carol.ID))
 	ensure.DeepEqual(t, memberCount(t, ta, chat.ID), 2)
-	m, err := ta.app.q.MemberGet(ctx, MemberGetParams{ChatID: chat.ID, UserID: bob.ID})
+	m, err := ta.app.db.Members.FindKey(ctx, chat.ID, bob.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, m.AddedBy, alice.ID)
 
@@ -243,7 +244,7 @@ func TestGroupManage(t *testing.T) {
 	info := base + "/info"
 
 	name := func() string {
-		c, err := ta.app.q.ChatByID(ctx, chat.ID)
+		c, err := ta.app.db.Chats.Find(ctx, chat.ID)
 		ensure.Nil(t, err)
 		return c.Name
 	}
@@ -310,7 +311,7 @@ func TestGroupManage(t *testing.T) {
 	ensure.StringDoesNotContain(t, ta.get(pHome, ta.as(bob)).Body.String(), fmt.Sprintf(`id="chat-%d"`, chat.ID))
 
 	// a creator whose permission was removed cannot manage any more
-	_, err := ta.app.db.ExecContext(ctx, "UPDATE users SET perm_group = FALSE WHERE id = ?", alice.ID)
+	_, err := ta.app.db.DB().ExecContext(ctx, "UPDATE users SET perm_group = FALSE WHERE id = ?", alice.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, ta.post(base+"/rename", url.Values{"name": {"nope"}}, ta.as(alice)).Code, http.StatusNotFound)
 	ensure.DeepEqual(t, ta.post(base+"/members/add", url.Values{"user": {idStr(bob.ID)}}, ta.as(alice)).Code,
@@ -363,11 +364,11 @@ func TestDMStart(t *testing.T) {
 
 	w = ta.post(pDM, url.Values{"user": {idStr(bob.ID)}}, ta.as(alice))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
-	chat, err := ta.app.q.ChatByDMKey(ctx, sql.NullString{
-		String: fmt.Sprintf("%d:%d", alice.ID, bob.ID), Valid: true})
+	chat, err := ta.app.db.Chats.Where(ant.Eq(&Chats.DMKey, sql.NullString{
+		String: fmt.Sprintf("%d:%d", alice.ID, bob.ID), Valid: true})).Single(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
-	ensure.True(t, chat.IsDm)
+	ensure.True(t, chat.IsDM)
 	ensure.DeepEqual(t, chat.Name, "")
 	ensure.DeepEqual(t, chat.CreatedBy, alice.ID)
 	ensure.DeepEqual(t, chat.LastMessageAt, testNow.Unix())
@@ -448,7 +449,7 @@ func TestDMAccess(t *testing.T) {
 		}
 	}
 	ensure.DeepEqual(t, memberCount(t, ta, dm.ID), 2)
-	got, err := ta.app.q.ChatByID(t.Context(), dm.ID)
+	got, err := ta.app.db.Chats.Find(t.Context(), dm.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, got.Name, "")
 
@@ -527,7 +528,7 @@ func messagesSent(t *testing.T, ta *testApp, userID int64) int64 {
 
 func lastMessageAt(t *testing.T, ta *testApp, chatID int64) int64 {
 	t.Helper()
-	c, err := ta.app.q.ChatByID(t.Context(), chatID)
+	c, err := ta.app.db.Chats.Find(t.Context(), chatID)
 	ensure.Nil(t, err)
 	return c.LastMessageAt
 }
@@ -547,14 +548,14 @@ func TestSend(t *testing.T) {
 	w := ta.post(send, url.Values{"body": {"  hello\r\nthere  "}}, ta.as(bob))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
 	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
-	rows, err := ta.app.q.MessagesLatest(ctx, MessagesLatestParams{ChatID: chat.ID, N: 10})
+	rows, err := ta.app.db.Messages.Where(ant.Eq(&Messages.ChatID, chat.ID)).IncludeOne(&Messages.User).All(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(rows), 1)
-	m := rows[0].Message
+	m := rows[0]
 	ensure.DeepEqual(t, m.Body, "hello\nthere")
 	ensure.DeepEqual(t, m.UserID, bob.ID)
-	ensure.DeepEqual(t, m.CreatedAt, later.Unix())
-	ensure.DeepEqual(t, rows[0].Username, "bob")
+	ensure.DeepEqual(t, m.CreatedAt.Unix(), later.Unix())
+	ensure.DeepEqual(t, m.User.Username, "bob")
 	ensure.DeepEqual(t, lastMessageAt(t, ta, chat.ID), later.Unix())
 	ensure.DeepEqual(t, messagesSent(t, ta, bob.ID), int64(1))
 
@@ -812,12 +813,12 @@ func TestSidebarSnippet(t *testing.T) {
 
 func messageRow(t *testing.T, ta *testApp, id int64) (Message, bool) {
 	t.Helper()
-	m, err := ta.app.q.MessageByID(t.Context(), id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return m, false
+	m, err := ta.app.db.Messages.Find(t.Context(), id)
+	if errors.Is(err, ant.ErrNotFound) {
+		return Message{}, false
 	}
 	ensure.Nil(t, err)
-	return m, true
+	return *m, true
 }
 
 func TestMessageEdit(t *testing.T) {
@@ -855,7 +856,7 @@ func TestMessageEdit(t *testing.T) {
 	got, _ = messageRow(t, ta, m.ID)
 	ensure.DeepEqual(t, got.Body, "changed\n<b>bold</b>")
 	ensure.DeepEqual(t, got.EditedAt, later.Unix())
-	ensure.DeepEqual(t, got.CreatedAt, testNow.Unix())
+	ensure.DeepEqual(t, got.CreatedAt.Unix(), testNow.Unix())
 	ensure.DeepEqual(t, lastMessageAt(t, ta, chat.ID), testNow.Unix())
 	body = ta.get(chatPath(chat.ID), ta.as(bob)).Body.String()
 	ensure.StringContains(t, body, `<span id="m`+idStr(m.ID)+`-edited" class="msg-edited">edited</span><time id="m`+idStr(m.ID)+`-time"`)
@@ -881,7 +882,7 @@ func TestMessageEdit(t *testing.T) {
 
 	// a message with a file has no text to edit
 	ta.app.now = func() time.Time { return testNow }
-	res, err := ta.app.db.ExecContext(t.Context(), `INSERT INTO files (chat_id, user_id, status, name, s3_prefix, size, created_at)
+	res, err := ta.app.db.DB().ExecContext(t.Context(), `INSERT INTO files (chat_id, user_id, status, name, s3_prefix, size, created_at)
 		VALUES (?, ?, 'ready', 'a.txt', 'p1', 1, 1)`, chat.ID, alice.ID)
 	ensure.Nil(t, err)
 	fileID, _ := res.LastInsertId()
@@ -914,7 +915,7 @@ func TestMessageDelete(t *testing.T) {
 	m2 := ta.newMessage(chat, bob, "second")
 	at(3)
 	m3 := ta.newMessage(chat, alice, "third")
-	_, err := ta.app.db.ExecContext(t.Context(),
+	_, err := ta.app.db.DB().ExecContext(t.Context(),
 		"INSERT INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, '👍', 1)", m3.ID, bob.ID)
 	ensure.Nil(t, err)
 
@@ -1205,34 +1206,23 @@ func TestEmojiID(t *testing.T) {
 	ensure.DeepEqual(t, len(reactionPalette), 16)
 }
 
-// countingDB counts the statements run through it.
-type countingDB struct {
-	DBTX
-	n atomic.Int64
+// countingDB counts the statements ant runs.
+type countingDB struct{ n atomic.Int64 }
+
+func (c *countingDB) Before(ctx context.Context, _ *ant.Statement) (context.Context, error) {
+	c.n.Add(1)
+	return ctx, nil
 }
 
-func (c *countingDB) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
-	c.n.Add(1)
-	return c.DBTX.ExecContext(ctx, q, args...)
-}
-
-func (c *countingDB) QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error) {
-	c.n.Add(1)
-	return c.DBTX.QueryContext(ctx, q, args...)
-}
-
-func (c *countingDB) QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row {
-	c.n.Add(1)
-	return c.DBTX.QueryRowContext(ctx, q, args...)
-}
+func (c *countingDB) After(context.Context, *ant.Statement, ant.Outcome) {}
 
 func TestReactionsConstantQueries(t *testing.T) {
 	ta := newTestApp(t)
 	alice := ta.newUser("alice", "group")
 	bob := ta.newUser("bob")
 	chat := ta.newChat(alice, "team", bob)
-	counter := &countingDB{DBTX: ta.app.db}
-	ta.app.q = New(counter)
+	counter := &countingDB{}
+	ta.app.db = ant.Session(ta.app.db, ant.WithTracking(false), ant.WithInterceptor(counter))
 	queries := func() (int64, string) {
 		ta.app.bg.Wait() // background push work also queries
 		counter.n.Store(0)
@@ -1255,11 +1245,11 @@ func TestReactionsConstantQueries(t *testing.T) {
 	ensure.DeepEqual(t, strings.Count(body, `class="chip"`), 1+99)
 
 	// every message has its reactions div and picker exactly once
-	rows, err := ta.app.q.MessagesLatest(t.Context(), MessagesLatestParams{ChatID: chat.ID, N: 100})
+	ids, err := ant.Pluck(t.Context(), ta.app.db.Messages.Where(ant.Eq(&Messages.ChatID, chat.ID)), &Messages.ID)
 	ensure.Nil(t, err)
-	ensure.DeepEqual(t, len(rows), 100)
-	for _, row := range rows {
-		id := idStr(row.Message.ID)
+	ensure.DeepEqual(t, len(ids), 100)
+	for _, mid := range ids {
+		id := idStr(mid)
 		ensure.DeepEqual(t, strings.Count(body, `id="m`+id+`-reactions"`), 1)
 		ensure.DeepEqual(t, strings.Count(body, `id="m`+id+`-pick"`), 1)
 	}
@@ -1269,7 +1259,7 @@ func TestReactionsConstantQueries(t *testing.T) {
 
 func isArchived(t *testing.T, ta *testApp, chatID, userID int64) bool {
 	t.Helper()
-	m, err := ta.app.q.MemberGet(t.Context(), MemberGetParams{ChatID: chatID, UserID: userID})
+	m, err := ta.app.db.Members.FindKey(t.Context(), chatID, userID)
 	ensure.Nil(t, err)
 	return m.Archived
 }
@@ -1479,9 +1469,9 @@ func (ta *testApp) setChatIcon(u *testUser, chat Chat) Chat {
 	ta.t.Helper()
 	w := ta.post(chatPath(chat.ID)+"/icon", url.Values{"image": {jpegDataURL(ta.t, 64, 64)}}, ta.as(u))
 	ensure.DeepEqual(ta.t, w.Code, http.StatusSeeOther, w.Body.String())
-	c, err := ta.app.q.ChatByID(ta.t.Context(), chat.ID)
+	c, err := ta.app.db.Chats.Find(ta.t.Context(), chat.ID)
 	ensure.Nil(ta.t, err)
-	return c
+	return *c
 }
 
 func TestGroupIcon(t *testing.T) {
@@ -1496,7 +1486,7 @@ func TestGroupIcon(t *testing.T) {
 	base := chatPath(group.ID)
 	info := base + "/info"
 	icon := func() string {
-		c, err := ta.app.q.ChatByID(t.Context(), group.ID)
+		c, err := ta.app.db.Chats.Find(t.Context(), group.ID)
 		ensure.Nil(t, err)
 		return c.Icon
 	}

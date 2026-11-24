@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/daaku/serr"
+	"github.com/skudra-go/ant"
 	g "maragu.dev/gomponents"
 	h "maragu.dev/gomponents/html"
 )
@@ -50,22 +51,23 @@ func (a *app) chatAccess(ctx context.Context, user *User, chatID int64) (chat Ch
 // chatAccessRow is chatAccess that also returns the user's members row, nil
 // when they are not a member.
 func (a *app) chatAccessRow(ctx context.Context, user *User, chatID int64) (chat Chat, row *Member, manage bool, err error) {
-	chat, err = a.q.ChatByID(ctx, chatID)
-	if errors.Is(err, sql.ErrNoRows) {
+	c, err := a.db.Chats.Find(ctx, chatID)
+	if errors.Is(err, ant.ErrNotFound) {
 		return chat, nil, false, errNotFound
 	}
 	if err != nil {
 		return chat, nil, false, serr.Wrap(err)
 	}
-	m, err := a.q.MemberGet(ctx, MemberGetParams{ChatID: chatID, UserID: user.ID})
-	switch {
-	case err == nil:
-		row = &m
-	case !errors.Is(err, sql.ErrNoRows):
+	chat = *c
+	row, err = a.db.Members.FindKey(ctx, chatID, user.ID)
+	if errors.Is(err, ant.ErrNotFound) {
+		row, err = nil, nil
+	}
+	if err != nil {
 		return chat, nil, false, serr.Wrap(err)
 	}
 	member := row != nil
-	if chat.IsDm {
+	if chat.IsDM {
 		// Only the two participants can see a direct message, not even an
 		// admin, and there is nothing to manage.
 		if !member {
@@ -84,7 +86,7 @@ func (a *app) chatAccessRow(ctx context.Context, user *User, chatID int64) (chat
 // chatTitle is the name a chat is shown with: the group's name, or for a
 // direct message the other participant's username.
 func (a *app) chatTitle(chat Chat, viewer *User, other string) string {
-	if chat.IsDm {
+	if chat.IsDM {
 		return other
 	}
 	return chat.Name
@@ -99,20 +101,36 @@ func (a *app) chatName(ctx context.Context, chat Chat, viewer *User) (string, er
 
 // dmOther is the other participant of a direct message. It is the zero value
 // for a group.
-func (a *app) dmOther(ctx context.Context, chat Chat, viewer *User) (MembersOfChatRow, error) {
-	var other MembersOfChatRow
-	if chat.IsDm {
-		members, err := a.q.MembersOfChat(ctx, chat.ID)
-		if err != nil {
-			return other, serr.Wrap(err)
-		}
-		for _, m := range members {
-			if m.UserID != viewer.ID {
-				other = m
-			}
-		}
+func (a *app) dmOther(ctx context.Context, chat Chat, viewer *User) (User, error) {
+	if !chat.IsDM {
+		return User{}, nil
 	}
-	return other, nil
+	u, err := a.db.Users.Where(ant.Ne(&Users.ID, viewer.ID),
+		ant.Has(&Users.Memberships, ant.Eq(&Members.ChatID, chat.ID))).First(ctx)
+	return orZero(User{}, u, err)
+}
+
+// chatUsers returns the members of a chat by username.
+func (a *app) chatUsers(ctx context.Context, chatID int64) ([]*User, error) {
+	users, err := a.db.Users.Where(ant.Has(&Users.Memberships, ant.Eq(&Members.ChatID, chatID))).
+		OrderBy(&Users.Username).All(ctx)
+	return users, serr.Wrap(err)
+}
+
+// memberIDs returns the user ids of the members of a chat.
+func (a *app) memberIDs(ctx context.Context, chatID int64) ([]int64, error) {
+	ids, err := ant.Pluck(ctx, a.db.Members.Where(ant.Eq(&Members.ChatID, chatID)).
+		OrderBy(&Members.UserID), &Members.UserID)
+	return ids, serr.Wrap(err)
+}
+
+// other is the other participant of a direct message loaded by
+// chatShell, or the zero User.
+func (c *Chat) other() User {
+	if len(c.Members) == 1 && c.Members[0].User != nil {
+		return *c.Members[0].User
+	}
+	return User{}
 }
 
 // live updates
@@ -202,7 +220,7 @@ func (h *hub) viewing(userID, chatID int64) bool {
 // notifyChat tells everyone who can see the chat that it changed.
 func (a *app) notifyChat(ctx context.Context, chatID int64) {
 	// The request that caused the change may already be over.
-	ids, err := a.q.MemberIDs(context.WithoutCancel(ctx), chatID)
+	ids, err := a.memberIDs(context.WithoutCancel(ctx), chatID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "notifyChat %d: %+v\n", chatID, serr.Wrap(err))
 	}
@@ -275,8 +293,8 @@ type chatView struct {
 	Manage   bool
 	Archived bool // by this user, private to them
 	Title    string
-	Other    MembersOfChatRow // of a direct message, zero for a group
-	Snoozes  snoozeView       // the viewer's own, on the chat page only
+	Other    User       // of a direct message, zero for a group
+	Snoozes  snoozeView // the viewer's own, on the chat page only
 }
 
 // chatView loads the chat named by the {id} path value for a user who may
@@ -331,13 +349,26 @@ func (a *app) chatPage(w http.ResponseWriter, r *http.Request, user *User, activ
 // or, when archived is true, the user's archived chats.
 func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, active *Chat, archived bool, pane g.Node) error {
 	ctx := r.Context()
-	chats, err := a.q.ChatsForUserWithLast(ctx, ChatsForUserWithLastParams{UserID: user.ID, Archived: archived})
+	chats, err := a.db.Chats.
+		Where(ant.Has(&Chats.Members, ant.Eq(&Members.UserID, user.ID), ant.Eq(&Members.Archived, archived))).
+		// Only the other member of a direct message, for its name and picture.
+		Include(&Chats.Members, func(q *ant.Query[Member]) *ant.Query[Member] {
+			return q.Where(ant.Ne(&Members.UserID, user.ID), ant.HasOne(&Members.Chat, ant.Eq(&Chats.IsDM, true))).
+				IncludeOne(&Members.User)
+		}).
+		IncludeOne(&Chats.Last, func(q *ant.Query[Message]) *ant.Query[Message] {
+			return q.IncludeOne(&Messages.User).IncludeOne(&Messages.File)
+		}).
+		OrderByDesc(&Chats.LastMessageAt).ThenByDesc(&Chats.ID).
+		All(ctx)
 	if err != nil {
 		return serr.Wrap(err)
 	}
 	var archivedCount int64
 	if !archived {
-		if archivedCount, err = a.q.ArchivedCount(ctx, user.ID); err != nil {
+		archivedCount, err = a.db.Members.Where(ant.Eq(&Members.UserID, user.ID), ant.Eq(&Members.Archived, true)).
+			Count(ctx)
+		if err != nil {
 			return serr.Wrap(err)
 		}
 	}
@@ -373,28 +404,28 @@ func (a *app) chatShell(w http.ResponseWriter, r *http.Request, user *User, acti
 			h.P(h.Strong(g.Text("No chats yet."))),
 			h.P(h.A(h.Href(pDM), g.Text("Start a direct message")), group))
 	} else {
-		list = h.Div(h.ID("chats"), h.Class("chat-list"), g.Map(chats, func(row ChatsForUserWithLastRow) g.Node {
-			c := row.Chat
+		list = h.Div(h.ID("chats"), h.Class("chat-list"), g.Map(chats, func(c *Chat) g.Node {
+			other := c.other()
 			kind, mark := "group", icon("people")
-			if c.IsDm {
-				kind, mark = "dm", avatarNow(row.OtherID, row.Other, row.OtherAvatar, "")
+			if c.IsDM {
+				kind, mark = "dm", avatarNow(other.ID, other.Username, other.Avatar, "")
 			} else if c.Icon != "" {
-				mark = groupIconNow(c, "")
+				mark = groupIconNow(*c, "")
 			}
 			var last g.Node
-			if row.LastCreatedAt > 0 {
-				at := time.Unix(row.LastCreatedAt, 0)
+			if m := c.Last; m != nil {
+				at := m.CreatedAt.Time
 				last = g.Group{
 					h.Time(h.Class("chat-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
 						g.Text(at.In(loc).Format("2 Jan 15:04"))),
-					h.Span(h.Class("chat-snippet"), g.Text(row.LastUsername+": "+lastSnippet(row))),
+					h.Span(h.Class("chat-snippet"), g.Text(m.User.Username+": "+lastSnippet(m))),
 				}
 			}
 			return h.A(h.ID(fmt.Sprintf("chat-%d", c.ID)), h.Class("chat-item "+kind),
 				h.Href(chatPath(c.ID)),
 				g.If(c.ID == activeID, h.Aria("current", "page")),
 				mark,
-				h.Span(h.Class("chat-name"), g.Text(a.chatTitle(c, user, row.Other))),
+				h.Span(h.Class("chat-name"), g.Text(a.chatTitle(*c, user, other.Username))),
 				last,
 				// The marigold bar is an element of its own so that the page
 				// transition can slide it from the old row to the new one.
@@ -444,7 +475,7 @@ func paneHead(v chatView) g.Node {
 	return h.Header(h.ID("pane-head"), h.Class("pane-head"),
 		h.A(h.Class("back narrow-only"), h.Href(pHome), h.Aria("label", "Back"), icon("back")),
 		h.A(h.Class("pane-title"), h.Href(chatPath(v.Chat.ID)+"/info"),
-			g.If(v.Chat.IsDm, avatarNow(v.Other.UserID, v.Other.Username, v.Other.Avatar, "avatar-s")),
+			g.If(v.Chat.IsDM, avatarNow(v.Other.ID, v.Other.Username, v.Other.Avatar, "avatar-s")),
 			g.If(v.Chat.Icon != "", groupIconNow(v.Chat, "avatar-s")),
 			h.Span(g.Text(v.Title))),
 		g.If(v.Archived, h.Form(h.ID("pane-archived"), h.Class("pane-archived"), h.Method("post"),
@@ -481,11 +512,8 @@ func (a *app) setArchived(w http.ResponseWriter, r *http.Request, archived bool)
 	if err != nil {
 		return err
 	}
-	err = a.q.MemberSetArchived(r.Context(), MemberSetArchivedParams{
-		Archived: archived,
-		ChatID:   v.Chat.ID,
-		UserID:   v.User.ID,
-	})
+	_, err = a.db.Members.Where(ant.Eq(&Members.ChatID, v.Chat.ID), ant.Eq(&Members.UserID, v.User.ID)).
+		Update(r.Context(), ant.Set(&Members.Archived, archived))
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -540,45 +568,37 @@ func formIDs(r *http.Request, name string) ([]int64, error) {
 
 // addMembers adds the given users to a chat, ignoring ids of users that do
 // not exist and users who are already members.
-func (a *app) addMembers(ctx context.Context, q *Queries, chatID, addedBy int64, userIDs []int64) error {
-	for _, id := range userIDs {
-		err := q.MemberAdd(ctx, MemberAddParams{
-			ChatID:    chatID,
-			UserID:    id,
-			AddedBy:   addedBy,
-			CreatedAt: a.now().Unix(),
-		})
-		if err != nil {
-			return serr.Wrap(err)
-		}
+func (a *app) addMembers(ctx context.Context, db *AppDB, chatID, addedBy int64, userIDs []int64) error {
+	existing, err := ant.Pluck(ctx, db.Users.Where(ant.In(&Users.ID, userIDs...)), &Users.ID)
+	if err != nil || len(existing) == 0 {
+		return serr.Wrap(err)
 	}
-	return nil
+	rows := make([]*Member, len(existing))
+	for i, id := range existing {
+		rows[i] = &Member{ChatID: chatID, UserID: id, AddedBy: addedBy}
+	}
+	_, err = db.Members.InsertMany(ctx, rows, ant.WithConflict(
+		ant.OnConflict(&Members.ChatID).And(ant.F(&Members.UserID)).DoNothing()))
+	return serr.Wrap(err)
 }
 
 // createGroup creates a group with the creator and the given users as
 // members.
 func (a *app) createGroup(ctx context.Context, creatorID int64, name string, userIDs []int64) (Chat, error) {
-	var chat Chat
-	err := a.tx(ctx, func(q *Queries) error {
-		now := a.now().Unix()
-		var err error
-		chat, err = q.ChatCreate(ctx, ChatCreateParams{
-			Name:          name,
-			CreatedBy:     creatorID,
-			CreatedAt:     now,
-			LastMessageAt: now,
-		})
-		if err != nil {
+	now := a.now().Unix()
+	chat := Chat{Name: name, CreatedBy: creatorID, LastMessageAt: now}
+	err := a.db.Tx(ctx, func(tx *AppDB) error {
+		if err := tx.Chats.Insert(ctx, &chat); err != nil {
 			return serr.Wrap(err)
 		}
-		return a.addMembers(ctx, q, chat.ID, creatorID, append([]int64{creatorID}, userIDs...))
+		return a.addMembers(ctx, tx, chat.ID, creatorID, append([]int64{creatorID}, userIDs...))
 	})
 	return chat, err
 }
 
 // userChecks renders a checkbox per user, posted as "user".
-func userChecks(users []UsersAllBasicRow) g.Node {
-	return h.Div(h.Class("stack-tight"), g.Map(users, func(u UsersAllBasicRow) g.Node {
+func userChecks(users []*User) g.Node {
+	return h.Div(h.Class("stack-tight"), g.Map(users, func(u *User) g.Node {
 		return h.Label(h.Class("check"),
 			h.Input(h.Type("checkbox"), h.Name("user"), h.Value(strconv.FormatInt(u.ID, 10))),
 			avatar(u.ID, u.Username, u.Avatar, "avatar-s"),
@@ -593,15 +613,9 @@ func nameInput(value string) g.Node {
 
 func (a *app) newGroup(w http.ResponseWriter, r *http.Request) error {
 	user := userFrom(r.Context())
-	all, err := a.q.UsersAllBasic(r.Context())
+	others, err := a.db.Users.Where(ant.Ne(&Users.ID, user.ID)).OrderBy(&Users.Username).All(r.Context())
 	if err != nil {
 		return serr.Wrap(err)
-	}
-	var others []UsersAllBasicRow
-	for _, u := range all {
-		if u.ID != user.ID {
-			others = append(others, u)
-		}
 	}
 	var members g.Node = h.P(h.Class("muted"), g.Text("There is nobody else to add yet."))
 	if len(others) > 0 {
@@ -645,28 +659,17 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 		return a.jumpToMessage(w, r, v, m)
 	}
 	n := pageSize(r.URL.Query().Get("n"))
-	rows, err := a.q.MessagesLatest(ctx, MessagesLatestParams{ChatID: v.Chat.ID, N: n})
+	inChat := a.db.Messages.Where(ant.Eq(&Messages.ChatID, v.Chat.ID))
+	rows, err := loadMessages(ctx, inChat.OrderByDesc(&Messages.ID).Limit(int(n)))
 	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
 	slices.Reverse(rows)
-	total, err := a.q.MessageCount(ctx, v.Chat.ID)
+	total, err := inChat.Count(ctx)
 	if err != nil {
 		return serr.Wrap(err)
 	}
 	base := chatPath(v.Chat.ID)
-	reactions, err := a.reactionsFor(ctx, v.User.ID, rows)
-	if err != nil {
-		return err
-	}
-	files, err := a.filesFor(ctx, rows)
-	if err != nil {
-		return err
-	}
-	previews, err := a.previewsFor(ctx, rows)
-	if err != nil {
-		return err
-	}
 	if v.Snoozes, err = a.snoozesFor(ctx, v.User.ID, rows, viewerLoc(r)); err != nil {
 		return err
 	}
@@ -679,7 +682,7 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 		// The fragment keeps the reading position when the link is followed
 		// as a plain navigation: the browser scrolls to the message that was
 		// the oldest one shown.
-		href := fmt.Sprintf("%s?n=%d#m%d", base, min(2*n, maxPage), rows[0].Message.ID)
+		href := fmt.Sprintf("%s?n=%d#m%d", base, min(2*n, maxPage), rows[0].ID)
 		earlier = h.A(h.ID("earlier"), h.Href(href), g.Attr("data-morph"),
 			g.Text("Show earlier messages"))
 	}
@@ -707,7 +710,7 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 	return a.chatPage(w, r, v.User, &v.Chat, g.Group{
 		paneHead(v),
 		h.Div(h.ID("scroll"), h.Class("scroll"),
-			h.Div(h.ID("messages"), g.If(!v.Chat.IsDm, h.Class("group")), earlier, a.messageNodes(v, rows, reactions, files, previews, viewerLoc(r)))),
+			h.Div(h.ID("messages"), g.If(!v.Chat.IsDM, h.Class("group")), earlier, a.messageNodes(v, rows, viewerLoc(r)))),
 		composer,
 	})
 }
@@ -738,15 +741,14 @@ func viewerLoc(r *http.Request) *time.Location {
 
 // messageNodes renders messages, oldest first, with a separator before the
 // first message of each day. A run of pictures and videos is one album.
-func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[int64][]reactionGroup, files map[int64]File, previews map[int64]PreviewsForMessagesRow, loc *time.Location) g.Node {
+func (a *app) messageNodes(v chatView, rows []*Message, loc *time.Location) g.Node {
 	var nodes g.Group
 	var prevUser int64
 	var prevDay string
-	dayOf := func(m Message) string { return time.Unix(m.CreatedAt, 0).In(loc).Format("2006-01-02") }
+	dayOf := func(m *Message) string { return m.CreatedAt.In(loc).Format("2006-01-02") }
 	for i := 0; i < len(rows); i++ {
-		row := rows[i]
-		m := row.Message
-		at := time.Unix(m.CreatedAt, 0).In(loc)
+		m := rows[i]
+		at := m.CreatedAt.In(loc)
 		day := dayOf(m)
 		if day != prevDay {
 			nodes = append(nodes, h.Div(h.ID("day-"+day), h.Class("day"),
@@ -765,66 +767,66 @@ func (a *app) messageNodes(v chatView, rows []MessagesLatestRow, reactions map[i
 		// In a group the first bubble of a run names its author, with
 		// their picture beside it. A direct message has only one other
 		// person, who is named in the header.
-		who := g.If(first && !mine && !v.Chat.IsDm, g.Group{
-			avatar(m.UserID, row.Username, row.Avatar, "avatar-s msg-avatar"),
-			h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)), g.Text(row.Username)),
+		who := g.If(first && !mine && !v.Chat.IsDM, g.Group{
+			avatar(m.UserID, m.User.Username, m.User.Avatar, "avatar-s msg-avatar"),
+			h.Div(h.Class(fmt.Sprintf("msg-who hue-%d", m.UserID%12)), g.Text(m.User.Username)),
 		})
 
 		// An album: the pictures and videos that follow each other on this
 		// day. It stands in for all of their bubbles.
 		n := 1
-		for mediaFollows(rows, files, i+n) && dayOf(rows[i+n].Message) == day {
+		for mediaFollows(rows, i+n) && dayOf(rows[i+n]) == day {
 			n++
 		}
-		if n >= albumMin && isMedia(files[m.FileID.Int64]) && m.FileID.Valid {
+		if n >= albumMin && m.media() {
 			nodes = append(nodes, h.Article(h.ID(fmt.Sprintf("m%d", m.ID)), h.Class(class+" msg-album"),
-				who, albumNode(v, rows[i:i+n], files, loc)))
+				who, albumNode(v, rows[i:i+n], loc)))
 			i += n - 1
 			continue
 		}
 
-		if !m.FileID.Valid && emojiOnly(m.Body) {
+		if m.File == nil && emojiOnly(m.Body) {
 			class += " emoji-only"
 		}
 		id := fmt.Sprintf("m%d", m.ID)
 		// The meta line floats at the end of the text, on its last line
 		// when there is room.
 		meta := h.Div(h.ID(id+"-meta"), h.Class("msg-meta"),
-			snoozeMarker(v, m),
+			snoozeMarker(v, *m),
 			g.If(m.EditedAt > 0, h.Span(h.ID(id+"-edited"), h.Class("msg-edited"), g.Text("edited"))),
 			h.Time(h.ID(id+"-time"), h.DateTime(at.UTC().Format(time.RFC3339)),
 				g.Text(at.Format("15:04"))))
 		content := g.Group{h.Div(h.ID(id+"-body"), h.Class("msg-body"), g.Group(linkify(m.Body))), meta}
-		if f, ok := files[m.FileID.Int64]; ok && m.FileID.Valid {
-			if isMedia(f) {
+		if f := m.File; f != nil {
+			if isMedia(*f) {
 				// A picture or a video fills its bubble, and the meta line
 				// sits on top of it.
-				content = g.Group{h.Div(h.ID(id+"-file"), h.Class("msg-file msg-media"), fileNode(f), meta)}
+				content = g.Group{h.Div(h.ID(id+"-file"), h.Class("msg-file msg-media"), fileNode(*f), meta)}
 			} else {
-				content = g.Group{h.Div(h.ID(id+"-file"), h.Class("msg-file"), fileNode(f)), meta}
+				content = g.Group{h.Div(h.ID(id+"-file"), h.Class("msg-file"), fileNode(*f)), meta}
 			}
 		}
 		var preview g.Node
-		if p, ok := previews[m.ID]; ok {
-			preview = previewNode(id, p)
+		if m.Preview != nil {
+			preview = previewNode(id, m.Preview)
 		}
 		nodes = append(nodes, h.Article(h.ID(id), h.Class(class),
 			who,
 			content,
 			preview,
-			a.reactionChips(v, m, reactions[m.ID]),
-			a.messageMenu(v, m)))
+			a.reactionChips(v, *m, reactionGroups(v.User.ID, m.Reactions)),
+			a.messageMenu(v, *m)))
 	}
 	return nodes
 }
 
 // snippet is the start of a message body for the chat list.
 // lastSnippet describes a chat's newest message in the chat list.
-func lastSnippet(row ChatsForUserWithLastRow) string {
-	if row.LastFileKind != "" {
-		return fileSnippet(row.LastFileKind, row.LastFileName)
+func lastSnippet(m *Message) string {
+	if m.File != nil {
+		return fileSnippet(m.File.Kind, m.File.Name)
 	}
-	return snippet(row.LastBody)
+	return snippet(m.Body)
 }
 
 // emojiOnly reports whether a message is one to three emoji and nothing
@@ -921,31 +923,24 @@ func normalizeBody(s string) (string, error) {
 // createMessage stores a new message, bumps the chat and the author's
 // counter, and runs afterMessage once it is committed.
 func (a *app) createMessage(ctx context.Context, chat Chat, userID int64, body string, fileID sql.NullInt64) (Message, error) {
-	var msg Message
-	err := a.tx(ctx, func(q *Queries) error {
-		now := a.now().Unix()
-		var err error
-		msg, err = q.MessageCreate(ctx, MessageCreateParams{
-			ChatID:    chat.ID,
-			UserID:    userID,
-			Body:      body,
-			FileID:    fileID,
-			CreatedAt: now,
-		})
-		if err != nil {
+	msg := Message{ChatID: chat.ID, UserID: userID, Body: body, FileID: fileID}
+	err := a.db.Tx(ctx, func(tx *AppDB) error {
+		if err := tx.Messages.Insert(ctx, &msg); err != nil {
 			return serr.Wrap(err)
 		}
 		// New activity is never hidden: everyone else who archived the chat
 		// gets it back. The author's own flag is left alone.
-		err = q.MembersUnarchive(ctx, MembersUnarchiveParams{ChatID: chat.ID, AuthorID: userID})
+		_, err := tx.Members.Where(ant.Eq(&Members.ChatID, chat.ID), ant.Ne(&Members.UserID, userID),
+			ant.Eq(&Members.Archived, true)).Update(ctx, ant.Set(&Members.Archived, false))
 		if err != nil {
 			return serr.Wrap(err)
 		}
-		err = q.ChatTouch(ctx, ChatTouchParams{ID: chat.ID, LastMessageAt: now})
+		_, err = tx.Chats.Where(ant.Eq(&Chats.ID, chat.ID)).Update(ctx,
+			ant.Set(&Chats.LastMessageAt, msg.CreatedAt.Unix()))
 		if err != nil {
 			return serr.Wrap(err)
 		}
-		return a.statUser(ctx, q, userID, UserStatsAddParams{MessagesSent: 1})
+		return a.statUser(ctx, tx, UserStat{UserID: userID, MessagesSent: 1})
 	})
 	if err != nil {
 		return msg, err
@@ -989,35 +984,32 @@ func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {
 	}
 	chatID := v.Chat.ID
 	base := chatPath(chatID)
-	members, err := a.q.MembersOfChat(ctx, chatID)
+	members, err := a.chatUsers(ctx, chatID)
 	if err != nil {
-		return serr.Wrap(err)
+		return err
 	}
-	memberList := h.Ul(h.ID("members"), h.Class("list"), g.Map(members, func(m MembersOfChatRow) g.Node {
-		return h.Li(h.ID(fmt.Sprintf("member-%d", m.UserID)), h.Class("row"),
-			h.Span(h.Class("cluster"), avatar(m.UserID, m.Username, m.Avatar, "avatar-s"), g.Text(m.Username),
-				g.If(m.UserID == v.Chat.CreatedBy, h.Span(h.Class("badge"), g.Text("creator")))),
-			g.If(v.Manage && m.UserID != v.Chat.CreatedBy,
+	memberList := h.Ul(h.ID("members"), h.Class("list"), g.Map(members, func(u *User) g.Node {
+		return h.Li(h.ID(fmt.Sprintf("member-%d", u.ID)), h.Class("row"),
+			h.Span(h.Class("cluster"), avatar(u.ID, u.Username, u.Avatar, "avatar-s"), g.Text(u.Username),
+				g.If(u.ID == v.Chat.CreatedBy, h.Span(h.Class("badge"), g.Text("creator")))),
+			g.If(v.Manage && u.ID != v.Chat.CreatedBy,
 				h.Form(h.Method("post"), h.Action(base+"/members/remove"),
-					h.Input(h.Type("hidden"), h.Name("user"), h.Value(strconv.FormatInt(m.UserID, 10))),
+					h.Input(h.Type("hidden"), h.Name("user"), h.Value(strconv.FormatInt(u.ID, 10))),
 					h.Button(h.Class("btn secondary"), g.Text("Remove")))))
 	}))
 
 	var manage g.Node
 	if v.Manage {
-		others, err := a.q.UsersNotInChat(ctx, chatID)
+		others, err := a.db.Users.Where(ant.HasNone(&Users.Memberships, ant.Eq(&Members.ChatID, chatID))).
+			OrderBy(&Users.Username).All(ctx)
 		if err != nil {
 			return serr.Wrap(err)
 		}
 		var add g.Node
 		if len(others) > 0 {
-			checks := make([]UsersAllBasicRow, len(others))
-			for i, u := range others {
-				checks[i] = UsersAllBasicRow(u)
-			}
 			add = h.Form(h.ID("add-members"), h.Method("post"), h.Action(base+"/members/add"),
 				h.Class("stack card"),
-				h.FieldSet(h.Class("stack-tight"), h.Legend(g.Text("Add members")), userChecks(checks)),
+				h.FieldSet(h.Class("stack-tight"), h.Legend(g.Text("Add members")), userChecks(others)),
 				h.Button(h.Class("btn"), g.Text("Add")))
 		}
 		manage = g.Group{
@@ -1035,7 +1027,7 @@ func (a *app) chatInfo(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if v.Chat.IsDm {
+	if v.Chat.IsDM {
 		return a.chatPage(w, r, v.User, &v.Chat, h.Div(h.ID("info"), h.Class("pane-body stack"),
 			pageHeader(v.Title, backLink(base, "Back")),
 			h.P(g.Text("Direct message with "+v.Title+".")),
@@ -1065,7 +1057,8 @@ func (a *app) chatRename(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return a.flash(w, r, back, Flash{Kind: flashError, Content: err.Error()})
 	}
-	if err := a.q.ChatRename(r.Context(), ChatRenameParams{ID: v.Chat.ID, Name: name}); err != nil {
+	_, err = a.db.Chats.Where(ant.Eq(&Chats.ID, v.Chat.ID)).Update(r.Context(), ant.Set(&Chats.Name, name))
+	if err != nil {
 		return serr.Wrap(err)
 	}
 	a.notifyChat(r.Context(), v.Chat.ID)
@@ -1086,11 +1079,14 @@ func (a *app) chatIcon(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return a.flash(w, r, back, Flash{Kind: flashError, Content: msgBadPicture})
 	}
-	err = a.tx(ctx, func(q *Queries) error {
-		if err := q.ChatIconSet(ctx, ChatIconSetParams{ChatID: v.Chat.ID, Image: img}); err != nil {
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		_, err := tx.ChatIcons.Upsert(ctx, &ChatIcon{ChatID: v.Chat.ID, Image: img},
+			ant.OnConflict(&ChatIcons.ChatID))
+		if err != nil {
 			return serr.Wrap(err)
 		}
-		return serr.Wrap(q.ChatSetIcon(ctx, ChatSetIconParams{ID: v.Chat.ID, Icon: name}))
+		_, err = tx.Chats.Where(ant.Eq(&Chats.ID, v.Chat.ID)).Update(ctx, ant.Set(&Chats.Icon, name))
+		return serr.Wrap(err)
 	})
 	if err != nil {
 		return err
@@ -1105,11 +1101,12 @@ func (a *app) chatIconRemove(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	err = a.tx(ctx, func(q *Queries) error {
-		if err := q.ChatIconDelete(ctx, v.Chat.ID); err != nil {
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		if _, err := tx.ChatIcons.Where(ant.Eq(&ChatIcons.ChatID, v.Chat.ID)).Delete(ctx); err != nil {
 			return serr.Wrap(err)
 		}
-		return serr.Wrap(q.ChatSetIcon(ctx, ChatSetIconParams{ID: v.Chat.ID}))
+		_, err := tx.Chats.Where(ant.Eq(&Chats.ID, v.Chat.ID)).Update(ctx, ant.Set(&Chats.Icon, ""))
+		return serr.Wrap(err)
 	})
 	if err != nil {
 		return err
@@ -1125,14 +1122,18 @@ func (a *app) chatIconImage(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	img, err := a.q.ChatIconGet(r.Context(), ChatIconGetParams{ChatID: v.Chat.ID, Icon: r.PathValue("name")})
-	if errors.Is(err, sql.ErrNoRows) {
+	// v.Chat was just loaded, so its icon name is current.
+	if v.Chat.Icon != r.PathValue("name") {
+		return errNotFound
+	}
+	img, err := a.db.ChatIcons.Find(r.Context(), v.Chat.ID)
+	if errors.Is(err, ant.ErrNotFound) {
 		return errNotFound
 	}
 	if err != nil {
 		return serr.Wrap(err)
 	}
-	servePicture(w, img)
+	servePicture(w, img.Image)
 	return nil
 }
 
@@ -1146,8 +1147,8 @@ func (a *app) chatMembersAdd(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	err = a.tx(ctx, func(q *Queries) error {
-		return a.addMembers(ctx, q, v.Chat.ID, v.User.ID, ids)
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		return a.addMembers(ctx, tx, v.Chat.ID, v.User.ID, ids)
 	})
 	if err != nil {
 		return err
@@ -1171,7 +1172,8 @@ func (a *app) chatMembersRemove(w http.ResponseWriter, r *http.Request) error {
 		return a.flash(w, r, back, Flash{Kind: flashError,
 			Content: "The creator of a group cannot be removed."})
 	}
-	err = a.q.MemberRemove(r.Context(), MemberRemoveParams{ChatID: v.Chat.ID, UserID: id})
+	_, err = a.db.Members.Where(ant.Eq(&Members.ChatID, v.Chat.ID), ant.Eq(&Members.UserID, id)).
+		Delete(r.Context())
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -1191,48 +1193,33 @@ func dmKey(a, b int64) string {
 // startDM returns the direct message between two users, creating it when
 // there is none yet. created reports whether this call created it.
 func (a *app) startDM(ctx context.Context, userID, otherID int64) (chat Chat, created bool, err error) {
+	now := a.now().Unix()
 	key := sql.NullString{String: dmKey(userID, otherID), Valid: true}
-	err = a.tx(ctx, func(q *Queries) error {
+	c := &Chat{IsDM: true, DMKey: key, CreatedBy: userID, LastMessageAt: now}
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		// FirstOrCreate reads the chat again when a concurrent request
+		// created it first.
 		var err error
-		chat, err = q.ChatByDMKey(ctx, key)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+		c, created, err = tx.Chats.FirstOrCreate(ctx, c, ant.Eq(&Chats.DMKey, key))
+		if err != nil || !created {
 			return serr.Wrap(err)
 		}
-		now := a.now().Unix()
-		chat, err = q.ChatCreateDM(ctx, ChatCreateDMParams{
-			DmKey:         key,
-			CreatedBy:     userID,
-			CreatedAt:     now,
-			LastMessageAt: now,
-		})
-		if err != nil {
-			return err // not wrapped: a unique violation is handled below
-		}
-		created = true
-		return a.addMembers(ctx, q, chat.ID, userID, []int64{userID, otherID})
+		return a.addMembers(ctx, tx, c.ID, userID, []int64{userID, otherID})
 	})
-	if isUniqueErr(err) {
-		// A concurrent request created it first.
-		chat, err = a.q.ChatByDMKey(ctx, key)
-		return chat, false, serr.Wrap(err)
+	if err != nil {
+		return chat, false, err
 	}
-	return chat, created, serr.Wrap(err)
+	return *c, created, nil
 }
 
 func (a *app) dm(w http.ResponseWriter, r *http.Request) error {
 	user := userFrom(r.Context())
-	all, err := a.q.UsersAllBasic(r.Context())
+	others, err := a.db.Users.Where(ant.Ne(&Users.ID, user.ID)).OrderBy(&Users.Username).All(r.Context())
 	if err != nil {
 		return serr.Wrap(err)
 	}
 	var rows []g.Node
-	for _, u := range all {
-		if u.ID == user.ID {
-			continue
-		}
+	for _, u := range others {
 		rows = append(rows, h.Li(h.ID(fmt.Sprintf("dm-user-%d", u.ID)),
 			h.Form(h.Method("post"), h.Action(pDM),
 				h.Input(h.Type("hidden"), h.Name("user"), h.Value(strconv.FormatInt(u.ID, 10))),
@@ -1252,10 +1239,10 @@ func (a *app) dmPost(w http.ResponseWriter, r *http.Request) error {
 	if err != nil || otherID == user.ID {
 		return errNotFound
 	}
-	if _, err := a.q.UserByID(ctx, otherID); errors.Is(err, sql.ErrNoRows) {
-		return errNotFound
-	} else if err != nil {
+	if exists, err := a.db.Users.Where(ant.Eq(&Users.ID, otherID)).Exists(ctx); err != nil {
 		return serr.Wrap(err)
+	} else if !exists {
+		return errNotFound
 	}
 	chat, created, err := a.startDM(ctx, user.ID, otherID)
 	if err != nil {
@@ -1332,11 +1319,21 @@ func (a *app) chatMessage(r *http.Request) (chatView, Message, error) {
 	if err != nil {
 		return v, Message{}, errNotFound
 	}
-	m, err := a.q.MessageByID(r.Context(), id)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && m.ChatID != v.Chat.ID) {
-		return v, m, errNotFound
+	m, err := a.db.Messages.Where(ant.Eq(&Messages.ID, id), ant.Eq(&Messages.ChatID, v.Chat.ID)).
+		Single(r.Context())
+	if errors.Is(err, ant.ErrNotFound) {
+		return v, Message{}, errNotFound
 	}
-	return v, m, serr.Wrap(err)
+	if err != nil {
+		return v, Message{}, serr.Wrap(err)
+	}
+	return v, *m, nil
+}
+
+// messageInChat reports whether message id is in chat chatID.
+func (a *app) messageInChat(ctx context.Context, id, chatID int64) (bool, error) {
+	ok, err := a.db.Messages.Where(ant.Eq(&Messages.ID, id), ant.Eq(&Messages.ChatID, chatID)).Exists(ctx)
+	return ok, serr.Wrap(err)
 }
 
 // editableMessage is chatMessage for a message the viewer may edit.
@@ -1378,7 +1375,8 @@ func (a *app) messageEditPost(w http.ResponseWriter, r *http.Request) error {
 	}
 	if body != m.Body {
 		m.Body, m.EditedAt = body, a.now().Unix()
-		err := a.q.MessageUpdateBody(ctx, MessageUpdateBodyParams{ID: m.ID, Body: m.Body, EditedAt: m.EditedAt})
+		_, err := a.db.Messages.Where(ant.Eq(&Messages.ID, m.ID)).Update(ctx,
+			ant.Set(&Messages.Body, m.Body), ant.Set(&Messages.EditedAt, m.EditedAt))
 		if err != nil {
 			return serr.Wrap(err)
 		}
@@ -1414,24 +1412,24 @@ func (a *app) afterEdit(ctx context.Context, chat Chat, msg Message) {
 // deletes: reactions and snoozes cascade.
 func (a *app) deleteMessage(ctx context.Context, chat Chat, msg Message) error {
 	cleanup, cleanupPreview := func() {}, func() {}
-	err := a.tx(ctx, func(q *Queries) error {
+	err := a.db.Tx(ctx, func(tx *AppDB) error {
 		// The preview's image is a file of its own.
 		var err error
-		if cleanupPreview, err = a.dropPreview(ctx, q, msg.ID); err != nil {
+		if cleanupPreview, err = a.dropPreview(ctx, tx, msg.ID); err != nil {
 			return err
 		}
 		// The message goes before its file: it holds the reference.
-		if err := q.MessageDelete(ctx, msg.ID); err != nil {
+		if err := tx.Messages.DeleteByID(ctx, msg.ID); err != nil {
 			return serr.Wrap(err)
 		}
 		if !msg.FileID.Valid {
 			return nil
 		}
-		f, err := q.FileByID(ctx, msg.FileID.Int64)
+		f, err := tx.Files.Find(ctx, msg.FileID.Int64)
 		if err != nil {
 			return serr.Wrap(err)
 		}
-		cleanup, err = a.deleteFile(ctx, q, f)
+		cleanup, err = a.deleteFile(ctx, tx, *f)
 		return err
 	})
 	if err != nil {
@@ -1468,41 +1466,22 @@ func emojiID(e string) string {
 	return strings.Join(parts, "-")
 }
 
-// reactionsFor loads the reactions of the given messages with one query and
-// groups them by message, each in palette order.
-func (a *app) reactionsFor(ctx context.Context, viewerID int64, rows []MessagesLatestRow) (map[int64][]reactionGroup, error) {
-	if len(rows) == 0 {
-		return nil, nil
-	}
-	ids := make([]int64, len(rows))
-	for i, row := range rows {
-		ids[i] = row.Message.ID
-	}
-	all, err := a.q.ReactionsForMessages(ctx, ids)
-	if err != nil {
-		return nil, serr.Wrap(err)
-	}
-	out := map[int64][]reactionGroup{}
-	for _, rr := range all {
+// reactionGroups groups the reactions of one message, loaded in the order
+// they were made, by emoji in palette order.
+func reactionGroups(viewerID int64, reactions []Reaction) []reactionGroup {
+	groups := make([]reactionGroup, len(reactionPalette))
+	for _, rr := range reactions {
 		i := slices.Index(reactionPalette, rr.Emoji)
 		if i < 0 {
 			continue // not offered any more
 		}
-		groups := out[rr.MessageID]
-		if groups == nil {
-			groups = make([]reactionGroup, len(reactionPalette))
-			out[rr.MessageID] = groups
-		}
 		groups[i].Emoji = rr.Emoji
-		groups[i].Users = append(groups[i].Users, rr.Username)
+		groups[i].Users = append(groups[i].Users, rr.User.Username)
 		if rr.UserID == viewerID {
 			groups[i].Mine = true
 		}
 	}
-	for id, groups := range out {
-		out[id] = slices.DeleteFunc(groups, func(rg reactionGroup) bool { return len(rg.Users) == 0 })
-	}
-	return out, nil
+	return slices.DeleteFunc(groups, func(rg reactionGroup) bool { return len(rg.Users) == 0 })
 }
 
 // reactionChips renders the reactions of a message. The div is always
@@ -1551,26 +1530,23 @@ func (a *app) chatReact(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return errNotFound
 	}
-	_, err = a.q.MessageInChat(ctx, MessageInChatParams{ID: msgID, ChatID: v.Chat.ID})
-	if errors.Is(err, sql.ErrNoRows) {
+	inChat, err := a.messageInChat(ctx, msgID, v.Chat.ID)
+	if err != nil {
+		return err
+	}
+	if !inChat {
 		return errNotFound
 	}
-	if err != nil {
-		return serr.Wrap(err)
-	}
-	err = a.tx(ctx, func(q *Queries) error {
-		n, err := q.ReactionDelete(ctx, ReactionDeleteParams{MessageID: msgID, UserID: v.User.ID, Emoji: emoji})
-		if err != nil {
+	err = a.db.Tx(ctx, func(tx *AppDB) error {
+		n, err := tx.Reactions.Where(ant.Eq(&Reactions.MessageID, msgID), ant.Eq(&Reactions.UserID, v.User.ID),
+			ant.Eq(&Reactions.Emoji, emoji)).Delete(ctx)
+		if err != nil || n > 0 {
 			return serr.Wrap(err)
 		}
-		if n > 0 {
-			return nil
-		}
-		return serr.Wrap(q.ReactionAdd(ctx, ReactionAddParams{
+		return serr.Wrap(tx.Reactions.Insert(ctx, &Reaction{
 			MessageID: msgID,
 			UserID:    v.User.ID,
 			Emoji:     emoji,
-			CreatedAt: a.now().Unix(),
 		}))
 	})
 	if err != nil {
