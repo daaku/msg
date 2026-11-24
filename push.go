@@ -228,40 +228,39 @@ type pushPayloadData struct {
 	URL string `json:"url"`
 }
 
-// pushSnippet describes a message in a notification: the start of its
-// text, or what kind of file it is.
-func (a *app) pushSnippet(ctx context.Context, msg Message) (string, error) {
-	if msg.FileID != nil {
-		f, err := a.db.Files.Find(ctx, *msg.FileID)
-		if err != nil {
-			return "", serr.Wrap(err)
-		}
-		return fileSnippet(f.Kind, f.Name), nil
+// withPushData loads what a notification shows about a message: its
+// chat, its author and its file.
+func withPushData(q *ant.Query[Message]) *ant.Query[Message] {
+	return q.IncludeOne(&Messages.Chat).IncludeOne(&Messages.User).IncludeOne(&Messages.File)
+}
+
+// pushSnippet describes a message loaded withPushData in a notification:
+// the start of its text, or what kind of file it is.
+func pushSnippet(msg *Message) string {
+	if f := msg.File; f != nil {
+		return fileSnippet(f.Kind, f.Name)
 	}
 	if utf8.RuneCountInString(msg.Body) <= pushSnippetLen {
-		return msg.Body, nil
+		return msg.Body
 	}
-	return string([]rune(msg.Body)[:pushSnippetLen]), nil
+	return string([]rune(msg.Body)[:pushSnippetLen])
 }
 
 // messagePayload is the notification for a new message.
-func (a *app) messagePayload(ctx context.Context, chat Chat, msg Message) ([]byte, error) {
-	author, err := a.db.Users.Find(ctx, msg.UserID)
+func (a *app) messagePayload(ctx context.Context, id int64) ([]byte, error) {
+	msg, err := a.db.Messages.Scope(withPushData).Find(ctx, id)
 	if err != nil {
 		return nil, serr.Wrap(err)
 	}
-	text, err := a.pushSnippet(ctx, msg)
-	if err != nil {
-		return nil, err
-	}
+	chat, author, text := msg.Chat, msg.User.Username, pushSnippet(msg)
 	p := pushPayload{
 		Title: chat.Name,
-		Body:  author.Username + ": " + text,
+		Body:  author + ": " + text,
 		Tag:   fmt.Sprintf("chat-%d", chat.ID),
 		Data:  pushPayloadData{URL: chatPath(chat.ID)},
 	}
 	if chat.IsDM {
-		p.Title, p.Body = author.Username, text
+		p.Title, p.Body = author, text
 	}
 	b, err := json.Marshal(p)
 	return b, serr.Wrap(err)
@@ -299,7 +298,7 @@ func (a *app) pushMessageNow(ctx context.Context, chat Chat, msg Message) error 
 	if len(subs) == 0 {
 		return nil
 	}
-	payload, err := a.messagePayload(ctx, chat, msg)
+	payload, err := a.messagePayload(ctx, msg.ID)
 	if err != nil {
 		return err
 	}
@@ -602,8 +601,10 @@ func (a *app) fireSnooze(ctx context.Context, s Snooze) error {
 		return nil
 	}
 	// Nothing is sent for a deleted message, or to a user who is no longer
-	// a member of its chat.
-	msg, err := a.db.Messages.Where(ant.Eq(&Messages.ID, s.MessageID),
+	// a member of its chat. ant v0.5.1 renders a relation filter nested in
+	// another one with clashing aliases, so this is an explicit subquery
+	// rather than HasOne(&Messages.Chat, Has(&Chats.Members, ...)).
+	msg, err := a.db.Messages.Scope(withPushData).Where(ant.Eq(&Messages.ID, s.MessageID),
 		ant.Exists(a.db.Members.Where(ant.EqCol(&Members.ChatID, &Messages.ChatID),
 			ant.Eq(&Members.UserID, s.UserID)))).
 		Single(ctx)
@@ -613,7 +614,7 @@ func (a *app) fireSnooze(ctx context.Context, s Snooze) error {
 	if err != nil {
 		return serr.Wrap(err)
 	}
-	payload, err := a.reminderPayload(ctx, s.UserID, *msg)
+	payload, err := a.reminderPayload(ctx, s.UserID, msg)
 	if err != nil {
 		return err
 	}
@@ -621,32 +622,17 @@ func (a *app) fireSnooze(ctx context.Context, s Snooze) error {
 	return nil
 }
 
-// reminderPayload is the notification for a snoozed message, titled with
-// the chat as the user sees it.
-func (a *app) reminderPayload(ctx context.Context, userID int64, msg Message) ([]byte, error) {
-	chat, err := a.db.Chats.Find(ctx, msg.ChatID)
-	if err != nil {
-		return nil, serr.Wrap(err)
-	}
-	viewer, err := a.db.Users.Find(ctx, userID)
-	if err != nil {
-		return nil, serr.Wrap(err)
-	}
-	title, err := a.chatName(ctx, *chat, viewer)
-	if err != nil {
-		return nil, err
-	}
-	author, err := a.db.Users.Find(ctx, msg.UserID)
-	if err != nil {
-		return nil, serr.Wrap(err)
-	}
-	text, err := a.pushSnippet(ctx, msg)
+// reminderPayload is the notification for a snoozed message loaded
+// withPushData, titled with the chat as the user sees it.
+func (a *app) reminderPayload(ctx context.Context, userID int64, msg *Message) ([]byte, error) {
+	chat := msg.Chat
+	title, err := a.chatName(ctx, *chat, &User{ID: userID})
 	if err != nil {
 		return nil, err
 	}
 	b, err := json.Marshal(pushPayload{
 		Title: "Reminder · " + title,
-		Body:  author.Username + ": " + text,
+		Body:  msg.User.Username + ": " + pushSnippet(msg),
 		Tag:   fmt.Sprintf("snooze-%d", msg.ID),
 		Data:  pushPayloadData{URL: fmt.Sprintf("%s?m=%d", chatPath(chat.ID), msg.ID)},
 	})

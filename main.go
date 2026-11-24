@@ -528,6 +528,7 @@ type Message struct {
 	CreatedAt ant.UnixTime
 	EditedAt  ant.UnixTime
 
+	Chat      *Chat
 	User      *User
 	File      *File
 	Preview   *Preview // a ready preview only, see Configure
