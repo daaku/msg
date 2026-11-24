@@ -657,13 +657,13 @@ func (a *app) chat(w http.ResponseWriter, r *http.Request) error {
 		return a.jumpToMessage(w, r, v, m)
 	}
 	n := pageSize(r.URL.Query().Get("n"))
-	inChat := a.db.Messages.Where(ant.Eq(&Messages.ChatID, v.Chat.ID))
-	rows, err := loadMessages(ctx, inChat.OrderByDesc(&Messages.ID).Limit(int(n)))
+	msgs := a.db.Messages.Scope(inChat(v.Chat.ID))
+	rows, err := loadMessages(ctx, msgs.OrderByDesc(&Messages.ID).Limit(int(n)))
 	if err != nil {
 		return err
 	}
 	slices.Reverse(rows)
-	total, err := inChat.Count(ctx)
+	total, err := msgs.Count(ctx)
 	if err != nil {
 		return serr.Wrap(err)
 	}
@@ -1316,7 +1316,7 @@ func (a *app) chatMessage(r *http.Request) (chatView, Message, error) {
 	if err != nil {
 		return v, Message{}, errNotFound
 	}
-	m, err := a.db.Messages.Where(ant.Eq(&Messages.ID, id), ant.Eq(&Messages.ChatID, v.Chat.ID)).
+	m, err := a.db.Messages.Scope(inChat(v.Chat.ID)).Where(ant.Eq(&Messages.ID, id)).
 		Single(r.Context())
 	if errors.Is(err, ant.ErrNotFound) {
 		return v, Message{}, errNotFound
@@ -1327,9 +1327,16 @@ func (a *app) chatMessage(r *http.Request) (chatView, Message, error) {
 	return v, *m, nil
 }
 
+// inChat narrows a query to the messages of one chat.
+func inChat(chatID int64) func(*ant.Query[Message]) *ant.Query[Message] {
+	return func(q *ant.Query[Message]) *ant.Query[Message] {
+		return q.Where(ant.Eq(&Messages.ChatID, chatID))
+	}
+}
+
 // messageInChat reports whether message id is in chat chatID.
 func (a *app) messageInChat(ctx context.Context, id, chatID int64) (bool, error) {
-	ok, err := a.db.Messages.Where(ant.Eq(&Messages.ID, id), ant.Eq(&Messages.ChatID, chatID)).Exists(ctx)
+	ok, err := a.db.Messages.Scope(inChat(chatID)).Where(ant.Eq(&Messages.ID, id)).Exists(ctx)
 	return ok, serr.Wrap(err)
 }
 
@@ -1527,11 +1534,11 @@ func (a *app) chatReact(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return errNotFound
 	}
-	inChat, err := a.messageInChat(ctx, msgID, v.Chat.ID)
+	found, err := a.messageInChat(ctx, msgID, v.Chat.ID)
 	if err != nil {
 		return err
 	}
-	if !inChat {
+	if !found {
 		return errNotFound
 	}
 	err = a.db.Tx(ctx, func(tx *AppDB) error {

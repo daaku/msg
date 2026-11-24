@@ -646,12 +646,12 @@ func (a *app) jumpToMessage(w http.ResponseWriter, r *http.Request, v chatView, 
 	to := chatPath(v.Chat.ID)
 	id, err := strconv.ParseInt(mid, 10, 64)
 	if err == nil {
-		inChat, err := a.messageInChat(ctx, id, v.Chat.ID)
+		found, err := a.messageInChat(ctx, id, v.Chat.ID)
 		if err != nil {
 			return err
 		}
-		if inChat {
-			n, err := a.db.Messages.Where(ant.Eq(&Messages.ChatID, v.Chat.ID), ant.Gte(&Messages.ID, id)).
+		if found {
+			n, err := a.db.Messages.Scope(inChat(v.Chat.ID)).Where(ant.Gte(&Messages.ID, id)).
 				Count(ctx)
 			if err != nil {
 				return serr.Wrap(err)

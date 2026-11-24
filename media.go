@@ -579,7 +579,7 @@ func (a *app) chatMedia(w http.ResponseWriter, r *http.Request) error {
 	}
 	// one more than a chat page can hold, to notice a longer range
 	rows, err := loadMessages(ctx, a.db.Messages.
-		Where(ant.Eq(&Messages.ChatID, v.Chat.ID), ant.Between(&Messages.ID, from, to)).
+		Scope(inChat(v.Chat.ID)).Where(ant.Between(&Messages.ID, from, to)).
 		OrderBy(&Messages.ID).Limit(maxPage+1))
 	if err != nil {
 		return err

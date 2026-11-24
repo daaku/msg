@@ -546,7 +546,7 @@ func TestSend(t *testing.T) {
 	w := ta.post(send, url.Values{"body": {"  hello\r\nthere  "}}, ta.as(bob))
 	ensure.DeepEqual(t, w.Code, http.StatusSeeOther)
 	ensure.DeepEqual(t, w.Header().Get("Location"), chatPath(chat.ID))
-	rows, err := ta.app.db.Messages.Where(ant.Eq(&Messages.ChatID, chat.ID)).IncludeOne(&Messages.User).All(ctx)
+	rows, err := ta.app.db.Messages.Scope(inChat(chat.ID)).IncludeOne(&Messages.User).All(ctx)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(rows), 1)
 	m := rows[0]
@@ -1243,7 +1243,7 @@ func TestReactionsConstantQueries(t *testing.T) {
 	ensure.DeepEqual(t, strings.Count(body, `class="chip"`), 1+99)
 
 	// every message has its reactions div and picker exactly once
-	ids, err := ant.Pluck(t.Context(), ta.app.db.Messages.Where(ant.Eq(&Messages.ChatID, chat.ID)), &Messages.ID)
+	ids, err := ant.Pluck(t.Context(), ta.app.db.Messages.Scope(inChat(chat.ID)), &Messages.ID)
 	ensure.Nil(t, err)
 	ensure.DeepEqual(t, len(ids), 100)
 	for _, mid := range ids {
