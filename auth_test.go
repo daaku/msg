@@ -1368,3 +1368,42 @@ func TestProfilePictureShown(t *testing.T) {
 	ensure.StringContains(t, page, img(" avatar-s"))
 	ensure.StringContains(t, page, initial(carol, " avatar-s"))
 }
+
+func TestSettingsDesktopToken(t *testing.T) {
+	ta := newTestApp(t)
+	bob := ta.newUser("bob")
+	tokenRe := regexp.MustCompile(`id="desktop-token" type="text" readonly data-copy="" value="([^"]+)"`)
+
+	// the settings page offers a token but shows none
+	body := ta.get(pSettings, ta.as(bob)).Body.String()
+	ensure.StringContains(t, body, `<section id="desktop"`)
+	ensure.StringContains(t, body, `action="/settings/desktop"`)
+	ensure.False(t, tokenRe.MatchString(body))
+
+	// signed out
+	w := ta.post(pSettingsDesktop, nil)
+	ensure.DeepEqual(t, w.Code, http.StatusUnauthorized)
+
+	// the post answers with the page itself, holding the token once
+	w = ta.post(pSettingsDesktop, nil, ta.as(bob))
+	ensure.DeepEqual(t, w.Code, http.StatusOK)
+	ensure.DeepEqual(t, w.Header().Get("Cache-Control"), "no-store")
+	m := tokenRe.FindStringSubmatch(w.Body.String())
+	ensure.True(t, m != nil, w.Body.String())
+	ensure.StringDoesNotContain(t, w.Body.String(), `action="/settings/desktop"`)
+	ensure.True(t, findCookie(w, "s") == nil) // the browser's own session is left alone
+
+	// the token is a session cookie: a client that sends it is bob
+	asToken := withHeader("Cookie", "s="+m[1])
+	page := ta.get(pSettings, asToken)
+	ensure.DeepEqual(t, page.Code, http.StatusOK)
+	ensure.StringContains(t, page.Body.String(), "<dd>bob</dd>")
+
+	// it is bound to the passkey bob's browser signed in with
+	_, _, _ = ta.addPasskey(bob)
+	ensure.DeepEqual(t, ta.post(pPasskeyDelete, url.Values{"id": {strconv.FormatInt(bob.credID, 10)}},
+		ta.as(bob)).Code, http.StatusSeeOther)
+	gone := ta.get(pSettings, asToken)
+	ensure.DeepEqual(t, gone.Code, http.StatusSeeOther)
+	ensure.DeepEqual(t, gone.Header().Get("Location"), pSignIn)
+}

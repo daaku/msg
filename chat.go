@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -229,11 +230,105 @@ func (a *app) notifyChat(ctx context.Context, chatID int64) {
 
 const eventsHeartbeat = 25 * time.Second
 
+// maxReplay is how many messages a stream with messages=1 replays at most
+// after a reconnect: the newest of those missed.
+const maxReplay = 100
+
+// eventMessage is a new message as a stream with messages=1 sends it.
+type eventMessage struct {
+	ID         int64     `json:"id"`
+	Sent       time.Time `json:"sent"`
+	Text       string    `json:"text"`
+	Attachment string    `json:"attachment,omitempty"` // "image", "video" or "file"
+	Mine       bool      `json:"mine"`                 // sent by the stream's user
+	Chat       eventChat `json:"chat"`
+	Sender     eventUser `json:"sender"`
+}
+
+type eventChat struct {
+	ID    int64  `json:"id"`
+	DM    bool   `json:"dm"`
+	Name  string `json:"name"` // "" for a direct message
+	URL   string `json:"url"`
+	Image string `json:"image,omitempty"` // a group's icon
+}
+
+type eventUser struct {
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Image string `json:"image,omitempty"`
+}
+
+func newEventMessage(m *Message, viewerID int64) eventMessage {
+	e := eventMessage{
+		ID:     m.ID,
+		Sent:   m.CreatedAt.UTC(),
+		Text:   m.Body,
+		Mine:   m.UserID == viewerID,
+		Chat:   eventChat{ID: m.Chat.ID, DM: m.Chat.IsDM, Name: m.Chat.Name, URL: chatPath(m.Chat.ID)},
+		Sender: eventUser{ID: m.User.ID, Name: m.User.Username},
+	}
+	if m.Chat.Icon != "" {
+		e.Chat.Image = chatIconPath(*m.Chat)
+	}
+	if m.User.Avatar != "" {
+		e.Sender.Image = avatarPath(m.User.ID, m.User.Avatar)
+	}
+	if f := m.File; f != nil {
+		e.Attachment = map[fileKind]string{kindImage: "image", kindVideo: "video"}[f.Kind]
+		if e.Attachment == "" {
+			e.Attachment = "file"
+		}
+	}
+	return e
+}
+
+// messagesAfter returns the newest messages after id, at most limit of
+// them, oldest first, in the chats the user is a member of, loaded with
+// their chat, author and file.
+func (a *app) messagesAfter(ctx context.Context, userID, id int64, limit int) ([]*Message, error) {
+	chats, err := ant.Pluck(ctx, a.db.Members.Where(ant.Eq(&Members.UserID, userID)), &Members.ChatID)
+	if err != nil || len(chats) == 0 {
+		return nil, serr.Wrap(err)
+	}
+	rows, err := a.db.Messages.Where(ant.Gt(&Messages.ID, id), ant.In(&Messages.ChatID, chats...)).
+		IncludeOne(&Messages.Chat).IncludeOne(&Messages.User).IncludeOne(&Messages.File).
+		OrderByDesc(&Messages.ID).Limit(limit).All(ctx)
+	slices.Reverse(rows)
+	return rows, serr.Wrap(err)
+}
+
+// lastMessageID is the id of the newest message of all, 0 for none.
+func (a *app) lastMessageID(ctx context.Context) (int64, error) {
+	ids, err := ant.Pluck(ctx, a.db.Messages.OrderByDesc(&Messages.ID).Limit(1), &Messages.ID)
+	if err != nil || len(ids) == 0 {
+		return 0, serr.Wrap(err)
+	}
+	return ids[0], nil
+}
+
 // events is the Server-Sent Events stream. The optional chat parameter says
 // which chat the tab is showing.
+//
+// With messages=1, as the desktop app asks, it sends no pings but each new
+// message in the user's chats, their own included, as JSON with the
+// message's id as the event id. A reconnect that gives the last of those
+// ids in Last-Event-ID gets the ones it missed first.
 func (a *app) events(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	user := userFrom(ctx)
+	withMessages := r.URL.Query().Get("messages") == "1"
+	var cursor int64 // the newest message id sent, with messages=1
+	if withMessages {
+		var err error
+		if cursor, err = strconv.ParseInt(r.Header.Get("Last-Event-ID"), 10, 64); err != nil {
+			// A new client starts from now. This is read before the
+			// subscription, and the first flush below covers the gap.
+			if cursor, err = a.lastMessageID(ctx); err != nil {
+				return err
+			}
+		}
+	}
 	var chatID int64
 	if s := r.URL.Query().Get("chat"); s != "" {
 		id, err := strconv.ParseInt(s, 10, 64)
@@ -258,10 +353,35 @@ func (a *app) events(w http.ResponseWriter, r *http.Request) error {
 		return rc.Flush() == nil
 	}
 
+	// flush sends the messages after the cursor.
+	flush := func() bool {
+		rows, err := a.messagesAfter(ctx, user.ID, cursor, maxReplay)
+		if err != nil {
+			if ctx.Err() == nil {
+				fmt.Fprintf(os.Stderr, "events %d: %+v\n", user.ID, err)
+			}
+			return false
+		}
+		for _, m := range rows {
+			b, err := json.Marshal(newEventMessage(m, user.ID))
+			if err != nil {
+				return false
+			}
+			if !send(fmt.Sprintf("id: %d\ndata: %s\n\n", m.ID, b)) {
+				return false
+			}
+			cursor = m.ID
+		}
+		return true
+	}
+
 	// Subscribe before the first byte, so nothing after it can be missed.
 	c, cancel := a.hub.subscribe(user.ID, chatID)
 	defer cancel()
 	if !send("retry: 3000\n\n") {
+		return nil
+	}
+	if withMessages && !flush() {
 		return nil
 	}
 	tick := time.NewTicker(eventsHeartbeat)
@@ -269,7 +389,11 @@ func (a *app) events(w http.ResponseWriter, r *http.Request) error {
 	for {
 		select {
 		case <-c.ch:
-			if !send("data: 1\n\n") {
+			if withMessages {
+				if !flush() {
+					return nil
+				}
+			} else if !send("data: 1\n\n") {
 				return nil
 			}
 		case <-tick.C:

@@ -97,6 +97,7 @@ media.go       upload endpoints, /f/ redirects, conversion worker, link previews
 push.go        push subscriptions, sending, opened tracking, snooze reminders
 stats.go       stats helpers and stats pages
 *_test.go      one test file per source file, plus main_test.go for the harness
+cmd/msgd/      the desktop notifier: a separate Go module, see below
 db/NNN_*.sql   migrations (sqlmig)
 assets/        main.css, main.js, sw.js, paxi.js, icons, robots.txt
 .hooks/        pre-commit (fast) and pre-push (full) checks
@@ -165,6 +166,8 @@ generated on first start and stored in the `config` table.
 - A resource the user may not see is answered with 404, not 403, so its
   existence is not revealed.
 - Every state change is a `POST` from an HTML form followed by a 303 redirect
+  (the one exception is `POST /settings/desktop`, which stores nothing and
+  answers with the settings page showing the token it made)
   (post, redirect, get). Feedback uses the flash cookie as in bento.
 - CSRF protection is `http.NewCrossOriginProtection()` wrapping the whole mux.
   Never add a state changing `GET`.
@@ -247,6 +250,24 @@ generated on first start and stored in the `config` table.
   because every difference becomes a DOM mutation on every refresh.
 - Media URLs in markup are always `/f/{fileID}/{variant}`, never signed S3
   URLs, so that they do not change between renders.
+
+### The desktop app
+
+- `cmd/msgd` opens `GET /events?messages=1`. That stream sends no pings but
+  each new message in the user's chats (their own too, with `mine`) as an
+  `eventMessage` in JSON, with the message id as the SSE event id. A
+  reconnect sending `Last-Event-ID` first gets what it missed, at most
+  `maxReplay`. The fields of `eventMessage` are msgd's API: add to them,
+  do not change them. Without `messages=1` the stream is as above.
+- Only members are sent a chat's messages, as with push: an admin viewing a
+  group is not.
+- msgd signs in with a token from the Desktop app section of `/settings`:
+  `a.sessionToken`, a session cookie value bound to the passkey of the
+  browser that made it. Nothing is stored for it. msgd sends it as the `s`
+  cookie and keeps the renewed one the server sets.
+- `cmd/msgd` has its own `go.mod`, so `./...`, the hooks and CI do not see
+  it. It is built with MyGo (`github.com/egoist/mygo`), like
+  `~/workspace/priority-notify`.
 
 ### Media
 

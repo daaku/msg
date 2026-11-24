@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -91,12 +93,15 @@ type stream struct {
 	cancel context.CancelFunc
 }
 
-func (ta *testApp) stream(srv *httptest.Server, u *testUser, query string) *stream {
+func (ta *testApp) stream(srv *httptest.Server, u *testUser, query string, opts ...reqOpt) *stream {
 	ta.t.Helper()
 	ctx, cancel := context.WithCancel(ta.t.Context())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+pEvents+query, nil)
 	ensure.Nil(ta.t, err)
 	req.AddCookie(u.cookie)
+	for _, o := range opts {
+		o(req)
+	}
 	res, err := http.DefaultClient.Do(req)
 	ensure.Nil(ta.t, err)
 	ensure.DeepEqual(ta.t, res.StatusCode, http.StatusOK)
@@ -251,4 +256,97 @@ func TestLivePages(t *testing.T) {
 	}
 	ensure.StringContains(t, ta.get(chatPath(chat.ID), ta.as(alice)).Body.String(),
 		`data-chat="`+idStr(chat.ID)+`"`)
+}
+
+// message reads the next event of a stream with messages=1.
+func (s *stream) message() eventMessage {
+	s.t.Helper()
+	id := s.next()
+	data, ok := strings.CutPrefix(s.next(), "data: ")
+	ensure.True(s.t, ok, data)
+	var m eventMessage
+	ensure.Nil(s.t, json.Unmarshal([]byte(data), &m))
+	ensure.DeepEqual(s.t, id, fmt.Sprintf("id: %d", m.ID))
+	return m
+}
+
+func TestEventsMessages(t *testing.T) {
+	ta := newTestApp(t)
+	alice := ta.newUser("alice", "group")
+	bob := ta.newUser("bob")
+	carol := ta.newUser("carol")
+	boss := ta.newUser("boss", "admin")
+	group := ta.newChat(alice, "Team", bob)
+	dm := ta.newDM(alice, bob)
+	old := ta.newMessage(group, alice, "before the stream")
+	ensure.DeepEqual(t, ta.post(pSettingsAvatar, url.Values{"image": {jpegDataURL(t, 64, 64)}}, ta.as(alice)).Code,
+		http.StatusSeeOther)
+	aliceRow, err := ta.app.db.Users.Find(t.Context(), alice.ID)
+	ensure.Nil(t, err)
+	srv := ta.server()
+
+	bobMsgs := ta.stream(srv, bob, "?messages=1")
+	bobWeb := ta.stream(srv, bob, "")
+	carolMsgs := ta.stream(srv, carol, "?messages=1")
+	bossMsgs := ta.stream(srv, boss, "?messages=1") // admins see groups, but are not sent them
+	bobMsgs.quiet()                                 // nothing from before the stream
+
+	hi := ta.newMessage(group, alice, "hi bob")
+	m := bobMsgs.message()
+	// The same line is in cmd/msgd's tests: change both or neither.
+	b, err := json.Marshal(m)
+	ensure.Nil(t, err)
+	ensure.DeepEqual(t, string(b), `{"id":2,"sent":"2026-01-02T03:04:05Z","text":"hi bob","mine":false,`+
+		`"chat":{"id":1,"dm":false,"name":"Team","url":"/c/1"},`+
+		`"sender":{"id":1,"name":"alice","image":"/avatar/1/9d6446efa8185a71"}}`)
+	ensure.DeepEqual(t, m, eventMessage{
+		ID: hi.ID, Sent: testNow.UTC(), Text: "hi bob",
+		Chat:   eventChat{ID: group.ID, Name: "Team", URL: chatPath(group.ID)},
+		Sender: eventUser{ID: alice.ID, Name: "alice", Image: avatarPath(alice.ID, aliceRow.Avatar)},
+	})
+	ensure.DeepEqual(t, bobWeb.next(), "data: 1") // the browser's stream is as before
+	carolMsgs.quiet()
+	bossMsgs.quiet()
+
+	// a direct message, and the user's own messages, which are marked
+	ta.newMessage(dm, alice, "psst")
+	m = bobMsgs.message()
+	ensure.True(t, m.Chat.DM && m.Chat.Name == "" && !m.Mine && m.Text == "psst", m)
+	ta.newMessage(dm, bob, "yes?")
+	m = bobMsgs.message()
+	ensure.True(t, m.Mine && m.Sender.ID == bob.ID, m)
+
+	// what is not a new message sends nothing
+	ensure.DeepEqual(t, ta.post(chatPath(group.ID)+"/react",
+		url.Values{"message": {idStr(hi.ID)}, "emoji": {"👍"}}, ta.as(alice)).Code, http.StatusSeeOther)
+	ta.post(chatPath(group.ID)+"/rename", url.Values{"name": {"Crew"}}, ta.as(alice))
+	bobMsgs.quiet()
+
+	// attachments say what they are
+	pic := ta.mediaMessage(alice, group, kindImage)
+	ta.app.notifyChat(t.Context(), group.ID) // as the upload's afterMessage does
+	m = bobMsgs.message()
+	ensure.True(t, m.ID == pic.ID && m.Attachment == "image" && m.Chat.Name == "Crew", m)
+
+	// a reconnect replays what it missed, and only what it may see
+	bobMsgs.cancel()
+	bobMsgs.closed()
+	missed := []Message{ta.newMessage(group, alice, "one"), ta.newMessage(dm, alice, "two")}
+	ta.newMessage(ta.newChat(carol, "Elsewhere", carol), carol, "not for bob")
+	again := ta.stream(srv, bob, "?messages=1", withHeader("Last-Event-ID", idStr(pic.ID)))
+	for _, want := range missed {
+		ensure.DeepEqual(t, again.message().ID, want.ID)
+	}
+	again.quiet()
+
+	// from the start, at most maxReplay, the newest
+	all := ta.stream(srv, bob, "?messages=1", withHeader("Last-Event-ID", "0"))
+	ensure.DeepEqual(t, all.message().ID, old.ID)
+	all.cancel()
+	var last Message
+	for i := range maxReplay {
+		last = ta.newMessage(dm, alice, fmt.Sprint(i))
+	}
+	capped := ta.stream(srv, bob, "?messages=1", withHeader("Last-Event-ID", "0"))
+	ensure.DeepEqual(t, capped.message().ID, last.ID-maxReplay+1)
 }

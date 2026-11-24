@@ -1,0 +1,16 @@
+[Unit]
+Description=Show new msg messages in a window that stays
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Sign in once first: msgd login https://msg.example.com
+ExecStart=/usr/bin/msgd
+Restart=on-failure
+RestartSec=2s
+# msgd exits 2 when it has never signed in; a restart would not help.
+RestartPreventExitStatus=2
+
+[Install]
+WantedBy=graphical-session.target

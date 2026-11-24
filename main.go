@@ -72,6 +72,7 @@ const (
 	pSettings           = "/settings"
 	pSettingsAvatar     = "/settings/avatar"
 	pSettingsAvatarDel  = "/settings/avatar/remove"
+	pSettingsDesktop    = "/settings/desktop"
 	pSettingsLink       = "/settings/link"
 	pSettingsLinkRevoke = "/settings/link/revoke"
 	pSignIn             = "/sign-in"
@@ -1029,6 +1030,7 @@ func (a *app) handler() http.Handler {
 	handle("GET "+pAvatar+"{id}/{name}", a.wrap(accUser, a.avatarImage))
 	handle("POST "+pSettingsLink, a.wrap(accUser, a.settingsLink))
 	handle("POST "+pSettingsLinkRevoke, a.wrap(accUser, a.settingsLinkRevoke))
+	handle("POST "+pSettingsDesktop, a.wrap(accUser, a.settingsDesktopPost))
 	handle("GET "+pPasskeyOptions, a.wrap(accUser, a.passkeyOptions))
 	handle("POST "+pPasskeyCreate, a.wrap(accUser, a.passkeyCreate))
 	handle("POST "+pPasskeyDelete, a.wrap(accUser, a.passkeyDelete))

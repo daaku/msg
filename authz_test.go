@@ -310,7 +310,8 @@ func TestAuthorisationMatrix(t *testing.T) {
 		}},
 
 		// settings: your own things only
-		"POST /settings/link": {allowed: signedIn, req: m.post(pSettingsLink)},
+		"POST /settings/link":    {allowed: signedIn, req: m.post(pSettingsLink)},
+		"POST /settings/desktop": {allowed: signedIn, req: m.post(pSettingsDesktop)},
 		"POST /settings/link/revoke": {allowed: roles(rMember), req: func(role) *http.Request {
 			return m.form(http.MethodPost, pSettingsLinkRevoke, "id", idStr(m.invite(member, &member.User).ID))
 		}},

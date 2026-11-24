@@ -222,6 +222,17 @@ type session struct {
 	IssuedAt     int64
 }
 
+// sessionToken is the value of a new session cookie, for a client that
+// sends the cookie itself, as the desktop app does. Like the cookie it
+// expires after sessionMaxAge unless renewed.
+func (a *app) sessionToken(userID, credentialID int64) (string, error) {
+	s := session{UserID: userID, CredentialID: credentialID, IssuedAt: a.now().Unix()}
+	// sookie.Set, which makes the browser's cookie, counts the expiry from
+	// time.Now as well.
+	tok, err := sookie.Seal(a.secret("session"), time.Now().Add(sessionMaxAge), s)
+	return tok, serr.Wrap(err)
+}
+
 func (a *app) setSession(w http.ResponseWriter, userID, credentialID int64) error {
 	s := session{UserID: userID, CredentialID: credentialID, IssuedAt: a.now().Unix()}
 	return serr.Wrap(sookie.Set(a.secret("session"), w, s, a.cookie("s", sessionMaxAge)))
@@ -679,7 +690,7 @@ type settingsSection func(r *http.Request, u *User) (g.Node, error)
 // settingsSections are the sections of the settings page, in order. Later
 // features append to this list.
 func (a *app) settingsSections() []settingsSection {
-	return []settingsSection{a.settingsPicture, a.settingsPasskeys, a.settingsDevices, a.settingsNotifications, a.settingsStats}
+	return []settingsSection{a.settingsPicture, a.settingsPasskeys, a.settingsDevices, a.settingsDesktop, a.settingsNotifications, a.settingsStats}
 }
 
 func (a *app) settings(w http.ResponseWriter, r *http.Request) error {
@@ -865,6 +876,42 @@ func (a *app) settingsDevices(r *http.Request, u *User) (g.Node, error) {
 			h.Button(h.Class("btn secondary"), icon("plus"), h.Span(g.Text("Create link")))),
 		a.linkList(links, pSettingsLinkRevoke),
 	), nil
+}
+
+// desktop app
+
+type desktopTokenKey struct{}
+
+// settingsDesktop lets the user sign in the desktop app (cmd/msgd). The
+// token is a session cookie of its own, bound to the passkey this browser
+// signed in with. Nothing is stored, so it is shown only in the response to
+// the post that made it.
+func (a *app) settingsDesktop(r *http.Request, u *User) (g.Node, error) {
+	tok, _ := r.Context().Value(desktopTokenKey{}).(string)
+	return h.Section(h.ID("desktop"), h.Class("stack"),
+		h.H2(g.Text("Desktop app")),
+		h.P(h.Class("muted"), g.Text("Create a sign in token and paste it into msgd login. "+
+			"It signs in with this device's passkey: deleting that passkey signs the desktop app out.")),
+		g.If(tok == "", h.Form(h.Method("post"), h.Action(pSettingsDesktop),
+			h.Button(h.Class("btn secondary"), icon("plus"), h.Span(g.Text("Create token"))))),
+		g.If(tok != "", g.Group{
+			h.Input(h.ID("desktop-token"), h.Type("text"), h.ReadOnly(), h.Data("copy", ""),
+				h.Value(tok), h.Aria("label", "Token")),
+			h.P(h.Class("muted"), g.Text("Copy it now. It is not shown again.")),
+		}),
+	), nil
+}
+
+// settingsDesktopPost answers with the settings page holding a new token,
+// rather than redirecting: the token is kept nowhere for a later GET to
+// show.
+func (a *app) settingsDesktopPost(w http.ResponseWriter, r *http.Request) error {
+	ctx := r.Context()
+	tok, err := a.sessionToken(userFrom(ctx).ID, credentialFrom(ctx))
+	if err != nil {
+		return err
+	}
+	return a.settings(w, r.WithContext(context.WithValue(ctx, desktopTokenKey{}, tok)))
 }
 
 func (a *app) passkeyOptions(w http.ResponseWriter, r *http.Request) error {

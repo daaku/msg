@@ -1,0 +1,20 @@
+importpath=github.com/daaku/msg/cmd/msgd
+pkgname=$(basename "$importpath")
+pkgver=$(git rev-list --count HEAD)
+pkgrel=1
+pkgdesc='show new msg messages in a window that stays until opened or dismissed'
+arch=('x86_64' 'aarch64')
+url="https://github.com/daaku/msg"
+depends=('gtk3' 'gtk-layer-shell')
+makedepends=('go')
+
+build() {
+  cd ..
+  CGO_ENABLED=0 go build -trimpath -o msgd .
+}
+
+package() {
+  cd ..
+  install -Dm755 msgd "$pkgdir/usr/bin/msgd"
+  install -Dm644 systemd/msgd.service "$pkgdir/usr/lib/systemd/user/msgd.service"
+}
