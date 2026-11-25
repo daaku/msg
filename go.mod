@@ -18,7 +18,7 @@ require (
 	github.com/skudra-go/ant v0.5.1
 	golang.org/x/net v0.63.0
 	maragu.dev/gomponents v1.4.0
-	modernc.org/sqlite v1.62.0
+	modernc.org/sqlite v1.63.0
 )
 
 require (
